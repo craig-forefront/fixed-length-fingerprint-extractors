@@ -9,6 +9,8 @@ RUN dnf update -y && \
     python3 \
     python3-pip \
     python3-devel \
+    vim \
+    sudo \
     gcc \
     gcc-c++ \
     dnf-plugins-core \
