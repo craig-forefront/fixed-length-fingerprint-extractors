@@ -39,10 +39,12 @@ class DeepPrintExtractor:
         fingerprints: Dataset,
         minutia_maps: Dataset,
         labels: Dataset,
-        validation_fingerprints: Dataset,
-        validation_benchmark: VerificationBenchmark,
+        validation_fingerprints: Dataset | None,
+        validation_benchmark: VerificationBenchmark | None,
         num_epochs: int,
         out_dir: str,
+        patience: int = 0,
+        use_amp: bool = True,
     ) -> None:
         if not self.training_with_minutia_map:
             minutia_maps = Dataset(ConstantDataLoader((torch.tensor([]), 0.0)), fingerprints.ids)
@@ -56,6 +58,8 @@ class DeepPrintExtractor:
             validation_benchmark=validation_benchmark,
             num_epochs=num_epochs,
             out_dir=out_dir,
+            patience=patience,
+            use_amp=use_amp,
         )
 
     def extract(self, dataset: Dataset) -> tuple[EmbeddingLoader, EmbeddingLoader]:

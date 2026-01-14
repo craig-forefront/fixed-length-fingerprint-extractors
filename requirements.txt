@@ -1,18 +1,20 @@
-# Local package
+# Local package (editable install)
 -e .
 
-# external requirements
-black
-jupyter
+# Core dependencies (also in pyproject.toml)
 matplotlib
 numpy
 opencv-python
-opencv-python
-seaborn
 scipy
 scikit-learn
-tikzplotlib
-torch
-torchvision
+torch>=2.9.0
+torchvision>=0.20.0
 torchmetrics
 tqdm
+
+# Development dependencies
+black
+jupyter
+pytest
+seaborn
+tikzplotlib

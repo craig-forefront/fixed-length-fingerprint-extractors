@@ -5,7 +5,7 @@ import torch
 import cv2
 import numpy as np
 
-from flx.data.transformed_dataset import TransformedImageLoader
+from flx.data.transformed_image_loader import TransformedImageLoader
 from flx.data.dataset import Identifier, IdentifierSet
 from flx.data.label_index import LabelIndex
 from flx.data.embedding_loader import (

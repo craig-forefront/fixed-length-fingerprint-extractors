@@ -1,4 +1,4 @@
-from abc import abstractstaticmethod
+from abc import abstractmethod
 
 # import wsq  # needed for loading nist sd 14 dataset
 import torch
@@ -25,15 +25,18 @@ class ImageLoader(DataLoader):
     def get(self, identifier: Identifier) -> torch.Tensor:
         return self._load_image(self._files.get(identifier))
 
-    @abstractstaticmethod
+    @staticmethod
+    @abstractmethod
     def _extension() -> str:
         pass
 
-    @abstractstaticmethod
+    @staticmethod
+    @abstractmethod
     def _file_to_id_fun(subdir: str, filename: str) -> Identifier:
         pass
 
-    @abstractstaticmethod
+    @staticmethod
+    @abstractmethod
     def _load_image(filepath: str) -> torch.Tensor:
         pass
 

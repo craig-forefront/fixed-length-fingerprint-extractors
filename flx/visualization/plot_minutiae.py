@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import torch
-from typing import List, Tuple
 
 from flx.visualization.show_with_opencv import (
     _tensor_to_2Dnumpy_array,
