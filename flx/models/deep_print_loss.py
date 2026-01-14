@@ -48,8 +48,8 @@ class _DeepPrint_Embedding_Loss(nn.Module):
     ) -> torch.Tensor:
         crossent_loss = self.crossent_loss_fun(logits, labels)
         center_loss = self.center_loss_fun(embeddings, labels)
-        self.crossent_loss_sum += float(crossent_loss) * W_CROSS_ENTROPY
-        self.center_loss_sum += float(center_loss) * W_CENTER_LOSS
+        self.crossent_loss_sum += crossent_loss.detach().item() * W_CROSS_ENTROPY
+        self.center_loss_sum += center_loss.detach().item() * W_CENTER_LOSS
         self.n_datapoints += labels.shape[0]
         return W_CROSS_ENTROPY * crossent_loss + W_CENTER_LOSS * center_loss
 
@@ -131,7 +131,7 @@ class DeepPrintLoss_Minu(nn.Module):
         mm_loss = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
-        self.minu_map_loss_sum += W_MINUTIA_MAP_LOSS * float(mm_loss)
+        self.minu_map_loss_sum += W_MINUTIA_MAP_LOSS * mm_loss.detach().item()
         return minutia_loss + W_MINUTIA_MAP_LOSS * mm_loss
 
     def get_recorded_loss(self) -> dict:
@@ -194,7 +194,7 @@ class DeepPrintLoss_TexMinu(nn.Module):
         mm_loss = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
-        self.minu_map_loss_sum += W_MINUTIA_MAP_LOSS * float(mm_loss)
+        self.minu_map_loss_sum += W_MINUTIA_MAP_LOSS * mm_loss.detach().item()
         return texture_loss + minutia_loss + W_MINUTIA_MAP_LOSS * mm_loss
 
     def get_recorded_loss(self) -> dict:

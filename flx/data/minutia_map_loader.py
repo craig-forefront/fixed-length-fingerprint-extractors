@@ -109,7 +109,7 @@ class MCYTOpticalMinutiaMapLoader(MinutiaMapLoader):
             _, person, finger, impression = filename.split("_")
             # 12 impressions per finger
             subject = (10 * int(person)) + int(finger)
-            return Identifier(subject, int(impression), finger=int(finger))
+            return Identifier(subject, int(impression))
 
         self._files: FileIndex = FileIndex(root_dir, ".mnt", file_to_id_fun)
 
@@ -143,7 +143,7 @@ class MCYTCapacitiveMinutiaMapLoader(MinutiaMapLoader):
             _, person, finger, impression = filename.split("_")
             # 12 impressions per finger
             subject = (10 * int(person)) + int(finger)
-            return Identifier(subject, int(impression), finger=int(finger))
+            return Identifier(subject, int(impression))
 
         self._files: FileIndex = FileIndex(root_dir, ".mnt", file_to_id_fun)
 

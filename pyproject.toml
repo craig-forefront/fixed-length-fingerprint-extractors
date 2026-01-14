@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fingerprint-flx"
+version = "1.0.0"
+description = "Fixed-length fingerprint feature extractors using DeepPrint architecture"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+    "scipy",
+    "scikit-learn",
+    "torch>=2.9.0",
+    "torchvision>=0.20.0",
+    "torchmetrics",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "jupyter",
+    "pytest",
+    "seaborn",
+    "tikzplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flx*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

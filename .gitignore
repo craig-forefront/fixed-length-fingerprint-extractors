@@ -86,10 +86,62 @@ data/*
 data/fingerprints/*
 !data/fingerprints/SFingev1Example
 !data/fingerprints/SFingev2Example
-/models/
 
+# Model directories and checkpoints
+/models/
+/model/
+/trained-model/
+/trained-models/
+example-model/
+example-model-*/
+*-model/
+*.pyt
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.pb
+
+# Training outputs and logs
+log.json
+*.log
+training_log*.json
+checkpoints/
+checkpoint_*/
+
+# Embeddings and extracted features
+embeddings/
+*.npz
+*.npy
+features/
+
+# Pre-trained model downloads
+pretrained-models/
+pretrained_models/
+downloads/
+*.tar.gz
+*.zip
+airgap-packages/
+flx-airgap-bundle/
+airgap-bundle*/
+
+# Large data files (except example/test datasets)
+*.mnt
+*.ist
+*.wsq
+!notebooks/example-dataset/**/*.ist
+!notebooks/example-dataset/**/*.mnt
+!tests/data/**/*.ist
+!tests/data/**/*.mnt
+
+# Notebook outputs
 notebooks/example-model/*
+notebooks/example-model-*/
 notebooks/DET_curve*
+*.ipynb_checkpoints
 
 # Mac OS-specific storage files
 .DS_Store
