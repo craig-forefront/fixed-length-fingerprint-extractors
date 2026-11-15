@@ -34,6 +34,7 @@ class _DeepPrint_Embedding_Loss(nn.Module):
     def reset_recorded_loss(self) -> None:
         self.crossent_loss_sum = 0
         self.center_loss_sum = 0
+        self.n_datapoints = 0
 
     def get_recorded_loss(self) -> dict:
         if self.n_datapoints == 0:
@@ -165,11 +166,11 @@ class DeepPrintLoss_TexMinu(nn.Module):
         super().__init__()
         self.minu_loss_fun: _DeepPrint_Embedding_Loss = _DeepPrint_Embedding_Loss(
             num_classes=num_classes,
-            num_embedding_dims=texture_embedding_dims,
+            num_embedding_dims=minutia_embedding_dims,
         )
         self.texture_loss_fun: _DeepPrint_Embedding_Loss = _DeepPrint_Embedding_Loss(
             num_classes=num_classes,
-            num_embedding_dims=minutia_embedding_dims,
+            num_embedding_dims=texture_embedding_dims,
         )
         self.minu_map_loss_sum: float = 0
 

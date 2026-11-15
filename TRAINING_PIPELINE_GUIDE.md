@@ -112,7 +112,8 @@ any image; those images are listed in `extraction_errors.txt` in the output dire
   rather than by the nominal resolution: roughly `500 * period_px / 9.5`, i.e. 500 for ordinary 500 ppi prints.
   The 9.5 px depend on how the period is measured. If you have ordinary 500 ppi prints, measure them in the same way
   and use `500 * period_px / period_px_of_the_500_ppi_prints`.
-  The 292x392 SFinGe example images of this repository have ridge periods of 7 to 9 px, which gives 400 to 450.
+  The 292x392 SFinGe example images of this repository have a ridge period of about 8 px for the typical image, which gives 400 to 450
+  (single images range from 6 to 10 px).
   The setting is tolerant: on these images and on 500 ppi prints, values up to 50 below or above the suitable one
   gave the same accuracy.
 - Extract all `.mnt` files of a dataset with the same setting, and extract them again when the setting or the

@@ -150,10 +150,18 @@ def _read_mnt_file(filepath: str) -> tuple[np.ndarray, np.ndarray]:
         lines = file.readlines()
         locs = []
         oris = []
-        for line in lines[2:]:
-            x, y, ori = line.split(" ")
-            locs.append((float(x), float(y)))
-            oris.append(float(ori))
+        for line_number, line in enumerate(lines[2:], start=3):
+            # x, y and angle; further columns (minutia class, score) are not used
+            parts = line.split()
+            if len(parts) == 0:
+                continue
+            if len(parts) < 3:
+                raise ValueError(
+                    f"{filepath}, line {line_number}: expected x, y and angle, "
+                    f"found {len(parts)} value(s)"
+                )
+            locs.append((float(parts[0]), float(parts[1])))
+            oris.append(float(parts[2]))
     return np.array(locs, dtype=np.float16), np.array(oris, dtype=np.float16)
 
 
@@ -197,7 +205,9 @@ class MCYTCapacitiveMinutiaMapLoader(MinutiaMapLoader):
     ):
         def file_to_id_fun(_: str, filename: str) -> Identifier:
             # Pattern: <dir>/<person:04>_<finger>_<impression>.bmp.mnt
-            filename = filename[: len(filename) - len(".bmp")]
+            #       or <dir>/<person:04>_<finger>_<impression>.mnt
+            if filename.lower().endswith(".bmp"):
+                filename = filename[: len(filename) - len(".bmp")]
             _, person, finger, impression = filename.split("_")
             # 12 impressions per finger
             subject = (10 * int(person)) + int(finger)

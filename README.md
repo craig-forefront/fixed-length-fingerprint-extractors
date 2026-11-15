@@ -117,7 +117,7 @@ There is also code to load and benchmark for FVC2004 DB1 and SD4 databases. Howe
 
 ### Image processing
 
-The input size of DeepPrint is 299x299 pixels. How the resizing and cropping is done depends on the source dataset and can be found in the `flx/data/image-loader.py` file.
+The input size of DeepPrint is 299x299 pixels. How the resizing and cropping is done depends on the source dataset and can be found in the `flx/data/image_loader.py` file.
 
 During training, data augumentation is applied to the fingerprint images. The following augmentations are applied:
 
