@@ -64,3 +64,48 @@ def test_transform_from_input_size_inverts_transform_to_input_size(shape):
     assert transform_from_input_size(transformed, height, width) == pytest.approx(
         points, abs=0.5
     )
+
+
+# (height, width) of the image and of the roi; the differences are even, odd in
+# both rounding directions of center_crop, and negative (roi larger than the image)
+ROI_CASES = [
+    ((400, 256), (310, 256)),  # MCYT optical
+    ((400, 256), (311, 256)),
+    ((400, 256), (309, 256)),
+    ((403, 256), (310, 256)),
+    ((400, 301), (310, 256)),
+    ((400, 303), (313, 256)),
+    ((300, 400), (256, 309)),
+    ((300, 256), (310, 256)),
+    ((301, 256), (310, 256)),
+]
+
+
+@pytest.mark.parametrize("shape,roi", ROI_CASES)
+def test_transform_to_input_size_follows_the_image_with_roi(shape, roi):
+    height, width = shape
+    points = np.array(
+        [
+            (width // 2, height // 2),
+            (width // 2 - 30, height // 2 - 40),
+            (width // 2 + 35, height // 2 + 45),
+        ]
+    )
+    transformed = transform_to_input_size(
+        points.astype(np.float32),
+        original_height=height,
+        original_width=width,
+        roi=roi,
+    )
+    scale = INPUT_SIZE / max(roi)
+    for (x, y), (expected_x, expected_y) in zip(points, transformed):
+        image = np.zeros(shape, dtype=np.uint8)
+        image[y - 4 : y + 5, x - 4 : x + 5] = 255  # blob centered on pixel (x, y)
+        out = pad_and_resize_to_deepprint_input_size(image, roi=roi)
+        assert tuple(out.shape) == (1, INPUT_SIZE, INPUT_SIZE)
+        out = out[0].numpy().astype(float)
+        ys, xs = np.mgrid[0:INPUT_SIZE, 0:INPUT_SIZE]
+        center_x = (out * xs).sum() / out.sum() + 0.5
+        center_y = (out * ys).sum() / out.sum() + 0.5
+        assert center_x == pytest.approx(float(expected_x) + 0.5 * scale, abs=0.2)
+        assert center_y == pytest.approx(float(expected_y) + 0.5 * scale, abs=0.2)

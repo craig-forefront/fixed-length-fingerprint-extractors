@@ -55,6 +55,17 @@ def pad_and_resize_to_deepprint_input_size(
     return pad_and_resize(img, (INPUT_SIZE, INPUT_SIZE), fill=fill)
 
 
+def _center_crop_offset(size: int, crop_size: int) -> int:
+    """
+    Index of the first row or column that torchvision's center_crop keeps;
+    negative if it pads because the crop is larger than the image.
+    """
+    if crop_size > size:
+        return -((crop_size - size) // 2)
+    # As in center_crop: for an odd difference, Python rounds the half to the even number
+    return int(round((size - crop_size) / 2.0))
+
+
 def transform_to_input_size(
     minutia_points: np.ndarray,
     original_height: int,
@@ -72,7 +83,10 @@ def transform_to_input_size(
 
     if roi is not None:
         minutia_points -= np.array(
-            [(original_width - roi[1]) / 2, (original_height - roi[0]) / 2]
+            [
+                _center_crop_offset(original_width, roi[1]),
+                _center_crop_offset(original_height, roi[0]),
+            ]
         )
         height = roi[0]
         width = roi[1]
