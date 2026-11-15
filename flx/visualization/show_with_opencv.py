@@ -139,3 +139,14 @@ def show_tensor_as_image(
         cv2.destroyWindow(winname)
         if chr(k) == "q":
             exit(0)
+
+
+def wait_for_key_and_close_windows() -> None:
+    """
+    Waits for a key and closes the windows of show_tensor_as_image(..., wait=False).
+    Does nothing without INTERACTIVE_VIS, like the show functions.
+    """
+    if not INTERACTIVE_VIS:
+        return
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()

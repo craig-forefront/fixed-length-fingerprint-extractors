@@ -1,9 +1,7 @@
 from os.path import join, dirname
-from os import remove
 
 import pytest
 import torch
-import cv2
 import numpy as np
 
 from flx.data.transformed_image_loader import TransformedImageLoader
@@ -27,7 +25,7 @@ from flx.data.minutia_map_loader import (
 )
 from flx.data.pose_dataset import PoseLoader
 from flx.setup.config import INPUT_SIZE
-from flx.setup.paths import get_fingerprint_dataset_path, get_pose_dataset_path
+from flx.setup.paths import get_fingerprint_dataset_path
 from flx.image_processing.augmentation import (
     RandomPoseTransform,
     PoseTransform,
@@ -36,6 +34,7 @@ from flx.image_processing.augmentation import (
 from flx.visualization.show_with_opencv import (
     show_tensor_as_image,
     show_minutia_maps_from_tensor,
+    wait_for_key_and_close_windows,
 )
 
 TEST_DATA_DIR = join(dirname(__file__), "data")
@@ -199,28 +198,33 @@ def test_minutia_map_mcyt_optical():
     show_minutia_maps_from_tensor(minutia_map)
 
 
-def test_pose_dataset():
+def test_pose_dataset(tmp_path):
     def make_random_pose_dataset(
         ids: list[Identifier], pose_distribution: RandomPoseTransform
     ) -> PoseLoader:
         return PoseLoader(ids, [pose_distribution.sample() for _ in ids])
 
-    print("Testing PoseDataset")
     image_loader = SFingeLoader(join(TEST_DATA_DIR, "SFingeExample"))
     pose_loader = make_random_pose_dataset(
         image_loader.ids, pose_distribution=RandomPoseTransform()
     )
-    pose_loader.save(get_pose_dataset_path("PoseTest"))
+    # Not get_pose_dataset_path: the test must not write into data/poses
+    path = str(tmp_path / "PoseTest.json")
+    pose_loader.save(path)
 
-    pose_dataloader = PoseLoader.load(get_pose_dataset_path("PoseTest"))
+    loaded = PoseLoader.load(path)
+    assert list(loaded.ids) == list(image_loader.ids)
     for bid in image_loader.ids:
+        assert loaded.get(bid) == pose_loader.get(bid)
         fp = image_loader.get(bid)
-        show_tensor_as_image(
-            pose_loader.get(bid)(fp), winname=f"Random pose: {bid}", wait=False
-        )
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-    remove(get_pose_dataset_path("PoseTest"))
+        posed = loaded.get(bid)(fp)
+        assert_is_image_tensor(posed)
+        # RandomPoseTransform pads 80 pixels on each side
+        assert posed.shape[1] == fp.shape[1] + 160
+        assert posed.shape[2] == fp.shape[2] + 160
+        assert torch.equal(posed, pose_loader.get(bid)(fp))
+        show_tensor_as_image(posed, winname=f"Random pose: {bid}", wait=False)
+    wait_for_key_and_close_windows()
 
 
 def test_transformed_dataset():
@@ -228,25 +232,26 @@ def test_transformed_dataset():
 
     transformed_images = TransformedImageLoader(images)
     for bid in transformed_images.ids:
+        image = transformed_images.get(bid)
+        assert torch.equal(image, images.get(bid))
         show_tensor_as_image(
-            transformed_images.get(bid),
-            winname=f"NoPoseTrafo, NoQualityTrafo: {bid}",
-            wait=False,
+            image, winname=f"NoPoseTrafo, NoQualityTrafo: {bid}", wait=False
         )
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    wait_for_key_and_close_windows()
 
     transformed_images = TransformedImageLoader(
         images, poses=RandomPoseTransform(), transforms=[RandomQualityTransform()]
     )
     for bid in transformed_images.ids:
+        image = transformed_images.get(bid)
+        assert_is_image_tensor(image)
+        assert image.shape[1] == images.get(bid).shape[1] + 160
+        assert image.shape[2] == images.get(bid).shape[2] + 160
+        assert 0.0 <= image.min() and image.max() <= 1.0
         show_tensor_as_image(
-            transformed_images.get(bid),
-            winname=f"PoseDistribution, QualityDistribution: {bid}",
-            wait=False,
+            image, winname=f"PoseDistribution, QualityDistribution: {bid}", wait=False
         )
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    wait_for_key_and_close_windows()
 
     pose_loader = PoseLoader(
         images.ids,
@@ -257,13 +262,15 @@ def test_transformed_dataset():
     )
     transformed_images = TransformedImageLoader(images, poses=pose_loader)
     for bid in transformed_images.ids:
+        image = transformed_images.get(bid)
+        assert torch.equal(image, pose_loader.get(bid)(images.get(bid)))
+        pose, (height, width) = transformed_images.get_last_pose(bid)
+        assert pose == pose_loader.get(bid)
+        assert (height, width) == tuple(images.get(bid).shape[1:])
         show_tensor_as_image(
-            transformed_images.get(bid),
-            winname=f"PoseDataset, NoQualityTrafo: {bid}",
-            wait=False,
+            image, winname=f"PoseDataset, NoQualityTrafo: {bid}", wait=False
         )
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    wait_for_key_and_close_windows()
 
 
 def _test_image_dataset(
