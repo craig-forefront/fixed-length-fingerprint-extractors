@@ -53,3 +53,22 @@ def test_recorded_loss_is_the_same_for_two_identical_epochs():
     first = _record_one_epoch(loss_fun)
     assert first["minutia_map_loss"] > 0
     assert _record_one_epoch(loss_fun) == first
+
+
+def test_texminu_loss_accepts_different_embedding_sizes():
+    loss_fun = DeepPrintLoss_TexMinu(
+        num_classes=6, texture_embedding_dims=16, minutia_embedding_dims=32
+    )
+    assert loss_fun.texture_loss_fun.center_loss_fun.centers.shape == (6, 16)
+    assert loss_fun.minu_loss_fun.center_loss_fun.centers.shape == (6, 32)
+    output = DeepPrintTrainingOutput(
+        minutia_logits=torch.randn(4, 6),
+        texture_logits=torch.randn(4, 6),
+        minutia_maps=torch.zeros(4, 6, 8, 8),
+        minutia_embeddings=torch.randn(4, 32),
+        texture_embeddings=torch.randn(4, 16),
+    )
+    loss = loss_fun(
+        output, torch.tensor([0, 1, 2, 3]), torch.ones(4, 6, 8, 8), torch.ones(4)
+    )
+    assert torch.isfinite(loss)
