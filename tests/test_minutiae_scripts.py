@@ -104,7 +104,7 @@ def test_extract_minutiae(tmp_path, monkeypatch, fake_fingerflow, dpi_args, imag
         + ["--classify_net", "classify", "--core_net", "core"]
         + dpi_args,
     )
-    script.main()
+    assert script.main() == 0
 
     # One extractor for all images
     (extractor,) = fake_fingerflow.instances
@@ -115,21 +115,74 @@ def test_extract_minutiae(tmp_path, monkeypatch, fake_fingerflow, dpi_args, imag
     _assert_is_extractor_output(join(output_dir, "1_1.mnt"))
 
 
+MODEL_PATHS = {k: k for k in ["coarse_net", "fine_net", "classify_net", "core_net"]}
+
+
 def test_extract_minutiae_single_image(tmp_path, fake_fingerflow):
     script = _load_script("extract_minutiae")
     image_path = join(TEST_IMAGE_DIR, "1_1.png")
     mnt_path = join(tmp_path, "1_1.mnt")
-    result = script.extract_single_image((image_path, mnt_path, {}, 500))
-    # The model paths are missing
-    assert result[1] is False
-
-    model_paths = {
-        k: k for k in ["coarse_net", "fine_net", "classify_net", "core_net"]
-    }
-    result = script.extract_single_image((image_path, mnt_path, model_paths, 500))
+    result = script.extract_single_image((image_path, mnt_path, MODEL_PATHS, 500))
     assert result == (image_path, True, None)
     _assert_got_full_grayscale_image(fake_fingerflow.instances[0])
     _assert_is_extractor_output(mnt_path)
+
+
+def _extract_minutiae_argv(input_dir: str, output_dir: str) -> list[str]:
+    return (
+        ["extract_minutiae.py", "--input_dir", input_dir, "--output_dir", output_dir]
+        + ["--coarse_net", "coarse", "--fine_net", "fine"]
+        + ["--classify_net", "classify", "--core_net", "core"]
+    )
+
+
+def test_extract_minutiae_reports_failed_images(tmp_path, monkeypatch, fake_fingerflow):
+    script = _load_script("extract_minutiae")
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    image = cv2.imread(join(TEST_IMAGE_DIR, "1_1.png"), cv2.IMREAD_GRAYSCALE)
+    cv2.imwrite(str(input_dir / "1_1.png"), image)
+    (input_dir / "1_2.png").write_bytes(b"not an image")
+    output_dir = tmp_path / "minutiae"
+    monkeypatch.setattr(
+        sys, "argv", _extract_minutiae_argv(str(input_dir), str(output_dir))
+    )
+    assert script.main() == 1
+
+    # The other image is extracted, the failed one is in the error log
+    _assert_is_extractor_output(str(output_dir / "1_1.mnt"))
+    assert not (output_dir / "1_2.mnt").exists()
+    error_log = (output_dir / "extraction_errors.txt").read_text().splitlines()
+    assert len(error_log) == 1
+    assert error_log[0].startswith(str(input_dir / "1_2.png"))
+
+
+def test_extract_minutiae_stops_without_extractor(tmp_path, monkeypatch, fake_fingerflow):
+    """E.g. a fingerflow version whose Extractor has no image_dpi option"""
+    attempts = []
+
+    class ExtractorWithoutImageDpi:
+        def __init__(self, *args, **kwargs):
+            attempts.append(kwargs)
+            raise TypeError("unexpected keyword argument 'image_dpi'")
+
+    monkeypatch.setattr(
+        sys.modules["fingerflow.extractor"], "Extractor", ExtractorWithoutImageDpi
+    )
+    script = _load_script("extract_minutiae")
+    output_dir = tmp_path / "minutiae"
+    monkeypatch.setattr(
+        sys, "argv", _extract_minutiae_argv(TEST_IMAGE_DIR, str(output_dir))
+    )
+    with pytest.raises(TypeError, match="image_dpi"):
+        script.main()
+    # Not tried again for each of the 8 images
+    assert attempts == [{"image_dpi": 500}]
+    assert not list(output_dir.glob("*.mnt"))
+
+    image_path = join(TEST_IMAGE_DIR, "1_1.png")
+    with pytest.raises(KeyError):
+        script.extract_single_image((image_path, join(tmp_path, "1_1.mnt"), {}, 500))
 
 
 def test_run_minutiae_extractor_process_image(tmp_path, fake_fingerflow):

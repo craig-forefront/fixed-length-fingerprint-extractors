@@ -37,12 +37,29 @@ Output format (.mnt files):
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
 import cv2
 import tqdm
+
+
+def get_extractor(model_paths, image_dpi):
+    """The extractor of this process, the models are loaded once."""
+    # Import inside function for multiprocessing compatibility
+    from fingerflow.extractor import Extractor
+
+    if not hasattr(get_extractor, '_extractor'):
+        get_extractor._extractor = Extractor(
+            model_paths['coarse_net'],
+            model_paths['fine_net'],
+            model_paths['classify_net'],
+            model_paths['core_net'],
+            image_dpi=image_dpi,
+        )
+    return get_extractor._extractor
 
 
 def extract_single_image(args_tuple):
@@ -54,24 +71,16 @@ def extract_single_image(args_tuple):
 
     Returns:
         (image_path, success, error_message)
+
+    An extractor that can not be set up (missing package or model files,
+    version without the image_dpi option) is not an error of the image:
+    that exception is raised.
     """
     image_path, output_path, model_paths, image_dpi = args_tuple
 
+    extractor = get_extractor(model_paths, image_dpi)
+
     try:
-        # Import inside function for multiprocessing compatibility
-        from fingerflow.extractor import Extractor
-
-        # Initialize extractor (cached per process)
-        if not hasattr(extract_single_image, '_extractor'):
-            extract_single_image._extractor = Extractor(
-                model_paths['coarse_net'],
-                model_paths['fine_net'],
-                model_paths['classify_net'],
-                model_paths['core_net'],
-                image_dpi=image_dpi,
-            )
-        extractor = extract_single_image._extractor
-
         # Load image
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if image is None:
@@ -118,7 +127,8 @@ def get_output_path(image_path: Path, input_dir: Path, output_dir: Path) -> Path
     return output_dir / relative.with_suffix('.mnt')
 
 
-def main():
+def main() -> int:
+    """Returns the exit status: 1 if the extraction failed for any image, else 0."""
     parser = argparse.ArgumentParser(
         description="Extract minutiae from fingerprint images using FingerFlow"
     )
@@ -175,7 +185,7 @@ def main():
 
     if len(work_items) == 0:
         print("Nothing to process!")
-        return
+        return 0
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -198,13 +208,18 @@ def main():
         # Multi-process (for CPU-based extraction)
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {executor.submit(extract_single_image, item): item for item in work_items}
-            for future in tqdm.tqdm(as_completed(futures), total=len(work_items), desc="Extracting minutiae"):
-                image_path, success, error = future.result()
-                if success:
-                    success_count += 1
-                else:
-                    error_count += 1
-                    errors.append((image_path, error))
+            try:
+                for future in tqdm.tqdm(as_completed(futures), total=len(work_items), desc="Extracting minutiae"):
+                    image_path, success, error = future.result()
+                    if success:
+                        success_count += 1
+                    else:
+                        error_count += 1
+                        errors.append((image_path, error))
+            except BaseException:
+                # The extractor could not be set up, do not try the other images
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
 
     # Summary
     print(f"\n{'=' * 60}")
@@ -226,6 +241,8 @@ def main():
                 f.write(f"{path}\t{error}\n")
         print(f"\nFull error log saved to: {error_log}")
 
+    return 1 if error_count > 0 else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
