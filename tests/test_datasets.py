@@ -1,6 +1,7 @@
 from os.path import join, dirname
 from os import remove
 
+import pytest
 import torch
 import cv2
 import numpy as np
@@ -133,6 +134,24 @@ def test_minutia_map_sfinge():
     minutia_map, mask = loader.get(Identifier(0, 0))
     print(minutia_map.shape)
     show_minutia_maps_from_tensor(minutia_map)
+
+
+def test_sfinge_minutia_orientations_are_radians():
+    root_dir = join(TEST_DATA_DIR, "SFingeExample")
+    loader = SFingeMinutiaMapLoader(root_dir)
+    locs, oris = loader.get_minutiae(Identifier(0, 0))
+    assert len(locs) == len(oris) > 0
+
+    # In the ISO 19794-2:2005 file each minutia has 6 bytes, the 5th is the
+    # angle in units of 360 / 256 degrees, counterclockwise. The loader skips
+    # the first minutia and returns the clockwise angle (y points down).
+    with open(join(root_dir, "1_1.ist"), "rb") as file:
+        template = file.read()
+    angle_bytes = np.array([template[28 + 6 * i + 4] for i in range(1, template[27])])
+    expected = 2 * np.pi * (1 - angle_bytes / 256)
+    assert oris == pytest.approx(expected)
+    assert oris.min() >= 0
+    assert oris.max() <= 2 * np.pi
 
 
 def test_minutia_map_mcyt_capactive():
