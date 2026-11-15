@@ -37,6 +37,11 @@ class _DeepPrint_Embedding_Loss(nn.Module):
         self.n_datapoints = 0
 
     def get_recorded_loss(self) -> dict:
+        """
+        Returns the mean loss per sample since the last reset, each part
+        multiplied by its weight. The keys end in "_sum" for compatibility
+        with existing training logs; the values are means per sample.
+        """
         if self.n_datapoints == 0:
             return {"crossent_loss_sum": 0, "center_loss_sum": 0}
         return {
@@ -49,7 +54,11 @@ class _DeepPrint_Embedding_Loss(nn.Module):
     ) -> torch.Tensor:
         crossent_loss = self.crossent_loss_fun(logits, labels)
         center_loss = self.center_loss_fun(embeddings, labels)
-        self.crossent_loss_sum += crossent_loss.detach().item() * W_CROSS_ENTROPY
+        # The cross entropy is the mean over the batch, so it counts once per
+        # sample. The center loss is already a sum over the batch.
+        self.crossent_loss_sum += (
+            crossent_loss.detach().item() * W_CROSS_ENTROPY * labels.shape[0]
+        )
         self.center_loss_sum += center_loss.detach().item() * W_CENTER_LOSS
         self.n_datapoints += labels.shape[0]
         return W_CROSS_ENTROPY * crossent_loss + W_CENTER_LOSS * center_loss
@@ -132,7 +141,10 @@ class DeepPrintLoss_Minu(nn.Module):
         mm_loss = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
-        self.minu_map_loss_sum += W_MINUTIA_MAP_LOSS * mm_loss.detach().item()
+        # The map loss is the mean over the batch, so it counts once per sample
+        self.minu_map_loss_sum += (
+            W_MINUTIA_MAP_LOSS * mm_loss.detach().item() * labels.shape[0]
+        )
         return minutia_loss + W_MINUTIA_MAP_LOSS * mm_loss
 
     def get_recorded_loss(self) -> dict:
@@ -195,7 +207,10 @@ class DeepPrintLoss_TexMinu(nn.Module):
         mm_loss = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
-        self.minu_map_loss_sum += W_MINUTIA_MAP_LOSS * mm_loss.detach().item()
+        # The map loss is the mean over the batch, so it counts once per sample
+        self.minu_map_loss_sum += (
+            W_MINUTIA_MAP_LOSS * mm_loss.detach().item() * labels.shape[0]
+        )
         return texture_loss + minutia_loss + W_MINUTIA_MAP_LOSS * mm_loss
 
     def get_recorded_loss(self) -> dict:
