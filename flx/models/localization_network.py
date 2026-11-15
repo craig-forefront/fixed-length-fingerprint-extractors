@@ -46,8 +46,9 @@ class LocalizationNetwork(torch.torch.nn.Module):
         m22 = torch.cos(theta)
         m23 = theta_x_y[:, 2]  # offset y
 
-        mat = torch.concatenate((m11, m12, m13, m21, m22, m23))
-        mat = mat.view(-1, 2, 3)
+        # One row per sample: stack along dim 1. Concatenating the six vectors
+        # end to end mixes the samples of a batch into each other's matrices.
+        mat = torch.stack((m11, m12, m13, m21, m22, m23), dim=1).view(-1, 2, 3)
         grid = torch.nn.functional.affine_grid(mat, x.size(), align_corners=False)
         x = torch.nn.functional.grid_sample(x, grid, align_corners=False)
         return x
