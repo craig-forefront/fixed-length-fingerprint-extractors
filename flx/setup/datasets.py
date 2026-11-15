@@ -26,6 +26,8 @@ from flx.data.image_loader import (
 )
 from flx.data.label_index import LabelIndex
 from flx.data.minutia_map_loader import (
+    MINUTIA_MAP_CHANNELS,
+    MINUTIA_MAP_SIZE,
     PoseTransformedMinutiaMapLoader,
     SFingeMinutiaMapLoader,
     MCYTCapacitiveMinutiaMapLoader,
@@ -128,7 +130,10 @@ def get_training_set(
     #
     # ds_mm_mcyt = MergedDataset([ds_mm_optical, ds_mm_capacitive], share_subjects=True)
 
-    mcyt_minumaps = Dataset(ConstantDataLoader(torch.tensor([])), mcyt_images.ids)
+    # No minutia maps for MCYT: an empty map of the same shape as the SFinge maps, so
+    # that both can be in one batch, and weight 0.0, so that it does not count in the loss
+    no_minumap = torch.zeros((MINUTIA_MAP_CHANNELS, MINUTIA_MAP_SIZE, MINUTIA_MAP_SIZE))
+    mcyt_minumaps = Dataset(ConstantDataLoader((no_minumap, 0.0)), mcyt_images.ids)
     minumaps = Dataset.concatenate(
         sfinge_minumaps, mcyt_minumaps, share_subjects=False
     )
