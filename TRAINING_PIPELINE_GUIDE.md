@@ -96,10 +96,27 @@ python scripts/extract_minutiae.py \
   --fine_net path/to/FineNet.h5 \
   --classify_net path/to/ClassifyNet.h5 \
   --core_net path/to/CoreNet.h5 \
+  --image_dpi 500 \
   --workers 1
 ```
 
-This creates `.mnt` files with minutiae coordinates and angles.
+This creates `.mnt` files with minutiae coordinates and angles. The script needs the `fingerflow` package of a
+minutiae_extractor version that has the direction refinement (`image_dpi` option of its `Extractor`); the `fingerflow`
+release on PyPI does not have it.
+
+- Feed the images as they are: 8-bit grayscale in their native resolution, not resized or enhanced. The header of
+  the `.mnt` file holds the image size, so that the minutiae are scaled together with the images later.
+- `--image_dpi` is only used to find the direction of the minutiae. Choose it by the ridge period of the images
+  rather than by the nominal resolution: roughly `500 * period_px / 9.5`, i.e. 500 for ordinary 500 ppi prints.
+  The 292x392 SFinGe example images of this repository have ridge periods of 7 to 9 px, which gives 400 to 450.
+  The setting is tolerant: on these images and on 500 ppi prints, values up to 50 below or above the suitable one
+  gave the same accuracy.
+- Extract all `.mnt` files of a dataset with the same setting, and extract them again when the setting or the
+  extractor changes. Files from before the direction refinement have unreliable minutia directions.
+- Each row is `x y angle class direction_confidence`. The angle is in radians, the direction vector is
+  `(cos(angle), sin(angle))` with y pointing down. This is the convention of the minutia maps, the
+  `FingerFlowMinutiaMapLoader` uses the angle as it is. Do not remove minutiae with a low `direction_confidence`
+  when building minutia maps: it only rates the direction, the minutia itself is still there.
 
 #### Option B: Use Texture-Only Models
 
@@ -245,24 +262,21 @@ plt.show()
 
 ### Step 5: Create Minutiae Loader (Optional)
 
-If you extracted minutiae using the FingerFlow script, create a minutiae map loader:
+If you extracted minutiae using the FingerFlow script, create a minutiae map loader. The `.mnt` files are in the
+same structure as your images, just in a different root directory:
 
 ```python
 # In the same file: flx/data/my_dataset_loader.py
 
-from flx.data.minutia_map_loader import MinutiaMapLoader
+from flx.data.fingerflow_minutia_loader import FingerFlowMinutiaMapLoaderCustomNaming
 
-class MyDatasetMinutiaMapLoader(MinutiaMapLoader):
+class MyDatasetMinutiaMapLoader(FingerFlowMinutiaMapLoaderCustomNaming):
     """
     Loader for minutiae extracted by FingerFlow.
-
-    The .mnt files should be in the same structure as your images,
-    just in a different root directory.
     """
 
-    @staticmethod
-    def _extension() -> str:
-        return ".mnt"
+    def __init__(self, root_dir: str):
+        super().__init__(root_dir, self._file_to_id_fun)
 
     @staticmethod
     def _file_to_id_fun(subdir: str, filename: str) -> Identifier:

@@ -78,8 +78,12 @@ pip download \
 If you plan to use the FingerFlow minutiae extractor ([scripts/extract_minutiae.py](scripts/extract_minutiae.py)):
 
 ```bash
-pip download fingerflow --dest ./packages-fingerflow
+git clone https://github.com/tourmii/minutiae_extractor.git
 ```
+
+The script needs a version of this repository that has the direction refinement (`image_dpi` option of its
+`Extractor`); the `fingerflow` release on PyPI does not have it. Also download the dependencies listed in its
+`pyproject.toml` (TensorFlow, pandas, scikit-image, ...) to `./packages-fingerflow`.
 
 **Note**: FingerFlow requires pre-trained model weights (CoarseNet.h5, FineNet.h5, ClassifyNet.h5, CoreNet.h5). See Step 2 below.
 
@@ -205,9 +209,11 @@ pip install --no-index --find-links=../airgap-packages/packages-dev \
 
 #### Install FingerFlow (Optional)
 
+Install the dependencies of the minutiae_extractor repository from `../airgap-packages/packages-fingerflow` and make
+its `fingerflow` package importable, e.g.
+
 ```bash
-pip install --no-index --find-links=../airgap-packages/packages-fingerflow \
-  fingerflow
+export PYTHONPATH=../airgap-packages/minutiae_extractor/src
 ```
 
 ### Step 5: Install the FLX Package
@@ -265,8 +271,12 @@ python scripts/extract_minutiae.py \
   --coarse_net ../pretrained-models/fingerflow/CoarseNet.h5 \
   --fine_net ../pretrained-models/fingerflow/FineNet.h5 \
   --classify_net ../pretrained-models/fingerflow/ClassifyNet.h5 \
-  --core_net ../pretrained-models/fingerflow/CoreNet.h5
+  --core_net ../pretrained-models/fingerflow/CoreNet.h5 \
+  --image_dpi 500
 ```
+
+See "Option A: Extract Minutiae Using FingerFlow" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for the
+choice of `--image_dpi`.
 
 ### Training Examples
 

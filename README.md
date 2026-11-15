@@ -25,6 +25,8 @@ To learn how to train a variant of the DeepPrint model on a small example datase
 
 To learn how to extract embeddings from a dataset using a trained model, see the [embedding extraction tutorial notebook](notebooks/embedding_extraction_tutorial.ipynb).
 
+To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, `--image_dpi`, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md).
+
 ### Pre-trained model
 
 The model for an embedding size of 512 can be found under the link
