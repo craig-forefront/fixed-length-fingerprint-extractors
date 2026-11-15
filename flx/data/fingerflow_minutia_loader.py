@@ -7,7 +7,15 @@ them to minutia maps for DeepPrint training.
 .mnt file format:
     Line 1: <num_minutiae>
     Line 2: <image_width> <image_height>
-    Lines 3+: <x> <y> <angle_radians>
+    Lines 3+: <x> <y> <angle_radians> [<class_index> [<direction_confidence>]]
+
+x is the column and y the row of the image (y pointing down). The angle is the
+direction of the minutia, the direction vector is (cos(angle), sin(angle)) in
+these axes. This is also what the SFingeMinutiaMapLoader returns, so the minutia
+maps of both loaders use the same layers for the same directions.
+
+Only x, y and the angle are used. In particular the minutiae are not filtered by
+their direction confidence.
 """
 
 import os
