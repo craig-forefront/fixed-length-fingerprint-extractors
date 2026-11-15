@@ -100,5 +100,7 @@ def transform_from_input_size(
     pad_width = max(original_height - original_width, 0) // 2
     pad_height = max(original_width - original_height, 0) // 2
 
-    minutia_points = minutia_points * (max(original_height, original_width) / INPUT_SIZE)
+    # Not in the float16 of transform_to_input_size, it is too coarse for pixels of large images
+    minutia_points = minutia_points.astype(float)
+    minutia_points *= max(original_height, original_width) / INPUT_SIZE
     return minutia_points - np.array([pad_width, pad_height])
