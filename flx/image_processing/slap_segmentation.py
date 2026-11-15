@@ -13,8 +13,6 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as VTF
 
-from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
-
 
 @dataclass
 class FingerROI:
@@ -248,6 +246,9 @@ class SlapSegmenter:
         self, img: np.ndarray, rois: list[FingerROI]
     ) -> list[torch.Tensor]:
         """Extract and normalize individual finger images from ROIs."""
+        # Imported here because flx.data imports this module (circular import)
+        from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
+
         finger_images = []
 
         for roi in rois:
