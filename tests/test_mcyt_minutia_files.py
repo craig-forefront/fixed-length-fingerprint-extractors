@@ -22,6 +22,7 @@ LOADERS_AND_FILES = [
     (MCYTCapacitiveMinutiaMapLoader, "pb_0000_0_0.bmp.mnt", Identifier(0, 0)),
     # scripts/extract_minutiae.py names the file without the image extension
     (MCYTCapacitiveMinutiaMapLoader, "pb_0000_0_0.mnt", Identifier(0, 0)),
+    (MCYTCapacitiveMinutiaMapLoader, "pb_0000_0_0.BMP.mnt", Identifier(0, 0)),
 ]
 
 
@@ -62,3 +63,12 @@ def test_mcyt_example_files_are_read_completely():
         join(TEST_DATA_DIR, "MCYTCapacitiveExample")
     )
     assert len(capacitive.get_minutiae(Identifier(0, 0))[0]) == 44
+
+
+@pytest.mark.parametrize("damaged_line", ["137.0", "137.0 187.0"])
+def test_mnt_line_with_one_or_two_values_is_an_error(tmp_path, damaged_line):
+    path = tmp_path / "dp_0000_0_8.mnt"
+    path.write_text(f"2\n256 400\n137.0 187.0 1.623156\n{damaged_line}\n")
+    loader = MCYTOpticalMinutiaMapLoader(str(tmp_path))
+    with pytest.raises(ValueError, match="line 4"):
+        loader.get_minutiae(Identifier(0, 8))
