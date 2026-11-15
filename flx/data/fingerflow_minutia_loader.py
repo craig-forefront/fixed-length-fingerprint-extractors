@@ -1,5 +1,5 @@
 """
-Custom MinutiaMapLoader for minutiae extracted with tourmii/minutiae_extractor (FingerFlow).
+Custom MinutiaMapLoader for minutiae extracted with the minutiae_extractor (FingerFlow).
 
 This loader reads .mnt files created by scripts/extract_minutiae.py and converts
 them to minutia maps for DeepPrint training.
@@ -72,44 +72,12 @@ def read_mnt_file(filepath: str) -> tuple[np.ndarray, np.ndarray, tuple[int, int
     )
 
 
-class FingerFlowMinutiaMapLoader(MinutiaMapLoader):
+class _MntFileMinutiaMapLoader(MinutiaMapLoader):
     """
-    Loader for minutiae extracted using FingerFlow (tourmii/minutiae_extractor).
-
-    Reads .mnt files and converts them to minutia maps for DeepPrint training.
-
-    Expected file naming convention: {subject_id}_{impression_id}.mnt
-    Modify _file_to_id_fun() if your naming convention differs.
+    Reads the minutiae from the .mnt files of self._files (a FileIndex).
     """
 
-    def __init__(
-        self,
-        root_dir: str,
-        file_pattern: str = "{subject}_{impression}.mnt",
-    ):
-        """
-        Args:
-            root_dir: Directory containing .mnt files
-            file_pattern: Not used currently, kept for future extensibility
-        """
-        self._root_dir = root_dir
-
-        def file_to_id_fun(_: str, filename: str) -> Identifier:
-            # Pattern: <subject_id>_<impression_id>.mnt
-            # Modify this if your naming convention differs
-            name = os.path.splitext(filename)[0]  # Remove .mnt extension
-            parts = name.split("_")
-            if len(parts) >= 2:
-                subject_id = int(parts[0])
-                impression_id = int(parts[1])
-            else:
-                # Fallback: try to parse as single number
-                subject_id = int(name)
-                impression_id = 0
-            # Convert to 0-indexed for PyTorch compatibility
-            return Identifier(subject_id - 1, impression_id - 1)
-
-        self._files = FileIndex(root_dir, ".mnt", file_to_id_fun)
+    _files: FileIndex
 
     @property
     def ids(self) -> IdentifierSet:
@@ -142,7 +110,46 @@ class FingerFlowMinutiaMapLoader(MinutiaMapLoader):
         return transformed_locs, oris
 
 
-class FingerFlowMinutiaMapLoaderCustomNaming(MinutiaMapLoader):
+class FingerFlowMinutiaMapLoader(_MntFileMinutiaMapLoader):
+    """
+    Loader for minutiae extracted using FingerFlow (minutiae_extractor).
+
+    Reads .mnt files and converts them to minutia maps for DeepPrint training.
+
+    Expected file naming convention: {subject_id}_{impression_id}.mnt
+    Use FingerFlowMinutiaMapLoaderCustomNaming if your naming convention differs.
+    """
+
+    def __init__(
+        self,
+        root_dir: str,
+        file_pattern: str = "{subject}_{impression}.mnt",
+    ):
+        """
+        Args:
+            root_dir: Directory containing .mnt files
+            file_pattern: Not used currently, kept for future extensibility
+        """
+        self._root_dir = root_dir
+
+        def file_to_id_fun(_: str, filename: str) -> Identifier:
+            # Pattern: <subject_id>_<impression_id>.mnt
+            name = os.path.splitext(filename)[0]  # Remove .mnt extension
+            parts = name.split("_")
+            if len(parts) >= 2:
+                subject_id = int(parts[0])
+                impression_id = int(parts[1])
+            else:
+                # Fallback: try to parse as single number
+                subject_id = int(name)
+                impression_id = 0
+            # Convert to 0-indexed for PyTorch compatibility
+            return Identifier(subject_id - 1, impression_id - 1)
+
+        self._files = FileIndex(root_dir, ".mnt", file_to_id_fun)
+
+
+class FingerFlowMinutiaMapLoaderCustomNaming(_MntFileMinutiaMapLoader):
     """
     Same as FingerFlowMinutiaMapLoader but with customizable file naming.
 
@@ -161,26 +168,6 @@ class FingerFlowMinutiaMapLoaderCustomNaming(MinutiaMapLoader):
         """
         self._root_dir = root_dir
         self._files = FileIndex(root_dir, ".mnt", file_to_id_fun)
-
-    @property
-    def ids(self) -> IdentifierSet:
-        return self._files.ids
-
-    def get_minutiae(self, identifier: Identifier) -> tuple[np.ndarray, np.ndarray]:
-        """Load minutiae for a fingerprint sample."""
-        filepath = self._files.get(identifier)
-        locs, oris, (width, height) = read_mnt_file(filepath)
-
-        if len(locs) == 0:
-            return locs, oris
-
-        transformed_locs = transform_to_input_size(
-            locs,
-            original_height=height,
-            original_width=width,
-        )
-
-        return transformed_locs, oris
 
 
 def main():

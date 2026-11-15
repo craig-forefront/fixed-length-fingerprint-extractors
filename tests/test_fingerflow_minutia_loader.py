@@ -48,21 +48,33 @@ def test_read_mnt_file_without_minutiae(tmp_path):
     assert oris.shape == (0,)
 
 
-@pytest.mark.parametrize("n_columns", [3, 5])
-def test_fingerflow_minutia_map_loader(tmp_path, n_columns: int):
-    _write_mnt_file(join(tmp_path, "1_1.mnt"), n_columns)
-    loader = FingerFlowMinutiaMapLoader(str(tmp_path))
-    assert len(loader.ids) == 1
+def _default_naming_loader(root_dir: str) -> tuple[FingerFlowMinutiaMapLoader, Identifier]:
+    _write_mnt_file(join(root_dir, "1_1.mnt"), 5)
+    return FingerFlowMinutiaMapLoader(root_dir), Identifier(0, 0)
+
+
+def _custom_naming_loader(
+    root_dir: str,
+) -> tuple[FingerFlowMinutiaMapLoaderCustomNaming, Identifier]:
+    _write_mnt_file(join(root_dir, "finger7.mnt"), 5)
+    loader = FingerFlowMinutiaMapLoaderCustomNaming(
+        root_dir, lambda _, filename: Identifier(int(filename[6:]), 0)
+    )
+    return loader, Identifier(7, 0)
+
+
+def _assert_loads_minutiae(loader, identifier: Identifier) -> None:
+    assert list(loader.ids) == [identifier]
 
     # The image is padded to a square and resized to the input size. All minutiae
     # are kept, also those with a low direction confidence.
-    locs, oris = loader.get_minutiae(Identifier(0, 0))
+    locs, oris = loader.get_minutiae(identifier)
     scale = INPUT_SIZE / HEIGHT
     expected = [((m[0] + (HEIGHT - WIDTH) / 2) * scale, m[1] * scale) for m in MINUTIAE]
     assert locs == pytest.approx(np.array(expected), abs=0.1)
     assert oris == pytest.approx(np.array([m[2] for m in MINUTIAE]))
 
-    minutia_map, weight = loader.get(Identifier(0, 0))
+    minutia_map, weight = loader.get(identifier)
     assert minutia_map.shape == (6, 128, 128)
     assert weight == 1.0
     # The k-th layer is the direction k * 60 degrees
@@ -73,10 +85,12 @@ def test_fingerflow_minutia_map_loader(tmp_path, n_columns: int):
         assert minutia_map[:, peak_y, peak_x].argmax() == layer
 
 
-def test_fingerflow_minutia_map_loader_custom_naming(tmp_path):
-    _write_mnt_file(join(tmp_path, "finger7.mnt"), 5)
-    loader = FingerFlowMinutiaMapLoaderCustomNaming(
-        str(tmp_path), lambda _, filename: Identifier(int(filename[6:]), 0)
-    )
-    locs, oris = loader.get_minutiae(Identifier(7, 0))
-    assert len(locs) == len(oris) == len(MINUTIAE)
+@pytest.mark.parametrize("make_loader", [_default_naming_loader, _custom_naming_loader])
+def test_fingerflow_minutia_map_loader(tmp_path, make_loader):
+    loader, identifier = make_loader(str(tmp_path))
+    _assert_loads_minutiae(loader, identifier)
+
+
+def test_fingerflow_minutia_map_loader_without_extra_columns(tmp_path):
+    _write_mnt_file(join(tmp_path, "1_1.mnt"), 3)
+    _assert_loads_minutiae(FingerFlowMinutiaMapLoader(str(tmp_path)), Identifier(0, 0))
