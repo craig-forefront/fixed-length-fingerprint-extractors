@@ -5,7 +5,10 @@ This script extracts minutiae from all fingerprint images and saves them
 as .mnt files for use in DeepPrint training.
 
 Prerequisites:
-    pip install fingerflow
+    The `fingerflow` package of the minutiae_extractor repository, e.g.
+        pip install -e /path/to/minutiae_extractor
+    (the `fingerflow` release on PyPI does not have the direction refinement
+    and the image_dpi option used here)
 
 Usage:
     python scripts/extract_minutiae.py \
@@ -14,12 +17,22 @@ Usage:
         --coarse_net /path/to/CoarseNet.h5 \
         --fine_net /path/to/FineNet.h5 \
         --classify_net /path/to/ClassifyNet.h5 \
-        --core_net /path/to/CoreNet.h5
+        --core_net /path/to/CoreNet.h5 \
+        --image_dpi 500
+
+Feed the images in their native resolution as 8-bit grayscale. --image_dpi is
+only used to find the direction of the minutiae and depends on the ridge
+period of the images: roughly 500 * period_px / 9.5 (500 for ordinary 500 ppi
+prints). Extract all .mnt files of a dataset with the same setting.
 
 Output format (.mnt files):
     Line 1: <num_minutiae>
     Line 2: <image_width> <image_height>
-    Lines 3+: <x> <y> <angle_radians>
+    Lines 3+: <x> <y> <angle_radians> <class_index> <direction_confidence>
+
+    x is the column and y the row of the image (y pointing down). The angle is
+    the direction of the minutia, the direction vector is (cos(angle), sin(angle))
+    in these axes.
 """
 
 import argparse
@@ -37,12 +50,12 @@ def extract_single_image(args_tuple):
     Extract minutiae from a single image.
 
     Args:
-        args_tuple: (image_path, output_path, model_paths)
+        args_tuple: (image_path, output_path, model_paths, image_dpi)
 
     Returns:
         (image_path, success, error_message)
     """
-    image_path, output_path, model_paths = args_tuple
+    image_path, output_path, model_paths, image_dpi = args_tuple
 
     try:
         # Import inside function for multiprocessing compatibility
@@ -55,6 +68,7 @@ def extract_single_image(args_tuple):
                 model_paths['fine_net'],
                 model_paths['classify_net'],
                 model_paths['core_net'],
+                image_dpi=image_dpi,
             )
         extractor = extract_single_image._extractor
 
@@ -67,7 +81,7 @@ def extract_single_image(args_tuple):
 
         # Extract minutiae
         results = extractor.extract_minutiae(image)
-        minutiae_df = results.minutiae
+        minutiae_df = results['minutiae']
 
         # Create output directory if needed
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -77,7 +91,10 @@ def extract_single_image(args_tuple):
             f.write(f"{len(minutiae_df)}\n")
             f.write(f"{width} {height}\n")
             for _, row in minutiae_df.iterrows():
-                f.write(f"{row['x']} {row['y']} {row['angle']}\n")
+                f.write(
+                    f"{row['x']} {row['y']} {row['angle']} "
+                    f"{int(row['class'])} {row['direction_confidence']}\n"
+                )
 
         return (image_path, True, None)
 
@@ -117,6 +134,9 @@ def main():
                         help="Path to ClassifyNet model weights")
     parser.add_argument("--core_net", type=str, required=True,
                         help="Path to CoreNet model weights")
+    parser.add_argument("--image_dpi", type=float, default=500,
+                        help="Resolution of the images, used to find the direction of the "
+                             "minutiae; roughly 500 * ridge_period_px / 9.5 (default: 500)")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of parallel workers (default: 1, GPU memory limited)")
     parser.add_argument("--skip_existing", action="store_true",
@@ -146,7 +166,7 @@ def main():
         if args.skip_existing and output_path.exists():
             skipped += 1
             continue
-        work_items.append((image_path, str(output_path), model_paths))
+        work_items.append((image_path, str(output_path), model_paths, args.image_dpi))
 
     if skipped > 0:
         print(f"Skipping {skipped:,} images with existing .mnt files")
