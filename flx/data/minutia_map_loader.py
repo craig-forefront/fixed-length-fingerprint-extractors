@@ -200,7 +200,9 @@ class MCYTCapacitiveMinutiaMapLoader(MinutiaMapLoader):
     ):
         def file_to_id_fun(_: str, filename: str) -> Identifier:
             # Pattern: <dir>/<person:04>_<finger>_<impression>.bmp.mnt
-            filename = filename[: len(filename) - len(".bmp")]
+            #       or <dir>/<person:04>_<finger>_<impression>.mnt
+            if filename.endswith(".bmp"):
+                filename = filename[: len(filename) - len(".bmp")]
             _, person, finger, impression = filename.split("_")
             # 12 impressions per finger
             subject = (10 * int(person)) + int(finger)

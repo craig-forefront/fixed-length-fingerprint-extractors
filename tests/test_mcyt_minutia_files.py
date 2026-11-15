@@ -20,6 +20,8 @@ MINUTIAE = [
 LOADERS_AND_FILES = [
     (MCYTOpticalMinutiaMapLoader, "dp_0000_0_8.mnt", Identifier(0, 8)),
     (MCYTCapacitiveMinutiaMapLoader, "pb_0000_0_0.bmp.mnt", Identifier(0, 0)),
+    # scripts/extract_minutiae.py names the file without the image extension
+    (MCYTCapacitiveMinutiaMapLoader, "pb_0000_0_0.mnt", Identifier(0, 0)),
 ]
 
 
