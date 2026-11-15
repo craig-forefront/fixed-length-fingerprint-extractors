@@ -41,6 +41,10 @@ class ImageLoader(DataLoader):
         pass
 
 
+# Rows that SFingeLoader cuts off the bottom of each image
+SFINGE_CROPPED_ROWS = 32
+
+
 class SFingeLoader(ImageLoader):
     @staticmethod
     def _extension() -> str:
@@ -56,7 +60,7 @@ class SFingeLoader(ImageLoader):
     @staticmethod
     def _load_image(filepath: str) -> torch.Tensor:
         img = cv2.imread(filepath, flags=cv2.IMREAD_GRAYSCALE)
-        return VTF.to_tensor(img[:-32])
+        return VTF.to_tensor(img[:-SFINGE_CROPPED_ROWS])
 
 
 class FVC2004Loader(ImageLoader):

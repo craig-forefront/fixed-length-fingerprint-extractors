@@ -1,6 +1,7 @@
 from os.path import join, dirname
 
 import pytest
+import cv2
 import torch
 import numpy as np
 
@@ -12,6 +13,7 @@ from flx.data.embedding_loader import (
 )
 from flx.data.image_loader import (
     ImageLoader,
+    SFINGE_CROPPED_ROWS,
     SFingeLoader,
     FVC2004Loader,
     NistSD4Dataset,
@@ -196,6 +198,21 @@ def test_minutia_map_mcyt_optical():
     minutia_map, mask = loader.get(Identifier(0, 8))
     print(minutia_map.shape)
     show_minutia_maps_from_tensor(minutia_map)
+
+
+def test_sfinge_loader_cuts_rows_off_the_bottom():
+    directory = join(TEST_DATA_DIR, "SFingeExample")
+    loader = SFingeLoader(directory)
+    assert len(loader.ids) > 0
+    for bid in loader.ids:
+        filename = f"{bid.subject + 1}_{bid.impression + 1}.png"
+        file_image = cv2.imread(join(directory, filename), cv2.IMREAD_GRAYSCALE)
+        image = loader.get(bid)
+        assert image.shape[1] == file_image.shape[0] - SFINGE_CROPPED_ROWS
+        assert image.shape[2] == file_image.shape[1]
+        assert np.array_equal(
+            (image[0] * 255).round().numpy(), file_image[:-SFINGE_CROPPED_ROWS]
+        )
 
 
 def test_pose_dataset(tmp_path):
