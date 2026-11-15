@@ -151,9 +151,12 @@ def _read_mnt_file(filepath: str) -> tuple[np.ndarray, np.ndarray]:
         locs = []
         oris = []
         for line in lines[2:]:
-            x, y, ori = line.split(" ")
-            locs.append((float(x), float(y)))
-            oris.append(float(ori))
+            # x, y and angle; further columns (minutia class, score) are not used
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            locs.append((float(parts[0]), float(parts[1])))
+            oris.append(float(parts[2]))
     return np.array(locs, dtype=np.float16), np.array(oris, dtype=np.float16)
 
 
