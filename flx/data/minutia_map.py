@@ -123,9 +123,9 @@ def create_minutia_map(
         numpy float array of shape (num_minutiae)
         Contains the corresponding minutia orientations where e.g.
             > 0.0    is orientation in the direction of the x-Axis (to the right)
-            > 1/2 pi is the direction of the y-Axis (upwards)
+            > 1/2 pi is the direction of the y-Axis (downwards, see the coordinates above)
             > pi (or -pi) is the direction of the negative x-Axis (to the left)
-            > 3/2 pi (or - 1/2 pi) is the direction of the negative y-Axis (downwards)
+            > 3/2 pi (or - 1/2 pi) is the direction of the negative y-Axis (upwards)
     @param image_resolution :
         resolution of the fingerprint image (width, height)
     @param out_resolution :
@@ -170,7 +170,7 @@ def create_minutia_map(
 
     mask = _gaussian_mask(sigma, radius)
     base_density = np.reshape(
-        np.repeat(mask, n_layers), newshape=(mask.shape[0], mask.shape[0], n_layers)
+        np.repeat(mask, n_layers), (mask.shape[0], mask.shape[0], n_layers)
     )
 
     for minu_idx, layer_weights in enumerate(minu_layer_weights[:]):

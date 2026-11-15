@@ -78,10 +78,16 @@ pip download \
 If you plan to use the FingerFlow minutiae extractor ([scripts/extract_minutiae.py](scripts/extract_minutiae.py)):
 
 ```bash
-pip download fingerflow --dest ./packages-fingerflow
+git clone https://github.com/craig-forefront/minutiae_extractor.git
 ```
 
-**Note**: FingerFlow requires pre-trained model weights (CoarseNet.h5, FineNet.h5, ClassifyNet.h5, CoreNet.h5). See Step 2 below.
+This is a fork of https://github.com/tourmii/minutiae_extractor. The script needs a revision of it that has the
+direction refinement (`image_dpi` option of its `Extractor`, file `src/fingerflow/extractor/direction_sense.py`);
+check that this file is in your checkout, and check out the branch that has it if not. The `fingerflow` release on
+PyPI does not have it. Also download the dependencies listed in its `pyproject.toml` (TensorFlow, pandas,
+scikit-image, ...) to `./packages-fingerflow`.
+
+**Note**: FingerFlow requires pre-trained model weights (CoarseNet.h5, FineNet.h5, ClassifyNet_6_classes.h5, CoreNet.weights). See Step 2 below.
 
 ### Step 2: Download Pre-trained Models (Optional)
 
@@ -96,13 +102,13 @@ The authors provide a pre-trained DeepPrint model (512-dimensional embeddings):
 
 If using the FingerFlow minutiae extractor, download the required model weights:
 
-1. Visit: https://github.com/tourmii/minutiae_extractor
-2. Download the following model files:
+1. In the minutiae_extractor checkout, run `python scripts/install_model.py` as described in its README. It downloads
+   the model files to its `models/` directory:
    - `CoarseNet.h5`
    - `FineNet.h5`
-   - `ClassifyNet.h5`
-   - `CoreNet.h5`
-3. Save to `pretrained-models/fingerflow/`
+   - `ClassifyNet_6_classes.h5`
+   - `CoreNet.weights`
+2. Copy them to `pretrained-models/fingerflow/`
 
 ### Step 3: Download Project Source Code
 
@@ -205,9 +211,13 @@ pip install --no-index --find-links=../airgap-packages/packages-dev \
 
 #### Install FingerFlow (Optional)
 
+Install the dependencies of the minutiae_extractor repository from `../airgap-packages/packages-fingerflow` and make
+its `fingerflow` package importable, e.g.
+
 ```bash
-pip install --no-index --find-links=../airgap-packages/packages-fingerflow \
-  fingerflow
+# An absolute path, so that it also works from other directories
+export PYTHONPATH="$(realpath ../airgap-packages/minutiae_extractor/src)"
+python3 -c "from fingerflow.extractor import Extractor, direction_sense"
 ```
 
 ### Step 5: Install the FLX Package
@@ -241,16 +251,18 @@ Organize your fingerprint dataset according to the project structure:
 data/
 ├── fingerprints/
 │   └── your-dataset/
-│       ├── subject_001/
-│       │   ├── impression_01.png
-│       │   ├── impression_02.png
-│       │   └── ...
-│       └── subject_002/
-│           └── ...
+│       ├── 1_1.png     (<subject>_<impression>.png)
+│       ├── 1_2.png
+│       ├── 2_1.png
+│       └── ...
 └── poses/
     └── your-dataset/
-        └── ... (minutiae files)
+        └── ... (minutiae files, 1_1.mnt, ...)
 ```
+
+`scripts/train_500k.py` and the `FingerFlowMinutiaMapLoader` read these file names as they are. For other names or
+nested directories, write your own image loader and use `FingerFlowMinutiaMapLoaderCustomNaming`, see Steps 4 and 5
+of [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md).
 
 See [notebooks/dataset_tutorial.ipynb](notebooks/dataset_tutorial.ipynb) for detailed instructions on dataset preparation.
 
@@ -264,9 +276,13 @@ python scripts/extract_minutiae.py \
   --output_dir data/poses/your-dataset \
   --coarse_net ../pretrained-models/fingerflow/CoarseNet.h5 \
   --fine_net ../pretrained-models/fingerflow/FineNet.h5 \
-  --classify_net ../pretrained-models/fingerflow/ClassifyNet.h5 \
-  --core_net ../pretrained-models/fingerflow/CoreNet.h5
+  --classify_net ../pretrained-models/fingerflow/ClassifyNet_6_classes.h5 \
+  --core_net ../pretrained-models/fingerflow/CoreNet.weights \
+  --image_dpi 500
 ```
+
+See "Option A: Extract Minutiae Using FingerFlow" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for the
+choice of `--image_dpi`.
 
 ### Training Examples
 

@@ -8,7 +8,8 @@ Designed to compare:
 Both directories must contain .mnt files in FingerFlow-compatible format:
     Line 1: <num_minutiae>
     Line 2: <image_width> <image_height>
-    Lines 3+: <x> <y> <angle_radians>
+    Lines 3+: <x> <y> <angle_radians> [<class_index> [<direction_confidence>]]
+              (only x, y and the angle are compared)
 
 Matching algorithm per image pair:
     Greedy nearest-neighbour with:

@@ -97,17 +97,18 @@ def classify_all(minutiae, gray_image, classify_net, fe_utils):
 
 def _triangle_pts(cx, cy, r, angle):
     angles = [angle + math.pi / 2 + i * 2 * math.pi / 3 for i in range(3)]
-    pts = [[int(cx + r * math.cos(a)), int(cy - r * math.sin(a))] for a in angles]
+    pts = [[int(cx + r * math.cos(a)), int(cy + r * math.sin(a))] for a in angles]
     return np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
 
 
 def _diamond_pts(cx, cy, r, angle):
     angles = [angle + i * math.pi / 2 for i in range(4)]
-    pts = [[int(cx + r * math.cos(a)), int(cy - r * math.sin(a))] for a in angles]
+    pts = [[int(cx + r * math.cos(a)), int(cy + r * math.sin(a))] for a in angles]
     return np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
 
 
 def draw_minutia(panel, x, y, angle, cls, r=8):
+    """The direction of a minutia is (cos(angle), sin(angle)) with y pointing down."""
     color = TYPE_COLORS.get(int(cls), TYPE_COLORS[-1])
     xi, yi = int(round(x)), int(round(y))
     if cls == 0:
@@ -119,7 +120,7 @@ def draw_minutia(panel, x, y, angle, cls, r=8):
     # Orientation arrow (forward direction)
     ar = int(r * 1.8)
     ax = xi + int(ar * math.cos(angle))
-    ay = yi - int(ar * math.sin(angle))
+    ay = yi + int(ar * math.sin(angle))
     cv2.arrowedLine(panel, (xi, yi), (ax, ay), color, 1, tipLength=0.4)
 
 

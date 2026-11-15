@@ -14,6 +14,10 @@ Output .mnt format (FingerFlow-compatible, 3 columns):
     Line 2: <image_width> <image_height>
     Lines 3+: <x> <y> <angle_radians>
 
+The files are meant for the comparison with other extractors. The minutia
+directions are not refined here, so do not build minutia maps for DeepPrint
+training from these files; use scripts/extract_minutiae.py for that.
+
 References:
     CoarseNet_model.py:inference() for the original pipeline
     CoarseNet_model.py:fuse_minu_orientation()
@@ -98,10 +102,13 @@ def _process_single_image(image_path, main_net_model, model_FineNet,
     Returns:
         (mnt_nms, img_size)
         - mnt_nms: Nx4 array [x, y, orientation_rad, score], may be (0,4) if none found
-        - img_size: (height, width) tuple in pixels (trimmed to multiple of 8)
+        - img_size: (height, width) of the full image in pixels. The minutia
+          coordinates refer to it, the network sees its top left part.
     """
     # 1. Load image
     image = misc.imread(image_path, mode='L')
+
+    full_size = image.shape[:2]
 
     # Trim to multiple of 8 (required by CoarseNet's pooling structure)
     img_size = np.array(image.shape, dtype=np.int32) // 8 * 8
@@ -193,7 +200,7 @@ def _process_single_image(image_path, main_net_model, model_FineNet,
     # 10. Fuse minutiae orientation with STFT orientation field (mode=3: average)
     fuse_minu_orientation(dir_map, mnt_nms, mode=3)
 
-    return mnt_nms, img_size
+    return mnt_nms, full_size
 
 
 def main():

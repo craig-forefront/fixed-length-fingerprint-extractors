@@ -11,6 +11,11 @@ Output .mnt format:
               class index: 0=ending  1=bifurcation  2=fragment
                            3=enclosure  4=crossbar  5=other
 
+The files are meant for the comparison with other extractors. The minutia
+directions are not refined here, a good part of them points the opposite way.
+Do not build minutia maps for DeepPrint training from these files; use
+scripts/extract_minutiae.py or scripts/run_minutiae_extractor.py for that.
+
 CoreNet results (if enabled) are saved as a <stem>.core.csv sidecar alongside
 each .mnt file: x1,y1,x2,y2,score,w,h
 
@@ -208,7 +213,9 @@ def main():
                     columns=cols
                 )
 
-            height, width = trimmed.shape[:2]
+            # Size of the full image: the minutia coordinates refer to it, the
+            # trimmed image is its top left part
+            height, width = image_bgr.shape[:2]
             _write_mnt(mnt_path, df, width, height)
 
             cls_info = ''

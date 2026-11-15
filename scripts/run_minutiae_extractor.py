@@ -2,17 +2,26 @@
 Run minutiae_extractor-main (modernised FingerFlow) on a directory of
 fingerprint images.
 
-Uses MinutiaeNet (CoarseNet + FineNet) followed by ClassifyNet to assign one
-of six minutiae types to every extracted point.  CoreNet (core-point
-detection) is intentionally skipped here — it is not needed for comparing
-minutiae output.
+Uses the Extractor of that package, i.e. MinutiaeNet (CoarseNet + FineNet),
+the image-based refinement of the minutia direction and ClassifyNet, which
+assigns one of six minutiae types to every extracted point.  The core points
+found by CoreNet are not written.
+
+Feed the images in their native resolution.  --image_dpi is only used to find
+the direction of the minutiae and depends on the ridge period of the images:
+roughly 500 * period_px / 9.5 (500 for ordinary 500 ppi prints).  Extract all
+.mnt files of a dataset with the same setting.
 
 Output .mnt format (compatible with scripts/compare_minutiae_outputs.py):
     Line 1: <num_minutiae>
     Line 2: <image_width> <image_height>
-    Lines 3+: <x> <y> <angle_radians> [<class_index>]
+    Lines 3+: <x> <y> <angle_radians> <class_index> <direction_confidence>
               class index: 0=ending  1=bifurcation  2=fragment
                            3=enclosure  4=crossbar  5=other
+
+    x is the column and y the row of the image (y pointing down). The angle is
+    the direction of the minutia, the direction vector is (cos(angle), sin(angle))
+    in these axes.
 
 Usage:
     python scripts/run_minutiae_extractor.py \\
@@ -51,13 +60,31 @@ CLASS_NAMES = {
 
 
 def _write_mnt(filepath, df, width, height):
-    """Write .mnt file — standard 3-column format plus optional class column."""
+    """Write .mnt file — standard 3-column format plus class and direction confidence."""
     with open(filepath, 'w') as f:
         f.write('%d\n' % len(df))
         f.write('%d %d\n' % (width, height))
         for _, row in df.iterrows():
             cls = int(row['class']) if 'class' in df.columns and not np.isnan(row['class']) else -1
-            f.write('%.4f %.4f %.6f %d\n' % (row['x'], row['y'], row['angle'], cls))
+            f.write('%.4f %.4f %.6f %d %.4f\n' % (
+                row['x'], row['y'], row['angle'], cls, row['direction_confidence']))
+
+
+def process_image(extractor, image_path, output_path):
+    """Extract the minutiae of one image and write them to output_path.
+
+    Returns the minutiae DataFrame of the extractor.
+    """
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise ValueError('Could not read image: %s' % image_path)
+
+    df = extractor.extract_minutiae(image)['minutiae']
+
+    # The minutiae coordinates refer to the full image
+    height, width = image.shape[:2]
+    _write_mnt(output_path, df, width, height)
+    return df
 
 
 def main():
@@ -75,56 +102,29 @@ def main():
                              '(default: minutiae_extractor-main/models)')
     parser.add_argument('--ext', default='.bmp',
                         help='Image file extension (default: .bmp)')
-    parser.add_argument('--no_classify', action='store_true',
-                        help='Skip ClassifyNet (faster, no class labels)')
+    parser.add_argument('--image_dpi', type=float, default=500,
+                        help='Resolution of the images, used to find the direction of the '
+                             'minutiae; roughly 500 * ridge_period_px / 9.5 (default: 500)')
     args = parser.parse_args()
 
     models_dir = args.models_dir
     coarse_net  = os.path.join(models_dir, 'CoarseNet.h5')
     fine_net    = os.path.join(models_dir, 'FineNet.h5')
     classify_net = os.path.join(models_dir, 'ClassifyNet_6_classes.h5')
+    core_net    = os.path.join(models_dir, 'CoreNet.weights')
 
-    for path, label in [(coarse_net, 'CoarseNet'), (fine_net, 'FineNet')]:
+    for path, label in [(coarse_net, 'CoarseNet'), (fine_net, 'FineNet'),
+                        (classify_net, 'ClassifyNet'), (core_net, 'CoreNet')]:
         if not os.path.isfile(path):
             print('ERROR: %s not found: %s' % (label, path))
             sys.exit(1)
 
-    if not args.no_classify and not os.path.isfile(classify_net):
-        print('WARNING: ClassifyNet not found (%s); running without classification.' % classify_net)
-        args.no_classify = True
-
     # Lazy import after path checks (TF startup is slow)
-    from fingerflow.extractor.minutiae_net import MinutiaeNet
-    from fingerflow.extractor import utils as fe_utils
+    from fingerflow.extractor import Extractor
 
-    print('Loading MinutiaeNet...')
-    net = MinutiaeNet(coarse_net, fine_net)
-
-    # -----------------------------------------------------------------------
-    # Bug workaround: minutiae_extractor-main overwrites correctly-loaded
-    # Gabor filter weights with freshly-computed ones, but the saved H5
-    # weights diverged during training (mean ~8 vs computed mean ~0.001).
-    # Reload the true Gabor weights from the H5 file.
-    # -----------------------------------------------------------------------
-    try:
-        import h5py
-        with h5py.File(coarse_net, 'r') as hf:
-            for layer_name in ('enh_img_real_1', 'enh_img_imag_1'):
-                layer = net._MinutiaeNet__coarse_net.get_layer(layer_name)
-                grp = hf[layer_name][layer_name]
-                saved_kernel = grp['kernel:0'][()]
-                saved_bias   = grp['bias:0'][()]
-                layer.set_weights([saved_kernel, saved_bias])
-        print('Gabor filter weights restored from H5 (bug workaround applied).')
-    except Exception as e:
-        print('WARNING: could not restore Gabor weights: %s' % e)
-
-    classify = None
-    if not args.no_classify:
-        from fingerflow.extractor.classify_net import ClassifyNet
-        from fingerflow.extractor.ClassifyNet.utils import format_classified_data
-        print('Loading ClassifyNet...')
-        classify = ClassifyNet(classify_net)
+    print('Loading Extractor...')
+    extractor = Extractor(coarse_net, fine_net, classify_net, core_net,
+                          image_dpi=args.image_dpi)
 
     print('Models loaded.')
 
@@ -145,30 +145,8 @@ def main():
         basename = os.path.splitext(os.path.basename(image_path))[0]
         output_path = os.path.join(args.output_dir, basename + '.mnt')
         try:
-            # Load as BGR — preprocess_image_data converts to grayscale internally
-            image_bgr = cv2.imread(image_path)
-            if image_bgr is None:
-                raise ValueError('Could not read image: %s' % image_path)
-
-            preprocessed = fe_utils.preprocess_image_data(image_bgr)
-            trimmed   = preprocessed['image']           # grayscale, 8-multiple
-            original  = preprocessed['original_image']  # grayscale original
-
-            mnt_array = net.extract_minutiae_points(trimmed, original)
-
-            if classify is not None and mnt_array.shape[0] > 0:
-                df = classify.classify_minutiae_points(original, mnt_array)
-            else:
-                # Build minimal DataFrame without class labels
-                import pandas as pd
-                df = pd.DataFrame(
-                    mnt_array[:, :4] if mnt_array.shape[0] > 0 else [],
-                    columns=['x', 'y', 'angle', 'score']
-                )
-
-            height, width = trimmed.shape[:2]
-            _write_mnt(output_path, df, width, height)
-            cls_info = '' if classify is None else (
+            df = process_image(extractor, image_path, output_path)
+            cls_info = (
                 ' (endings=%d bifurcs=%d)' % (
                     (df['class'] == 0).sum(), (df['class'] == 1).sum())
                 if len(df) > 0 else '')
