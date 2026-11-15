@@ -204,11 +204,14 @@ def test_sfinge_loader_cuts_rows_off_the_bottom():
     directory = join(TEST_DATA_DIR, "SFingeExample")
     loader = SFingeLoader(directory)
     assert len(loader.ids) > 0
+    # The example images have 392 rows; the loader must return the top 360.
+    assert SFINGE_CROPPED_ROWS == 32
     for bid in loader.ids:
         filename = f"{bid.subject + 1}_{bid.impression + 1}.png"
         file_image = cv2.imread(join(directory, filename), cv2.IMREAD_GRAYSCALE)
         image = loader.get(bid)
         assert image.shape[1] == file_image.shape[0] - SFINGE_CROPPED_ROWS
+        assert image.shape[1] == 360
         assert image.shape[2] == file_image.shape[1]
         assert np.array_equal(
             (image[0] * 255).round().numpy(), file_image[:-SFINGE_CROPPED_ROWS]
