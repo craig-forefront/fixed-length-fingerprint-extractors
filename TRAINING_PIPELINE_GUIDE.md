@@ -218,6 +218,9 @@ class MyDatasetLoader(ImageLoader):
         # Load as grayscale
         img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
 
+        # Only option 2 keeps the minutia maps of FingerFlowMinutiaMapLoader aligned
+        # with the images: it scales the minutiae for the padded, complete image.
+
         # Option 1: Simple resize to 299x299 (may distort aspect ratio)
         # img = cv2.resize(img, (299, 299))
         # return VTF.to_tensor(img)
@@ -230,7 +233,7 @@ class MyDatasetLoader(ImageLoader):
         )
 
         # Option 3: Crop specific region then resize (e.g., for images with borders)
-        # roi = (start_height, end_height)  # Crop height range
+        # roi = (height, width)  # Size of the center crop
         # return pad_and_resize_to_deepprint_input_size(
         #     VTF.to_tensor(img),
         #     roi=roi,
@@ -302,6 +305,7 @@ from flx.data.dataset import Dataset, IdentifierSet, Identifier
 from flx.data.transformed_image_loader import TransformedImageLoader
 from flx.data.label_index import LabelIndex
 from flx.data.my_dataset_loader import MyDatasetLoader, MyDatasetMinutiaMapLoader
+from flx.data.minutia_map_loader import PoseTransformedMinutiaMapLoader
 from flx.image_processing.binarization import LazilyAllocatedBinarizer
 from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
 from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
@@ -361,8 +365,12 @@ def get_my_dataset_training(root_dir: str) -> tuple[Dataset, Dataset, Dataset]:
     image_dataset = Dataset(transformed_images, raw_loader.ids)
 
     # 5. Load minutiae (if available)
+    # The pose augmentation only transforms the image. PoseTransformedMinutiaMapLoader
+    # applies the random pose of each image to its minutiae as well, so that the
+    # minutia map still matches the image.
     try:
         minutia_loader = MyDatasetMinutiaMapLoader(root_dir.replace("fingerprints", "poses"))
+        minutia_loader = PoseTransformedMinutiaMapLoader(minutia_loader, transformed_images)
         minutia_dataset = Dataset(minutia_loader, raw_loader.ids)
     except Exception as e:
         print(f"Warning: Could not load minutiae: {e}")

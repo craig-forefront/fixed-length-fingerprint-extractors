@@ -3,6 +3,7 @@ import pytest
 
 from flx.data.image_helpers import (
     pad_and_resize_to_deepprint_input_size,
+    transform_from_input_size,
     transform_to_input_size,
 )
 from flx.setup.config import INPUT_SIZE
@@ -42,3 +43,24 @@ def test_transform_to_input_size_follows_the_image(shape):
         scale = INPUT_SIZE / max(shape)
         assert center_x == pytest.approx(float(expected_x) + 0.5 * scale, abs=0.2)
         assert center_y == pytest.approx(float(expected_y) + 0.5 * scale, abs=0.2)
+
+
+def test_transform_from_input_size_is_not_rounded_to_half_precision():
+    # The minutia map loaders return the points of transform_to_input_size as
+    # float16, which has a resolution of one pixel for values above 1024
+    height, width = 2000, 1500
+    points = np.array([(100.5, 200.25), (230.125, 40.0)], dtype=np.float16)
+    original = transform_from_input_size(points, height, width)
+    expected = points.astype(float) * (height / INPUT_SIZE) - np.array([250, 0])
+    assert original == pytest.approx(expected, abs=0.01)
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_transform_from_input_size_inverts_transform_to_input_size(shape):
+    height, width = shape
+    points = np.array([(40, 50), (width - 60, 70), (55, height - 45)], dtype=float)
+    transformed = transform_to_input_size(points, height, width)
+    # transform_to_input_size returns float16
+    assert transform_from_input_size(transformed, height, width) == pytest.approx(
+        points, abs=0.5
+    )

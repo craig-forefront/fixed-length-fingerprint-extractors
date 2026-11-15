@@ -26,6 +26,7 @@ from flx.data.image_loader import (
 )
 from flx.data.label_index import LabelIndex
 from flx.data.minutia_map_loader import (
+    PoseTransformedMinutiaMapLoader,
     SFingeMinutiaMapLoader,
     MCYTCapacitiveMinutiaMapLoader,
     MCYTOpticalMinutiaMapLoader,
@@ -105,9 +106,14 @@ def get_training_set(
     )
     ds = Dataset.concatenate(sfinge_images, mcyt_images, share_subjects=False)
 
-    # Minutia Maps
-    sfinge_minumaps = Dataset(SFingeMinutiaMapLoader(sfinge_dir), sfinge_ids)
+    # Minutia Maps, with the random pose of the image
+    sfinge_minumaps = PoseTransformedMinutiaMapLoader(
+        SFingeMinutiaMapLoader(sfinge_dir), sfinge_images.data_loader
+    )
+    sfinge_minumaps = Dataset(sfinge_minumaps, sfinge_ids)
 
+    # Like the SFinge minutia maps, the MCYT minutia maps need the random pose of their images:
+    # PoseTransformedMinutiaMapLoader(<minutia map loader>, <images>.data_loader)
     # mcyt_optical_minumaps = MCYTOpticalMinutiaMapLoader(mcyt_optical_dir)
     # mcyt_optical_minumaps = Dataset(
     #     mcyt_optical_minumaps, mcyt_optical_minumaps.ids.filter_by_index(range(NUM_MCYT_SUBJECTS * 12))

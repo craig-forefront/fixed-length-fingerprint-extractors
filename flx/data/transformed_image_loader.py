@@ -6,6 +6,7 @@ from flx.data.dataset import Identifier, IdentifierSet, DataLoader
 from flx.data.image_loader import ImageLoader
 from flx.data.pose_dataset import PoseLoader
 from flx.image_processing.augmentation import (
+    PoseTransform,
     RandomPoseTransform,
 )
 
@@ -37,6 +38,8 @@ class TransformedImageLoader(DataLoader):
         self._pose_distribution: RandomPoseTransform = None
         self._pose_dataset: PoseLoader = None
         self._transforms: list[Callable[[torch.Tensor], torch.Tensor]] = transforms
+        # Identifier, pose and image size (height, width) of the last call of get
+        self._last_pose: tuple[Identifier, PoseTransform, tuple[int, int]] = None
 
         if not (
             poses is None
@@ -63,18 +66,39 @@ class TransformedImageLoader(DataLoader):
         """
         Get a fingerprint sample from the underlying dataset with the described augmentations applied.
 
-        The transforms are only applied to the fingerprint image, not the minutia map.
+        The transforms are only applied to the fingerprint image. To apply the pose
+        transform to the minutia map as well, wrap the minutia map loader with a
+        PoseTransformedMinutiaMapLoader (see minutia_map_loader.py).
 
-        @returns tuple of fingerprint image, minutia map, label, subject, impression
+        @returns the transformed fingerprint image
         """
         img = self._images.get(identifier)
 
+        pose = None
         if self._pose_dataset is not None:
-            img = self._pose_dataset.get(identifier)(img)
+            pose = self._pose_dataset.get(identifier)
         elif self._pose_distribution is not None:
-            img = self._pose_distribution.sample()(img)
+            pose = self._pose_distribution.sample()
+        self._last_pose = (identifier, pose, (img.shape[-2], img.shape[-1]))
+
+        if pose is not None:
+            img = pose(img)
 
         for transform in self._transforms:
             img = transform(img)
 
         return img
+
+    def get_last_pose(
+        self, identifier: Identifier
+    ) -> tuple[Union[None, PoseTransform], tuple[int, int]]:
+        """
+        @returns the pose transform (None if there was none) that the last call of get
+            applied to the image of the identifier, and the (height, width) of the
+            image before the pose transform.
+        """
+        if self._last_pose is None or self._last_pose[0] != identifier:
+            raise RuntimeError(
+                f"The image of {identifier} must be loaded directly before its pose is used"
+            )
+        return self._last_pose[1:]

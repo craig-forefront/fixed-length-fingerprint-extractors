@@ -12,8 +12,10 @@ from flx.data.iso_encoder_decoder import decode
 
 from flx.data.image_helpers import (
     get_input_resolution,
+    transform_from_input_size,
     transform_to_input_size,
 )
+from flx.data.transformed_image_loader import TransformedImageLoader
 
 """
 The size of the original images created by SFinge.
@@ -55,6 +57,61 @@ class MinutiaMapLoader(DataLoader):
         return (VTF.to_tensor(minu_map), 1.0)
 
 
+class PoseTransformedMinutiaMapLoader(MinutiaMapLoader):
+    """
+    Applies the pose transform of the fingerprint image to its minutiae, so that the
+    minutia map matches the image when the pose of the image is augmented.
+
+    The pose is taken from the TransformedImageLoader of the images. It is the pose of
+    the last image that was loaded, therefore the image must be loaded directly before
+    its minutia map. This is the case when the image dataset comes before the minutia
+    map dataset in Dataset.zip, like in the training.
+
+    After the pose transform, the images must either be resized with
+    pad_and_resize_to_deepprint_input_size (without roi) or already have the input size.
+
+    The alignment of the localization network is not applied to the minutia maps,
+    with and without pose transform.
+    """
+
+    def __init__(self, minutia_maps: MinutiaMapLoader, images: TransformedImageLoader):
+        self._minutia_maps: MinutiaMapLoader = minutia_maps
+        self._images: TransformedImageLoader = images
+
+    @property
+    def ids(self) -> IdentifierSet:
+        return self._minutia_maps.ids
+
+    def get_minutiae(self, identifier: Identifier) -> tuple[np.ndarray, np.ndarray]:
+        """
+        @returns : Two numpy arrays of equal length. The first array is a 2-D array where each row is
+            one coordinate (x, y) of a minutia. The second array is a 1-D array containing the orientation
+            in radians.
+        """
+        locs, oris = self._minutia_maps.get_minutiae(identifier)
+        pose, (height, width) = self._images.get_last_pose(identifier)
+        if pose is None or locs.shape[0] == 0:
+            return locs, oris
+
+        # The pose transform is applied to the image before it is resized to the input size
+        locs = transform_from_input_size(locs, height, width)
+        locs = pose.transform_coordinates(locs, height, width)
+        locs = transform_to_input_size(
+            locs, height + 2 * pose.pad, width + 2 * pose.pad
+        )
+        oris = pose.transform_orientations(oris)
+
+        # Minutiae can be moved out of the image
+        input_height, input_width = get_input_resolution()
+        inside = (
+            (locs[:, 0] >= 0)
+            & (locs[:, 0] < input_width)
+            & (locs[:, 1] >= 0)
+            & (locs[:, 1] < input_height)
+        )
+        return locs[inside], oris[inside]
+
+
 class SFingeMinutiaMapLoader(MinutiaMapLoader):
     def __init__(
         self,
@@ -81,7 +138,7 @@ class SFingeMinutiaMapLoader(MinutiaMapLoader):
         """
         minutiae = decode.load_iso19794(
             self._files.get(identifier), format="19794-2-2005"
-        )[1:]
+        )
         locs = np.array([(m[1], m[2]) for m in minutiae])
         # The decoder returns the orientation in degrees
         oris = np.radians([m[3] for m in minutiae])
