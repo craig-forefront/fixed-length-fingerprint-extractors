@@ -141,8 +141,10 @@ def _train(
                  Set to False if you encounter numerical instability.
 
     Returns
-        - overall average epoch loss
+        - overall average epoch loss: the mean over the samples that this
+          process trained on (with a sampler these are not the whole set)
         - a dict with the epoch loss of individual loss components
+        - the share of these samples whose subject was named correctly
     """
     metric = torchmetrics.classification.MulticlassAccuracy(
         num_classes=train_set.num_subjects
@@ -161,6 +163,7 @@ def _train(
     )
     model.train()  # Outputs minutia maps and logits
     epoch_loss = 0
+    num_samples = 0
     loss_fun.reset_recorded_loss()
     for vals in tqdm.tqdm(train_dataloader):
         fp_imgs, minu_map_tpl, fp_labels = vals
@@ -201,6 +204,7 @@ def _train(
 
         # Record accuracy and loss
         epoch_loss += float(loss) * fp_labels.shape[0]
+        num_samples += fp_labels.shape[0]
         if output.combined_logits is not None:
             logits = output.combined_logits
         elif output.minutia_logits is None:
@@ -211,7 +215,7 @@ def _train(
             logits = output.texture_logits + output.minutia_logits
         metric(logits, fp_labels)
 
-    mean_loss = epoch_loss / len(train_set)
+    mean_loss = epoch_loss / num_samples if num_samples > 0 else 0.0
     multiclass_accuracy = float(metric.compute())
     return mean_loss, loss_fun.get_recorded_loss(), multiclass_accuracy
 

@@ -234,3 +234,54 @@ def test_validation_set_and_benchmark_must_come_together(tmp_path):
             out_dir=str(tmp_path),
         )
     assert not exists(join(tmp_path, "best_model.pyt"))
+
+
+# --- _train -------------------------------------------------------------------
+
+
+class _ConstantLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, output, labels, minutia_maps, minutia_map_weights):
+        return 2.0 + 0.0 * self.weight.sum() + 0.0 * output.texture_logits.sum()
+
+    def reset_recorded_loss(self):
+        pass
+
+    def get_recorded_loss(self):
+        return {}
+
+
+class _TinyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(1, 8)
+
+    def forward(self, images):
+        from flx.models.deep_print_arch import DeepPrintTrainingOutput
+
+        return DeepPrintTrainingOutput(texture_logits=self.linear(images))
+
+
+def test_epoch_loss_is_the_mean_over_the_samples_of_the_sampler():
+    # In multi-GPU training every process gets a sampler with a part of the
+    # training set. The loss of each sample is 2, so the mean must be 2.
+    ids = IdentifierSet([Identifier(s, 0) for s in range(8)])
+    train_set = Dataset.zip(
+        Dataset(ConstantDataLoader(torch.zeros(1)), ids),
+        Dataset(ConstantDataLoader((torch.zeros(0), 0.0)), ids),
+        Dataset(ConstantDataLoader(0), ids),
+    )
+    model = _TinyModel()
+    sampler = torch.utils.data.SubsetRandomSampler([0, 1, 2, 3])
+    mean_loss, _, _ = model_training._train(
+        model,
+        _ConstantLoss(),
+        torch.optim.SGD(model.parameters(), lr=0.1),
+        train_set,
+        sampler,
+        use_amp=False,
+    )
+    assert mean_loss == pytest.approx(2.0)
