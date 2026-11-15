@@ -1,22 +1,32 @@
 from functools import partial
-from os.path import join
+import importlib.util
+from os.path import dirname, join
 import random
 
+import cv2
 import numpy as np
 import pytest
 import torch
 
 from flx.data.dataset import Dataset, DataLoader, Identifier, IdentifierSet
 from flx.data.fingerflow_minutia_loader import FingerFlowMinutiaMapLoader
-from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
+from flx.data.image_helpers import (
+    pad_and_resize_to_deepprint_input_size,
+    transform_to_input_size,
+)
 from flx.data.minutia_map_loader import (
     MINUTIA_MAP_SIZE,
+    MinutiaMapLoader,
     PoseTransformedMinutiaMapLoader,
 )
+from flx.data.label_index import LabelIndex
 from flx.data.pose_dataset import PoseLoader
 from flx.data.transformed_image_loader import TransformedImageLoader
 from flx.image_processing.augmentation import PoseTransform, RandomPoseTransform
+from flx.setup import datasets
 from flx.setup.config import INPUT_SIZE
+
+SCRIPTS_DIR = join(dirname(dirname(__file__)), "scripts")
 
 WIDTH = 292
 HEIGHT = 392
@@ -142,8 +152,20 @@ def _assert_minutia_matches_image(
     assert _angle_difference(oris[0], direction) < np.radians(2)
 
     minutia_map, weight = minutia_maps.get(identifier)
-    assert minutia_map.shape == (6, MINUTIA_MAP_SIZE, MINUTIA_MAP_SIZE)
     assert weight == 1.0
+    _assert_minutia_map_matches_image(minutia_map, position, tip)
+
+
+def _assert_minutia_map_matches_image(
+    minutia_map: torch.Tensor, position: np.ndarray, tip: np.ndarray
+) -> None:
+    """
+    @param minutia_map : map of one minutia
+    @param position : position of the marker of the minutia in the transformed image
+    @param tip : position of the marker of the direction in the transformed image
+    """
+    direction = np.arctan2(tip[1] - position[1], tip[0] - position[0])
+    assert minutia_map.shape == (6, MINUTIA_MAP_SIZE, MINUTIA_MAP_SIZE)
     peak_y, peak_x = np.unravel_index(
         int(minutia_map.sum(dim=0).argmax()), (MINUTIA_MAP_SIZE, MINUTIA_MAP_SIZE)
     )
@@ -292,3 +314,185 @@ def test_minutia_map_needs_pose_of_its_image(tmp_path):
     with pytest.raises(RuntimeError):
         minutia_maps.get(IDS[0])
     minutia_maps.get(IDS[1])
+
+
+# The tests below use the datasets of the training as they are built by the training
+# script and by get_training_set. Their images have a large marker at the minutia and
+# a small marker at the tip of its direction vector.
+
+# The markers stay in the image for all poses of the training
+CENTRAL_MINUTIAE = [
+    (146.0, 196.0, 0.0),
+    (120.0, 160.0, np.pi / 3),
+    (170.0, 220.0, 4.0),
+    (125.0, 215.0, 5.5),
+    (180.0, 170.0, 2.0),
+]
+
+
+def _two_marker_image(index: int, height: int, width: int) -> np.ndarray:
+    x, y, angle = CENTRAL_MINUTIAE[index % len(CENTRAL_MINUTIAE)]
+    tip_x = round(x + DIRECTION_MARKER_DISTANCE * np.cos(angle))
+    tip_y = round(y + DIRECTION_MARKER_DISTANCE * np.sin(angle))
+    x, y = round(x), round(y)
+    img = np.full((height, width), 255, dtype=np.uint8)
+    img[y - 5 : y + 6, x - 5 : x + 6] = 128
+    img[tip_y - 2 : tip_y + 3, tip_x - 2 : tip_x + 3] = 128
+    return img
+
+
+def _two_marker_positions(img: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+    """
+    @returns (x, y) of the large and of the small marker in the image, in pixels
+    """
+    count, labels = cv2.connectedComponents((img[0] < 0.9).numpy().astype(np.uint8))
+    assert count == 3  # Background and two markers
+    markers = [
+        torch.where(torch.from_numpy(labels == i), img, 1.0) for i in range(1, count)
+    ]
+    markers.sort(key=lambda marker: float((1.0 - marker).sum()), reverse=True)
+    return _marker_position(markers[0]), _marker_position(markers[1])
+
+
+def _identity(img: torch.Tensor) -> torch.Tensor:
+    return img
+
+
+def _no_binarizer(_: float):
+    return _identity
+
+
+def test_training_script_minutia_maps_follow_pose_of_images(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "train_500k", join(SCRIPTS_DIR, "train_500k.py")
+    )
+    train_500k = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(train_500k)
+    # Keep the markers as they are
+    monkeypatch.setattr(train_500k, "QUALITY_AUGMENTATION", _identity)
+    monkeypatch.setattr(train_500k, "LazilyAllocatedBinarizer", _no_binarizer)
+    monkeypatch.setattr(train_500k, "pad_and_resize_to_deepprint_input_size", RESIZE)
+
+    image_dir = tmp_path / "images"
+    minutiae_dir = tmp_path / "minutiae"
+    image_dir.mkdir()
+    minutiae_dir.mkdir()
+    ids = IdentifierSet([Identifier(i, 0) for i in range(len(CENTRAL_MINUTIAE))])
+    for identifier in ids:
+        x, y, angle = CENTRAL_MINUTIAE[identifier.subject]
+        name = f"{identifier.subject + 1}_1"
+        cv2.imwrite(
+            str(image_dir / f"{name}.png"),
+            _two_marker_image(identifier.subject, HEIGHT, WIDTH),
+        )
+        with open(minutiae_dir / f"{name}.mnt", "w") as file:
+            file.write(f"1\n{WIDTH} {HEIGHT}\n{x} {y} {angle} 0 1.0\n")
+
+    images = train_500k.create_image_dataset(str(image_dir), ids)
+    minutia_maps = train_500k.create_minutia_dataset(
+        str(minutiae_dir), ids, images.data_loader
+    )
+    labels = Dataset(LabelIndex(ids), ids)
+    # Like in the training, with worker processes
+    batches = torch.utils.data.DataLoader(
+        Dataset.zip(images, minutia_maps, labels),
+        batch_size=2,
+        shuffle=True,
+        num_workers=2,
+        multiprocessing_context="fork",
+    )
+    shifts = []
+    for _ in range(4):
+        for imgs, (maps, weights), subjects in batches:
+            for img, minutia_map, weight, subject in zip(imgs, maps, weights, subjects):
+                assert weight == 1.0
+                position, tip = _two_marker_positions(img)
+                _assert_minutia_map_matches_image(minutia_map, position, tip)
+                unposed = RESIZE(
+                    torch.from_numpy(_two_marker_image(int(subject), HEIGHT, WIDTH))[None]
+                    / 255
+                )
+                shifts.append(
+                    np.linalg.norm(position - _two_marker_positions(unposed)[0])
+                )
+    assert len(shifts) == 4 * len(ids)
+    # The poses were random
+    assert len(set(shifts)) == len(shifts)
+    assert max(shifts) > 20
+
+
+class _TwoMarkerImages(DataLoader):
+    def __init__(self, ids: IdentifierSet, height: int, width: int):
+        self._ids = ids
+        self._height = height
+        self._width = width
+
+    @property
+    def ids(self) -> IdentifierSet:
+        return self._ids
+
+    def get(self, identifier: Identifier) -> torch.Tensor:
+        img = _two_marker_image(identifier.subject, self._height, self._width)
+        return torch.from_numpy(img)[None] / 255
+
+
+class _TwoMarkerMinutiae(MinutiaMapLoader):
+    def __init__(self, ids: IdentifierSet):
+        self._ids = ids
+
+    @property
+    def ids(self) -> IdentifierSet:
+        return self._ids
+
+    def get_minutiae(self, identifier: Identifier) -> tuple[np.ndarray, np.ndarray]:
+        x, y, angle = CENTRAL_MINUTIAE[identifier.subject % len(CENTRAL_MINUTIAE)]
+        return (
+            transform_to_input_size(np.array([[x, y]]), HEIGHT, WIDTH),
+            np.array([angle]),
+        )
+
+
+def test_training_set_minutia_maps_follow_pose_of_images(monkeypatch):
+    # Stand-ins for the 6000 SFinge and 2000 MCYT subjects of the training set
+    sfinge_ids = IdentifierSet(
+        [Identifier(s, i) for s in range(6000) for i in range(10)]
+    )
+    mcyt_ids = IdentifierSet(
+        [Identifier(s, i) for s in range(2000) for i in range(12)]
+    )
+
+    def sfinge_images(_: str) -> DataLoader:
+        return _TwoMarkerImages(sfinge_ids, HEIGHT, WIDTH)
+
+    def mcyt_images(_: str) -> DataLoader:
+        return _TwoMarkerImages(mcyt_ids, INPUT_SIZE, INPUT_SIZE)
+
+    def sfinge_minutiae(_: str) -> MinutiaMapLoader:
+        return _TwoMarkerMinutiae(sfinge_ids)
+
+    monkeypatch.setattr(datasets, "SFingeLoader", sfinge_images)
+    monkeypatch.setattr(datasets, "MCYTOpticalLoader", mcyt_images)
+    monkeypatch.setattr(datasets, "MCYTCapacitiveLoader", mcyt_images)
+    monkeypatch.setattr(datasets, "SFingeMinutiaMapLoader", sfinge_minutiae)
+    # Keep the markers as they are
+    monkeypatch.setattr(datasets, "QUALITY_AUGMENTATION", _identity)
+    monkeypatch.setattr(datasets, "SFINGE_BINARIZATION", _identity)
+    monkeypatch.setattr(datasets, "pad_and_resize_to_deepprint_input_size", RESIZE)
+
+    images, minutia_maps, labels = datasets.get_training_set("", "", "")
+    samples = Dataset.zip(images, minutia_maps, labels)
+    unposed_images = _TwoMarkerImages(sfinge_ids, HEIGHT, WIDTH)
+
+    random.seed(3)
+    shifts = []
+    # The SFinge samples are the first of the training set
+    for index in list(range(0, len(sfinge_ids), 1999)) * 2:
+        img, (minutia_map, weight), _ = samples[index]
+        assert weight == 1.0
+        position, tip = _two_marker_positions(img)
+        _assert_minutia_map_matches_image(minutia_map, position, tip)
+        unposed = RESIZE(unposed_images.get(sfinge_ids[index]))
+        shifts.append(np.linalg.norm(position - _two_marker_positions(unposed)[0]))
+    # The poses were random
+    assert len(set(shifts)) == len(shifts) > 50
+    assert max(shifts) > 10

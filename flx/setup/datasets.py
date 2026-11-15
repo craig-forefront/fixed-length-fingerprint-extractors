@@ -112,6 +112,8 @@ def get_training_set(
     )
     sfinge_minumaps = Dataset(sfinge_minumaps, sfinge_ids)
 
+    # Like the SFinge minutia maps, the MCYT minutia maps need the random pose of their images:
+    # PoseTransformedMinutiaMapLoader(<minutia map loader>, <images>.data_loader)
     # mcyt_optical_minumaps = MCYTOpticalMinutiaMapLoader(mcyt_optical_dir)
     # mcyt_optical_minumaps = Dataset(
     #     mcyt_optical_minumaps, mcyt_optical_minumaps.ids.filter_by_index(range(NUM_MCYT_SUBJECTS * 12))

@@ -125,7 +125,7 @@ During training, data augumentation is applied to the fingerprint images. The fo
  - Random translation of up to 25 pixels in x and y direction
  - Random gain and contrast adjustment (see `flx/setup/datasets.py` -> `QUALITY_AUGMENTATION`)
 
-The rotation and translation are also applied to the minutiae, so that the minutia map of a training sample matches its augmented image (see `PoseTransformedMinutiaMapLoader` in `flx/data/minutia_map_loader.py`).
+The rotation and translation are also applied to the minutiae, so that the minutia map of a training sample follows the augmentation of its image (see `PoseTransformedMinutiaMapLoader` in `flx/data/minutia_map_loader.py`). This does not correct a minutia map that does not match its image without augmentation.
 
 The following preprocessing steps are applied to the fingerprint images before they are fed into the network:
 

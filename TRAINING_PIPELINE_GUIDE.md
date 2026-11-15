@@ -218,6 +218,9 @@ class MyDatasetLoader(ImageLoader):
         # Load as grayscale
         img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
 
+        # Only option 2 keeps the minutia maps of FingerFlowMinutiaMapLoader aligned
+        # with the images: it scales the minutiae for the padded, complete image.
+
         # Option 1: Simple resize to 299x299 (may distort aspect ratio)
         # img = cv2.resize(img, (299, 299))
         # return VTF.to_tensor(img)
@@ -230,7 +233,7 @@ class MyDatasetLoader(ImageLoader):
         )
 
         # Option 3: Crop specific region then resize (e.g., for images with borders)
-        # roi = (start_height, end_height)  # Crop height range
+        # roi = (height, width)  # Size of the center crop
         # return pad_and_resize_to_deepprint_input_size(
         #     VTF.to_tensor(img),
         #     roi=roi,
