@@ -170,7 +170,7 @@ def create_minutia_map(
 
     mask = _gaussian_mask(sigma, radius)
     base_density = np.reshape(
-        np.repeat(mask, n_layers), newshape=(mask.shape[0], mask.shape[0], n_layers)
+        np.repeat(mask, n_layers), (mask.shape[0], mask.shape[0], n_layers)
     )
 
     for minu_idx, layer_weights in enumerate(minu_layer_weights[:]):
