@@ -92,7 +92,8 @@ def suggest_learning_rate(
 
     The smoothed loss is followed up to its lowest point; everything after it
     is the divergence. Before that point, the rate at which the smoothed loss
-    falls fastest per factor of the learning rate is the "steepest" rate. The
+    falls fastest per factor of the learning rate is the "steepest" rate (the
+    fall is measured across a window of a tenth of the steps). The
     suggestion is the steepest rate divided by safety_divisor: at the steepest
     rate the test is already close to the rates that diverge, and a real
     training runs far longer than the test.
@@ -117,9 +118,17 @@ def suggest_learning_rate(
     log_lr = np.log10(np.array(learning_rates, dtype=float))
     steepest_lr = None
     if i_min - skip_first >= 2:
-        slope = np.gradient(usable[: i_min + 1], log_lr[: i_min + 1])
-        i_steep = skip_first + int(np.argmin(slope[skip_first:]))
-        if slope[i_steep] < 0:
+        # Fall of the smoothed loss per factor of ten of the learning rate,
+        # measured across a window of steps around each step. The difference
+        # between two neighbouring steps would mostly be noise.
+        # The window ends at the lowest point at the latest.
+        half_window = max(1, min(len(learning_rates) // 20, (i_min - skip_first) // 2))
+        index = np.arange(skip_first + half_window, i_min - half_window + 1)
+        before = index - half_window
+        after = index + half_window
+        slope = (usable[after] - usable[before]) / (log_lr[after] - log_lr[before])
+        i_steep = int(index[np.argmin(slope)])
+        if slope.min() < 0:
             steepest_lr = float(learning_rates[i_steep])
 
     if steepest_lr is None:

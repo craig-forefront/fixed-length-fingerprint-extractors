@@ -84,6 +84,18 @@ def test_suggestion_ignores_the_explosion_and_values_that_are_not_finite():
     assert suggestion.steepest_learning_rate == pytest.approx(1e-3, rel=0.2)
 
 
+def test_one_lucky_batch_at_the_lowest_point_is_not_the_steepest_fall():
+    # The last batch before the rise happens to have a much lower loss. The
+    # drop from its neighbour is the largest between two steps, but it is
+    # noise: the steepest fall is still measured across several steps.
+    rates, losses = _typical_curve()
+    i_min = min(range(len(losses)), key=losses.__getitem__)
+    losses[i_min] -= 0.3
+    suggestion = suggest_learning_rate(rates, losses, smoothing=0.0)
+    assert suggestion.lowest_loss_learning_rate == rates[i_min]
+    assert suggestion.steepest_learning_rate == pytest.approx(1e-3, rel=0.2)
+
+
 def test_no_suggestion_when_the_loss_never_falls():
     rates = range_test_learning_rates(1e-3, 1.0, 50)
     losses = [10.0 + i for i in range(50)]
