@@ -778,6 +778,15 @@ After every epoch the model is saved as `model.pyt`, and copied to
   an epoch after the training diverged; it cannot detect overfitting. Early
   stopping (`patience`) is off in this case.
 
+`scripts/train_500k.py` holds out validation subjects by default: 10 % of the
+subjects (`--validation_split 0.1`), chosen at random with a fixed seed
+(`--validation_seed 42`), with all their impressions. Subjects are held out,
+not single images, because an image of a finger that is also in the training
+set would make the error rate look better than it is for new fingers. For a
+large training set, `--max_validation_subjects` (for example 5000) limits the
+number of held-out subjects, so that validation after every epoch stays short.
+`--validation_split 0` switches validation off.
+
 `TrainingLog.selection_metric` names the field that was used, and
 `TrainingLog.best_entry` returns the entry of the best epoch:
 
