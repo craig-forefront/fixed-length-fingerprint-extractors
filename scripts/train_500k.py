@@ -52,6 +52,27 @@ Validation (on by default):
         --validation_split 0.1 \
         --max_validation_subjects 5000 \
         --patience 3
+
+Learning rate (see "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md):
+    The learning rate is the size of the change that the optimizer makes to
+    the model in every step (one batch). The right value depends on the data,
+    the model variant and the batch size. Find it with
+    scripts/find_learning_rate.py before a long training.
+
+    --learning_rate 0.0001          learning rate after the warm-up
+    --warmup_steps 500              number of first steps over which the rate
+                                    rises in a straight line to --learning_rate
+                                    (0 = no warm-up)
+    --lr_schedule cosine            "constant" keeps the rate after the warm-up,
+                                    "cosine" lowers it smoothly to 1 % of
+                                    --learning_rate in the last step of the
+                                    last epoch
+    --gradient_clip_norm 5.0        upper limit for the length of the gradient
+                                    in one step (0 = no limit)
+
+    Options that are not given use the values in flx/setup/config.py. The
+    training stops with a message when the loss is not a finite number or far
+    above the loss at the start.
 """
 
 import os
@@ -72,6 +93,7 @@ from flx.data.dataset import ConstantDataLoader
 from flx.extractor.fixed_length_extractor import get_DeepPrint_LocTexMinu, get_DeepPrint_LocTex
 from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
 from flx.image_processing.binarization import LazilyAllocatedBinarizer
+from flx.models.learning_rate import SCHEDULES, LearningRateConfig
 from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
 
 
@@ -379,7 +401,28 @@ def main():
                              f"of the validation pairs (default: {VALIDATION_SEED})")
     parser.add_argument("--patience", type=int, default=3,
                         help="Early stopping patience - epochs without improvement (default: 3, 0=disabled)")
+    parser.add_argument("--learning_rate", type=float, default=None,
+                        help="Learning rate after the warm-up (default: LEARNING_RATE "
+                             "in flx/setup/config.py). Find it with scripts/find_learning_rate.py")
+    parser.add_argument("--warmup_steps", type=int, default=None,
+                        help="Number of first steps over which the learning rate rises to "
+                             "--learning_rate, 0=no warm-up (default: "
+                             "LEARNING_RATE_WARMUP_STEPS in flx/setup/config.py)")
+    parser.add_argument("--lr_schedule", type=str, default=None, choices=SCHEDULES,
+                        help="Learning rate after the warm-up: constant, or cosine decay to "
+                             "1%% in the last step (default: LEARNING_RATE_SCHEDULE in "
+                             "flx/setup/config.py)")
+    parser.add_argument("--gradient_clip_norm", type=float, default=None,
+                        help="Upper limit for the gradient norm of one step, 0=no limit "
+                             "(default: GRADIENT_CLIP_NORM in flx/setup/config.py)")
     args = parser.parse_args()
+    # Options that were not given are None and take the value from the config
+    learning_rate = LearningRateConfig(
+        learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
+        schedule=args.lr_schedule,
+        gradient_clip_norm=args.gradient_clip_norm,
+    )
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -415,6 +458,7 @@ def main():
         print(f"Patience:     not used (no validation set)")
         print(f"Best model:   lowest training loss (no validation set)")
     print(f"Embedding:    {args.embedding_dim} dims")
+    print(f"Optimizer:    Adam, {learning_rate.describe()}")
     print(f"Output:       {args.output_dir}")
     print(f"Device:       {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     if torch.cuda.is_available():
@@ -496,6 +540,7 @@ def main():
         num_epochs=args.num_epochs,
         out_dir=args.output_dir,
         patience=args.patience,
+        learning_rate=learning_rate,
     )
 
     model_type = "LocTexMinu" if args.minutiae_dir else "LocTex"
