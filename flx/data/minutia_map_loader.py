@@ -81,7 +81,7 @@ class SFingeMinutiaMapLoader(MinutiaMapLoader):
         """
         minutiae = decode.load_iso19794(
             self._files.get(identifier), format="19794-2-2005"
-        )[1:]
+        )
         locs = np.array([(m[1], m[2]) for m in minutiae])
         # The decoder returns the orientation in degrees
         oris = np.radians([m[3] for m in minutiae])

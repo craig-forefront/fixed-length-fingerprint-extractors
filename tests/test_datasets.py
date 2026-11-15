@@ -26,6 +26,7 @@ from flx.data.minutia_map_loader import (
     MCYTCapacitiveMinutiaMapLoader,
 )
 from flx.data.pose_dataset import PoseLoader
+from flx.setup.config import INPUT_SIZE
 from flx.setup.paths import get_fingerprint_dataset_path, get_pose_dataset_path
 from flx.image_processing.augmentation import (
     RandomPoseTransform,
@@ -143,15 +144,43 @@ def test_sfinge_minutia_orientations_are_radians():
     assert len(locs) == len(oris) > 0
 
     # In the ISO 19794-2:2005 file each minutia has 6 bytes, the 5th is the
-    # angle in units of 360 / 256 degrees, counterclockwise. The loader skips
-    # the first minutia and returns the clockwise angle (y points down).
+    # angle in units of 360 / 256 degrees, counterclockwise. The loader returns
+    # the clockwise angle (y points down).
     with open(join(root_dir, "1_1.ist"), "rb") as file:
         template = file.read()
-    angle_bytes = np.array([template[28 + 6 * i + 4] for i in range(1, template[27])])
+    angle_bytes = np.array([template[28 + 6 * i + 4] for i in range(template[27])])
     expected = 2 * np.pi * (1 - angle_bytes / 256)
     assert oris == pytest.approx(expected)
     assert oris.min() >= 0
     assert oris.max() <= 2 * np.pi
+
+
+def test_sfinge_minutiae_are_complete():
+    root_dir = join(TEST_DATA_DIR, "SFingeExample")
+    loader = SFingeMinutiaMapLoader(root_dir)
+    for identifier in loader.ids:
+        filename = f"{identifier.subject + 1}_{identifier.impression + 1}.ist"
+        with open(join(root_dir, filename), "rb") as file:
+            template = file.read()
+        # The 28 bytes of the headers end with the number of minutiae, then
+        # there are 6 bytes for each minutia. The first two are the type (2 bits)
+        # and x (14 bits), the next two are y.
+        num_minutiae = template[27]
+        assert len(template) >= 28 + 6 * num_minutiae
+        x = [
+            int.from_bytes(template[28 + 6 * i : 30 + 6 * i], "big") & 0x3FFF
+            for i in range(num_minutiae)
+        ]
+        y = [
+            int.from_bytes(template[30 + 6 * i : 32 + 6 * i], "big")
+            for i in range(num_minutiae)
+        ]
+        scale = INPUT_SIZE / 560
+        expected = np.array([x, y]).T * scale + np.array([(560 - 416) / 2 * scale, 0])
+
+        locs, oris = loader.get_minutiae(identifier)
+        assert len(locs) == len(oris) == num_minutiae
+        assert locs == pytest.approx(expected, abs=0.5)
 
 
 def test_minutia_map_mcyt_capactive():
