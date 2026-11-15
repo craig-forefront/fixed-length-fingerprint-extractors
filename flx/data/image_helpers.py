@@ -87,3 +87,18 @@ def transform_to_input_size(
     minutia_points += np.array([pad_width, pad_height])
     minutia_points *= INPUT_SIZE / max(height, width)
     return minutia_points
+
+
+def transform_from_input_size(
+    minutia_points: np.ndarray,
+    original_height: int,
+    original_width: int,
+) -> np.ndarray:
+    """
+    Inverse of transform_to_input_size (without roi).
+    """
+    pad_width = max(original_height - original_width, 0) // 2
+    pad_height = max(original_width - original_height, 0) // 2
+
+    minutia_points = minutia_points * (max(original_height, original_width) / INPUT_SIZE)
+    return minutia_points - np.array([pad_width, pad_height])

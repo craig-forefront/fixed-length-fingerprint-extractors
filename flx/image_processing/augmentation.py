@@ -38,39 +38,41 @@ class PoseTransform:
             )
         return img
 
-    def transform_coordinates(self, coordinates: np.ndarray) -> np.ndarray:
+    def transform_coordinates(
+        self, coordinates: np.ndarray, height: int, width: int
+    ) -> np.ndarray:
         """
         Transfoms coordinates that belong to points in the original image to
         the coordinates of the points in the transformed image.
 
         @param coordinates : np.ndarray of the coordinates ((x_0, y_0), (x_1, y_1), ...)
+        @param height : height of the original image
+        @param width : width of the original image
 
         @returns np.ndarray of the transformed coordinates
         """
-
-        # use homogenout coordinates
-        homg_coords = np.append(
-            coordinates, np.ones(shape=(coordinates.shape[0])), axis=1
-        )
-        affine_mat = np.array(
+        # The image is rotated around its center
+        center = np.array([(width - 1) / 2, (height - 1) / 2])
+        angle = np.radians(self.angle)
+        rotation = np.array(
             [
-                [
-                    np.cos(self.angle),
-                    -np.sin(self.angle),
-                    self.pad + self.shift_horizontal,
-                ],
-                [
-                    np.sin(self.angle),
-                    np.cos(self.angle),
-                    self.pad + self.shift_vertical,
-                ],
-                [0, 0, 1],
-            ],
-            dtype=float,
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ]
         )
-        transformed_homg = np.matmul(affine_mat, homg_coords)
-        transformed_homg = transformed_homg / transformed_homg[:, 2]
-        return transformed_homg[:, :2]
+        shift = np.array([self.shift_horizontal, self.shift_vertical])
+        coordinates = np.asarray(coordinates, dtype=float).reshape(-1, 2)
+        return (coordinates - center) @ rotation.T + center + self.pad + shift
+
+    def transform_orientations(self, orientations: np.ndarray) -> np.ndarray:
+        """
+        Transfoms orientations of points in the original image (in radians, where the
+        direction vector is (cos(orientation), sin(orientation)) and y points downwards)
+        to the orientations of the points in the transformed image.
+
+        @returns np.ndarray of the transformed orientations
+        """
+        return orientations + np.radians(self.angle)
 
     def __str__(self) -> str:
         return f"PoseTransform(angle={self.angle}, shift_horizontal={self.shift_horizontal}, shift_vertical={self.shift_vertical}, pad={self.pad})"

@@ -39,6 +39,7 @@ from flx.data.image_loader import ImageLoader
 from flx.data.label_index import LabelIndex
 from flx.data.transformed_image_loader import TransformedImageLoader
 from flx.data.fingerflow_minutia_loader import FingerFlowMinutiaMapLoader
+from flx.data.minutia_map_loader import PoseTransformedMinutiaMapLoader
 from flx.data.dataset import ConstantDataLoader
 from flx.extractor.fixed_length_extractor import get_DeepPrint_LocTexMinu, get_DeepPrint_LocTex
 from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
@@ -231,6 +232,7 @@ def create_image_dataset(dataset_dir: str, training_ids: IdentifierSet) -> Datas
 def create_minutia_dataset(
     minutiae_dir: str,
     training_ids: IdentifierSet,
+    images: TransformedImageLoader,
 ) -> Dataset:
     """
     Create minutia map dataset.
@@ -239,13 +241,18 @@ def create_minutia_dataset(
         minutiae_dir: Directory containing .mnt files (from extract_minutiae.py)
                       If None, uses empty tensors (model still works, texture-only)
         training_ids: Identifiers for training samples
+        images: Loader of the training images. The minutia map of a sample gets
+                the random pose of its image.
 
     Returns:
         Dataset containing minutia maps
     """
     if minutiae_dir is not None:
         print(f"Loading minutiae from {minutiae_dir}")
-        return Dataset(FingerFlowMinutiaMapLoader(minutiae_dir), training_ids)
+        minutia_loader = PoseTransformedMinutiaMapLoader(
+            FingerFlowMinutiaMapLoader(minutiae_dir), images
+        )
+        return Dataset(minutia_loader, training_ids)
     else:
         # No minutiae available - use empty placeholder
         print("No minutiae directory provided - using texture-only mode")
@@ -329,7 +336,9 @@ def main():
     image_dataset = create_image_dataset(args.dataset_dir, training_ids)
 
     print(f"Creating minutia dataset...")
-    minutia_dataset = create_minutia_dataset(args.minutiae_dir, training_ids)
+    minutia_dataset = create_minutia_dataset(
+        args.minutiae_dir, training_ids, image_dataset.data_loader
+    )
 
     print(f"Creating label dataset...")
     label_dataset = Dataset(LabelIndex(training_ids), training_ids)
