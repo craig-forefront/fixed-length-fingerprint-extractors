@@ -39,8 +39,23 @@ def test_defaults_come_from_the_config_module(monkeypatch):
 
 def test_warmup_rises_in_a_straight_line_to_the_learning_rate():
     lr = LearningRateConfig(learning_rate=0.8, warmup_steps=4, schedule="constant")
-    rates = [lr.learning_rate_at(step, total_steps=10) for step in range(10)]
+    rates = [lr.learning_rate_at(step, total_steps=100) for step in range(10)]
     assert rates == pytest.approx([0.2, 0.4, 0.6, 0.8] + [0.8] * 6)
+
+
+def test_warmup_is_never_longer_than_a_tenth_of_the_training():
+    # A warm-up of 500 steps in a training of 40 steps would end the training
+    # at 8 % of the learning rate. It is cut to 4 steps.
+    lr = LearningRateConfig(learning_rate=1.0, warmup_steps=500, schedule="constant")
+    assert lr.effective_warmup_steps(total_steps=40) == 4
+    rates = [lr.learning_rate_at(step, total_steps=40) for step in range(40)]
+    assert rates == pytest.approx([0.25, 0.5, 0.75] + [1.0] * 37)
+    # In a training of fewer than 10 steps there is no warm-up
+    assert lr.learning_rate_at(0, total_steps=9) == 1.0
+    # A long training is not affected
+    assert lr.effective_warmup_steps(total_steps=1_000_000) == 500
+    assert "warm-up over 4 steps" in lr.describe(total_steps=40)
+    assert "warm-up over 500 steps" in lr.describe(total_steps=1_000_000)
 
 
 def test_without_warmup_the_first_step_has_the_full_learning_rate():
@@ -190,13 +205,13 @@ def batches_of_two(monkeypatch):
 
 
 def test_training_loop_follows_the_schedule_over_the_epochs(batches_of_two):
-    # 8 samples in batches of 2 are 4 steps per epoch, 12 steps in 3 epochs
+    # 8 samples in batches of 2 are 4 steps per epoch, 32 steps in 8 epochs
     lr = LearningRateConfig(
         learning_rate=1.0, warmup_steps=3, schedule="cosine", final_factor=0.1
     )
     model = _TinyModel()
     optimizer = _RecordingSGD(model.parameters(), lr=123.0)
-    for epoch in (1, 2, 3):
+    for epoch in range(1, 9):
         model_training._train(
             model,
             _ScriptedLoss([0.0]),
@@ -205,18 +220,18 @@ def test_training_loop_follows_the_schedule_over_the_epochs(batches_of_two):
             use_amp=False,
             learning_rate=lr,
             epoch=epoch,
-            num_epochs=3,
+            num_epochs=8,
         )
     assert optimizer.rates == pytest.approx(
-        [lr.learning_rate_at(step, 12) for step in range(12)]
+        [lr.learning_rate_at(step, 32) for step in range(32)]
     )
     assert optimizer.rates[:3] == pytest.approx([1 / 3, 2 / 3, 1.0])
     assert optimizer.rates[-1] == pytest.approx(0.1)
 
 
 def test_resumed_epoch_continues_the_schedule_where_it_was(batches_of_two):
-    # A new process that starts with epoch 3 must use the rates of epoch 3,
-    # although its optimizer has never seen the first two epochs
+    # A new process that starts with epoch 3 of 8 must use the rates of
+    # epoch 3, although its optimizer has never seen the first two epochs
     lr = LearningRateConfig(
         learning_rate=1.0, warmup_steps=3, schedule="cosine", final_factor=0.1
     )
@@ -230,11 +245,12 @@ def test_resumed_epoch_continues_the_schedule_where_it_was(batches_of_two):
         use_amp=False,
         learning_rate=lr,
         epoch=3,
-        num_epochs=3,
+        num_epochs=8,
     )
     assert optimizer.rates == pytest.approx(
-        [lr.learning_rate_at(step, 12) for step in range(8, 12)]
+        [lr.learning_rate_at(step, 32) for step in range(8, 12)]
     )
+    assert optimizer.rates[0] < 1.0  # the decay is under way
 
 
 def test_gradient_clipping_limits_the_length_of_the_step(batches_of_two):
@@ -313,13 +329,15 @@ def test_exploding_loss_stops_the_training_and_keeps_the_last_epoch(
 
 
 def test_training_log_holds_the_learning_rate_of_each_epoch(batches_of_two, tmp_path):
+    # 2 epochs of 2 steps. The cosine decay from 1e-3 to 5e-4 over the steps
+    # 0 .. 3 is at 8.75e-4 in step 1 (the end of epoch 1).
     lr = LearningRateConfig(
-        learning_rate=1e-3, warmup_steps=2, schedule="cosine", final_factor=0.5
+        learning_rate=1e-3, warmup_steps=0, schedule="cosine", final_factor=0.5
     )
     _train_tiny_model(tmp_path, [1.0], num_epochs=2, learning_rate=lr)
     with open(join(tmp_path, "log.json")) as file:
         entries = json.load(file)["entries"]
-    assert [e["learning_rate"] for e in entries] == pytest.approx([1e-3, 5e-4])
+    assert [e["learning_rate"] for e in entries] == pytest.approx([8.75e-4, 5e-4])
 
 
 def test_resumed_training_uses_the_schedule_and_not_the_stored_rate(

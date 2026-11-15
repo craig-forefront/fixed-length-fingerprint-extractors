@@ -410,7 +410,16 @@ def train_model(
         reference_loss=logged_loss if logged_loss >= 0 else None,
     )
     if is_main_process():
-        print(f"Optimizer: Adam, {learning_rate.describe()}")
+        # Number of steps of the whole training in this process, as _train
+        # counts them: the batches of one epoch times the epochs
+        samples_per_epoch = len(sampler) if sampler is not None else len(training_set)
+        steps_per_epoch = math.ceil(
+            samples_per_epoch / get_dataloader_args(train=True)["batch_size"]
+        )
+        print(
+            "Optimizer: Adam, "
+            + learning_rate.describe(total_steps=steps_per_epoch * num_epochs)
+        )
 
     if (validation_fingerprints is None) != (validation_benchmark is None):
         raise ValueError(

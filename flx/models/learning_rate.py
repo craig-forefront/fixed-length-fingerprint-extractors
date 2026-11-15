@@ -21,6 +21,9 @@ from flx.setup import config
 
 SCHEDULES = ("constant", "cosine")
 
+# The warm-up takes at most one step in this many steps of the training
+WARMUP_MAX_DIVISOR = 10
+
 
 class TrainingDivergedError(RuntimeError):
     """The loss is not a finite number or far higher than at the start."""
@@ -36,6 +39,9 @@ class LearningRateConfig:
         warmup_steps: Number of steps of the warm-up. In step number i
             (counted from 1) of the warm-up the learning rate is
             learning_rate * i / warmup_steps. 0 switches the warm-up off.
+            The warm-up is never longer than a tenth of the whole training
+            (see effective_warmup_steps), so that a short training on a small
+            dataset still reaches the learning rate.
         schedule: "constant" keeps learning_rate after the warm-up. "cosine"
             lowers it along half a cosine wave so that the last step of the
             training uses learning_rate * final_factor.
@@ -94,6 +100,13 @@ class LearningRateConfig:
                 "loss_explosion_factor must be above 1, or 0 to switch the check off"
             )
 
+    def effective_warmup_steps(self, total_steps: int) -> int:
+        """
+        Number of warm-up steps of a training with total_steps steps:
+        warmup_steps, but at most a tenth of total_steps (rounded down).
+        """
+        return min(self.warmup_steps, total_steps // WARMUP_MAX_DIVISOR)
+
     def learning_rate_at(self, step: int, total_steps: int) -> float:
         """
         Learning rate of one step.
@@ -106,27 +119,40 @@ class LearningRateConfig:
             step: Number of steps done before this one in the whole training
                 (0 for the first step of epoch 1).
             total_steps: Number of steps of the whole training
-                (epochs * steps per epoch). Only used by "cosine".
+                (epochs * steps per epoch).
         """
-        if step < self.warmup_steps:
-            return self.learning_rate * (step + 1) / self.warmup_steps
+        warmup_steps = self.effective_warmup_steps(total_steps)
+        if step < warmup_steps:
+            return self.learning_rate * (step + 1) / warmup_steps
         if self.schedule == "constant":
             return self.learning_rate
         # cosine: progress is 0 in the first step after the warm-up and 1 in
         # the last step of the training
-        decay_steps = total_steps - self.warmup_steps
+        decay_steps = total_steps - warmup_steps
         if decay_steps <= 1:
             return self.learning_rate
-        progress = min((step - self.warmup_steps) / (decay_steps - 1), 1.0)
+        progress = min((step - warmup_steps) / (decay_steps - 1), 1.0)
         factor = self.final_factor + (1 - self.final_factor) * 0.5 * (
             1 + math.cos(math.pi * progress)
         )
         return self.learning_rate * factor
 
-    def describe(self) -> str:
+    def describe(self, total_steps: int | None = None) -> str:
+        """
+        The settings in words. With total_steps (the number of steps of the
+        whole training) the warm-up is given as it will be used.
+        """
         text = f"learning rate {self.learning_rate:g}"
-        if self.warmup_steps > 0:
-            text += f", warm-up over {self.warmup_steps} steps"
+        warmup_steps = self.warmup_steps
+        if total_steps is not None:
+            warmup_steps = self.effective_warmup_steps(total_steps)
+        if warmup_steps > 0:
+            text += f", warm-up over {warmup_steps} steps"
+            if warmup_steps < self.warmup_steps:
+                text += (
+                    f" (a tenth of the {total_steps} steps of the training "
+                    f"instead of {self.warmup_steps})"
+                )
         else:
             text += ", no warm-up"
         if self.schedule == "cosine":
