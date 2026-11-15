@@ -21,10 +21,19 @@ def pad_and_resize(
 
     height = img.shape[1]
     width = img.shape[2]
-    pad_width = 0 if width >= height else int((height - width) / 2)
-    pad_height = 0 if height >= width else int((width - height) / 2)
+    # If the difference is odd, the additional row or column goes to the bottom
+    # or right, see also transform_to_input_size.
+    pad_width = max(height - width, 0)
+    pad_height = max(width - height, 0)
     img = VTF.pad(
-        img, padding=(pad_width, pad_height, pad_width, pad_height), fill=fill
+        img,
+        padding=(
+            pad_width // 2,
+            pad_height // 2,
+            pad_width - pad_width // 2,
+            pad_height - pad_height // 2,
+        ),
+        fill=fill,
     )  # left, top, right, bottom
 
     assert img.shape[1] == img.shape[2]
@@ -71,8 +80,9 @@ def transform_to_input_size(
         height = original_height
         width = original_width
 
-    pad_width = 0 if width >= height else (height - width) / 2
-    pad_height = 0 if height >= width else (width - height) / 2
+    # Padding on the left and top, as in pad_and_resize
+    pad_width = max(height - width, 0) // 2
+    pad_height = max(width - height, 0) // 2
 
     minutia_points += np.array([pad_width, pad_height])
     minutia_points *= INPUT_SIZE / max(height, width)
