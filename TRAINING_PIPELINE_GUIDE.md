@@ -94,20 +94,24 @@ python scripts/extract_minutiae.py \
   --output_dir data/poses/my-dataset \
   --coarse_net path/to/CoarseNet.h5 \
   --fine_net path/to/FineNet.h5 \
-  --classify_net path/to/ClassifyNet.h5 \
-  --core_net path/to/CoreNet.h5 \
+  --classify_net path/to/ClassifyNet_6_classes.h5 \
+  --core_net path/to/CoreNet.weights \
   --image_dpi 500 \
   --workers 1
 ```
 
 This creates `.mnt` files with minutiae coordinates and angles. The script needs the `fingerflow` package of a
-minutiae_extractor version that has the direction refinement (`image_dpi` option of its `Extractor`); the `fingerflow`
-release on PyPI does not have it.
+minutiae_extractor version that has the direction refinement (`image_dpi` option of its `Extractor`, see
+[AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) for where to get it); the `fingerflow` release on PyPI does not have
+it. Without it the script stops with an error at the first image. Its exit status is 1 if the extraction failed for
+any image; those images are listed in `extraction_errors.txt` in the output directory.
 
 - Feed the images as they are: 8-bit grayscale in their native resolution, not resized or enhanced. The header of
   the `.mnt` file holds the image size, so that the minutiae are scaled together with the images later.
 - `--image_dpi` is only used to find the direction of the minutiae. Choose it by the ridge period of the images
   rather than by the nominal resolution: roughly `500 * period_px / 9.5`, i.e. 500 for ordinary 500 ppi prints.
+  The 9.5 px depend on how the period is measured. If you have ordinary 500 ppi prints, measure them in the same way
+  and use `500 * period_px / period_px_of_the_500_ppi_prints`.
   The 292x392 SFinGe example images of this repository have ridge periods of 7 to 9 px, which gives 400 to 450.
   The setting is tolerant: on these images and on 500 ppi prints, values up to 50 below or above the suitable one
   gave the same accuracy.
@@ -977,7 +981,7 @@ python train_my_model.py
 torchrun --nproc_per_node=4 train_my_model.py
 
 # Extract minutiae
-python scripts/extract_minutiae.py --input_dir data/fingerprints/my-dataset --output_dir data/poses/my-dataset --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 --classify_net path/to/ClassifyNet.h5 --core_net path/to/CoreNet.h5
+python scripts/extract_minutiae.py --input_dir data/fingerprints/my-dataset --output_dir data/poses/my-dataset --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 --classify_net path/to/ClassifyNet_6_classes.h5 --core_net path/to/CoreNet.weights --image_dpi 500
 
 # Run tests
 pytest tests/

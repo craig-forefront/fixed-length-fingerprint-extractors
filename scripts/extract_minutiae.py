@@ -1,5 +1,5 @@
 """
-Batch minutiae extraction script using tourmii/minutiae_extractor (FingerFlow).
+Batch minutiae extraction script using the minutiae_extractor (FingerFlow).
 
 This script extracts minutiae from all fingerprint images and saves them
 as .mnt files for use in DeepPrint training.
@@ -7,8 +7,9 @@ as .mnt files for use in DeepPrint training.
 Prerequisites:
     The `fingerflow` package of the minutiae_extractor repository, e.g.
         pip install -e /path/to/minutiae_extractor
-    (the `fingerflow` release on PyPI does not have the direction refinement
-    and the image_dpi option used here)
+    in a revision that has the direction refinement and the image_dpi option
+    used here (src/fingerflow/extractor/direction_sense.py; the `fingerflow`
+    release on PyPI does not have them). See AIRGAP_INSTALLATION.md.
 
 Usage:
     python scripts/extract_minutiae.py \
@@ -16,14 +17,18 @@ Usage:
         --output_dir /path/to/minutiae \
         --coarse_net /path/to/CoarseNet.h5 \
         --fine_net /path/to/FineNet.h5 \
-        --classify_net /path/to/ClassifyNet.h5 \
-        --core_net /path/to/CoreNet.h5 \
+        --classify_net /path/to/ClassifyNet_6_classes.h5 \
+        --core_net /path/to/CoreNet.weights \
         --image_dpi 500
 
 Feed the images in their native resolution as 8-bit grayscale. --image_dpi is
 only used to find the direction of the minutiae and depends on the ridge
 period of the images: roughly 500 * period_px / 9.5 (500 for ordinary 500 ppi
 prints). Extract all .mnt files of a dataset with the same setting.
+
+The exit status is 1 if the extraction failed for any image (see
+extraction_errors.txt in the output directory). The script stops with an
+exception if the extractor itself can not be set up.
 
 Output format (.mnt files):
     Line 1: <num_minutiae>
