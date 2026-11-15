@@ -34,6 +34,7 @@ class _DeepPrint_Embedding_Loss(nn.Module):
     def reset_recorded_loss(self) -> None:
         self.crossent_loss_sum = 0
         self.center_loss_sum = 0
+        self.n_datapoints = 0
 
     def get_recorded_loss(self) -> dict:
         if self.n_datapoints == 0:
