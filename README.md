@@ -135,7 +135,8 @@ The following preprocessing steps are applied to the fingerprint images before t
 
 For training the model, the Adam optimizer is used, the optimal learning rate differs between the individual variants. For simpler variants like `DeepPrint_Tex_512` a higher
 learning rate can be chosen to speed up training. For more complex variants like `DeepPrint_LocTexMinu_512` a lower learning rate is necessary to avoid overfitting.
-The number of epochs is chosen based on the validation loss. The training is stopped when the validation loss does not decrease anymore.
+The number of epochs is chosen based on the equal error rate on a validation set (subjects that are not in the training set). The training is stopped when this error rate does not decrease anymore,
+and the epoch with the lowest validation error rate is saved as `best_model.pyt`. Without a validation set, the epoch with the lowest training loss is saved instead, which does not detect overfitting.
 
 Depending on the learning rate and model, up to 100 epochs are necessary to train the model. Expect roughly 10-15 minutes per epoch on an A100. As much of the preprocessing
 happens on the CPU, a CPU with at least 8 cores is recommended in order to fully utilize the GPU.

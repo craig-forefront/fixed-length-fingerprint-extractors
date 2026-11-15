@@ -677,8 +677,8 @@ def main():
     from flx.models.model_training import TrainingLog
     log = TrainingLog(os.path.join(MODEL_OUTPUT_DIR, "log.json"))
     best = log.best_entry
-    print(f"\nBest validation EER: {best.validation_equal_error_rate:.4f}")
-    print(f"Achieved at epoch: {best.epoch}")
+    print(f"\nBest epoch: {best.epoch} (lowest {log.selection_metric})")
+    print(f"Validation EER of that epoch: {best.validation_equal_error_rate}")
 
 
 if __name__ == "__main__":
@@ -749,12 +749,51 @@ for entry in log["entries"]:
     print(f"Epoch {entry['epoch']}: "
           f"Loss={entry['training_loss']:.3f}, "
           f"Acc={entry['training_accuracy']:.3f}, "
-          f"EER={entry['validation_equal_error_rate']:.4f}")
-
-# Find best epoch
-best = min(log["entries"], key=lambda e: e["validation_equal_error_rate"])
-print(f"\nBest: Epoch {best['epoch']} with EER={best['validation_equal_error_rate']:.4f}")
+          f"EER={entry['validation_equal_error_rate']}")
 ```
+
+The fields of an entry are:
+
+- `training_loss`: the value that the training minimises, averaged over the
+  epoch. Lower is better.
+- `loss_statistics`: the parts of the loss, each a mean per training sample.
+- `training_accuracy`: the share of training samples whose subject the model
+  named correctly. Higher is better. It says nothing about fingers that are
+  not in the training set.
+- `validation_equal_error_rate` (EER): measured on the validation set. The
+  equal error rate is the error rate at the decision threshold where false
+  matches and false non-matches are equally frequent. Lower is better. It is
+  `null` if the epoch was trained without a validation set.
+
+#### Which epoch becomes `best_model.pyt`
+
+After every epoch the model is saved as `model.pyt`, and copied to
+`best_model.pyt` if the epoch is the best one so far:
+
+- **With a validation set**, the best epoch is the one with the lowest
+  validation EER. This is the recommended way, because it measures what the
+  model is for: comparing fingers it has not seen in training.
+- **Without a validation set**, no error rate exists. The best epoch is then
+  the one with the lowest `training_loss`. This only protects against keeping
+  an epoch after the training diverged; it cannot detect overfitting. Early
+  stopping (`patience`) is off in this case.
+
+`TrainingLog.selection_metric` names the field that was used, and
+`TrainingLog.best_entry` returns the entry of the best epoch:
+
+```python
+from flx.models.model_training import TrainingLog
+
+log = TrainingLog("/path/to/models/my-model-v1/log.json")
+best = log.best_entry
+print(f"Best: epoch {best.epoch}, selected on {log.selection_metric}")
+```
+
+Earlier versions stored the training accuracy in `validation_equal_error_rate`
+when there was no validation set and kept the epoch with the lowest value,
+which was the epoch with the lowest accuracy. A `best_model.pyt` from such a
+run should not be used; `model.pyt` of the same run holds the last epoch.
+`TrainingLog` reads such old entries as entries without validation.
 
 ### Step 13: Extract Embeddings
 

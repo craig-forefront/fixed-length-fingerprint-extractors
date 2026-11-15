@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import json
+import math
 from os.path import join, exists
 
 import tqdm
@@ -38,7 +39,10 @@ class TrainingLogEntry:
     training_loss: float
     loss_statistics: float
     training_accuracy: float
-    validation_equal_error_rate: float
+    # Equal error rate on the validation set: the error rate at the decision
+    # threshold where false matches and false non-matches are equally frequent.
+    # None if the epoch was trained without a validation set.
+    validation_equal_error_rate: float | None = None
 
     def __str__(self):
         s = "TrainingLogEntry(\n"
@@ -65,10 +69,53 @@ class TrainingLog:
         with open(self._path, "r") as file:
             obj = json.load(file)
             self._entries = [TrainingLogEntry(**dct) for dct in obj["entries"]]
+        for e in self._entries:
+            # Older versions stored the training accuracy in this field when
+            # there was no validation set. Such a value is not an error rate.
+            if e.validation_equal_error_rate == e.training_accuracy:
+                e.validation_equal_error_rate = None
 
     @property
-    def best_entry(self) -> TrainingLogEntry:
-        return min(self._entries, key=lambda e: e.validation_equal_error_rate)
+    def selection_metric(self) -> str:
+        """
+        Name of the field of TrainingLogEntry that decides which epoch is the
+        best one. Lower is better for both possible values.
+
+        - "validation_equal_error_rate" if at least one epoch was validated.
+          Epochs without a validation result are then never the best.
+        - "training_loss" otherwise. The training loss says how well the model
+          fits the training data, not how well it compares unseen fingers, so
+          it only protects against keeping an epoch after the training diverged.
+        """
+        if any(e.validation_equal_error_rate is not None for e in self._entries):
+            return "validation_equal_error_rate"
+        return "training_loss"
+
+    @property
+    def best_entry(self) -> TrainingLogEntry | None:
+        """
+        The entry with the lowest value of `selection_metric`; the earliest one
+        if several are equal. Values that are missing or not a number never win
+        against a number. None if the log is empty.
+        """
+        if len(self._entries) == 0:
+            return None
+        metric = self.selection_metric
+
+        def key(e: TrainingLogEntry) -> float:
+            value = getattr(e, metric)
+            if value is None or math.isnan(value):
+                return math.inf
+            return value
+
+        return min(self._entries, key=key)
+
+    @property
+    def epochs_since_best(self) -> int:
+        """Number of entries that were added after the best entry."""
+        if len(self._entries) == 0:
+            return 0
+        return len(self._entries) - 1 - self._entries.index(self.best_entry)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -177,7 +224,8 @@ def _validate(
     """
     Validates the model.
 
-    Returns equal error rate
+    Returns the equal error rate: the error rate at the decision threshold
+    where false matches and false non-matches are equally frequent (0 is best).
     """
     texture_embeddings, minutia_embeddings = extract_embeddings(model, validation_set)
     embeddings = EmbeddingLoader.combine_if_both_exist(
@@ -208,9 +256,22 @@ def train_model(
     Automatically loads model parameters from "model.pyt" file if exists.
     Supports multi-GPU training with DistributedDataParallel when launched with torchrun.
 
+    After every epoch the model is saved as "model.pyt". It is also copied to
+    "best_model.pyt" if the epoch is the best one so far:
+
+    - With a validation set (validation_fingerprints and validation_benchmark),
+      the best epoch is the one with the lowest equal error rate on it.
+    - Without a validation set (both None), no error rate is measured and the
+      log stores None for it. The best epoch is then the one with the lowest
+      training loss. This does not measure how well the model compares fingers
+      it has not seen; hold out validation subjects whenever possible.
+
     Args:
         patience: Early stopping patience. If > 0, training stops after this many
                   epochs without validation improvement. Set to 0 to disable.
+                  Has no effect without a validation set. The epochs are counted
+                  from the training log, so they carry over when a training is
+                  resumed.
         use_amp: Use Automatic Mixed Precision for 2-3x speedup and 30-40% less memory.
                  Recommended for large-scale training. Set to False if numerical issues occur.
     """
@@ -259,9 +320,16 @@ def train_model(
         dist.broadcast(start_tensor, src=0)
         start_epoch = int(start_tensor.item())
 
-    # Early stopping tracking
-    epochs_without_improvement = 0
-    best_eer = float('inf')
+    if (validation_fingerprints is None) != (validation_benchmark is None):
+        raise ValueError(
+            "validation_fingerprints and validation_benchmark must be given "
+            "together or both be None"
+        )
+    if validation_fingerprints is None and is_main_process():
+        print(
+            "No validation set: best_model.pyt will be the epoch with the "
+            "lowest training loss, and early stopping is off."
+        )
 
     try:
         for epoch in range(start_epoch, num_epochs + 1):
@@ -286,19 +354,14 @@ def train_model(
                     model_path, unwrap_model(model), loss, optimizer
                 )
 
-            if validation_fingerprints is None:
-                # Use training accuracy as validation accuracy
-                validation_eer = accuracy
-            else:
-                # Validate (only main process needs to do this)
-                if is_main_process():
-                    print("\nValidation:")
-                    validation_eer = _validate(
-                        unwrap_model(model), validation_fingerprints, validation_benchmark
-                    )
-                    print(f"Equal Error Rate: {validation_eer}\n")
-                else:
-                    validation_eer = 0.0  # Placeholder for non-main processes
+            # Validate (only the main process needs to do this)
+            validation_eer = None
+            if validation_fingerprints is not None and is_main_process():
+                print("\nValidation:")
+                validation_eer = _validate(
+                    unwrap_model(model), validation_fingerprints, validation_benchmark
+                )
+                print(f"Equal Error Rate: {validation_eer}\n")
 
             # Log and determine if new model is best model (main process only)
             should_stop = False
@@ -309,19 +372,22 @@ def train_model(
                 log.add_entry(entry)
                 print(entry)
 
-                if validation_eer <= log.best_entry.validation_equal_error_rate:
+                # The new epoch is the best one if nothing before it was as good
+                if log.best_entry is entry:
                     shutil.copyfile(model_path, best_model_path)
+                    print(
+                        f"Saved epoch {epoch} as best model "
+                        f"(lowest {log.selection_metric} so far)"
+                    )
 
                 # Early stopping check
                 if validation_fingerprints is not None and patience > 0:
-                    if validation_eer < best_eer:
-                        best_eer = validation_eer
-                        epochs_without_improvement = 0
-                    else:
-                        epochs_without_improvement += 1
+                    epochs_without_improvement = log.epochs_since_best
+                    if epochs_without_improvement > 0:
                         print(f"No improvement for {epochs_without_improvement}/{patience} epochs")
 
                     if epochs_without_improvement >= patience:
+                        best_eer = log.best_entry.validation_equal_error_rate
                         print(f"\nEarly stopping triggered after {patience} epochs without improvement")
                         print(f"Best validation EER: {best_eer:.4f}")
                         should_stop = True
