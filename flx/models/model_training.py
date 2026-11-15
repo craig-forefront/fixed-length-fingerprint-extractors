@@ -17,7 +17,11 @@ from flx.data.embedding_loader import EmbeddingLoader
 from flx.data.dataset import Dataset, ZippedDataLoader
 from flx.extractor.extract_embeddings import extract_embeddings
 from flx.models.deep_print_arch import DeepPrintTrainingOutput
-from flx.setup.config import LEARNING_RATE
+from flx.models.learning_rate import (
+    DivergenceGuard,
+    LearningRateConfig,
+    set_learning_rate,
+)
 from flx.models.torch_helpers import (
     get_device,
     load_model_parameters,
@@ -43,6 +47,9 @@ class TrainingLogEntry:
     # threshold where false matches and false non-matches are equally frequent.
     # None if the epoch was trained without a validation set.
     validation_equal_error_rate: float | None = None
+    # Learning rate of the last step of the epoch. None in logs that were
+    # written before this field existed.
+    learning_rate: float | None = None
 
     def __str__(self):
         s = "TrainingLogEntry(\n"
@@ -117,6 +124,16 @@ class TrainingLog:
             return 0
         return len(self._entries) - 1 - self._entries.index(self.best_entry)
 
+    @property
+    def highest_training_loss(self) -> float | None:
+        """Highest finite training loss of all entries; None if there is none."""
+        losses = [
+            e.training_loss
+            for e in self._entries
+            if e.training_loss is not None and math.isfinite(e.training_loss)
+        ]
+        return max(losses) if losses else None
+
     def __len__(self) -> int:
         return len(self._entries)
 
@@ -132,6 +149,10 @@ def _train(
     train_set: Dataset,
     sampler: torch.utils.data.Sampler = None,
     use_amp: bool = True,
+    learning_rate: LearningRateConfig | None = None,
+    epoch: int = 1,
+    num_epochs: int = 1,
+    guard: DivergenceGuard | None = None,
 ) -> float:
     """
     Trains the model for one epoch.
@@ -139,6 +160,16 @@ def _train(
     Args:
         use_amp: Use Automatic Mixed Precision (AMP) for 2-3x speedup.
                  Set to False if you encounter numerical instability.
+        learning_rate: Learning rate, warm-up, schedule and gradient clipping.
+                 None leaves the learning rate of the optimizer as it is and
+                 does not clip.
+        epoch: Number of this epoch, counted from 1, and
+        num_epochs: number of epochs of the whole training. Together with the
+                 number of batches they give the position in the schedule.
+        guard: Stops the training when the loss is not finite or has exploded.
+
+    Raises
+        TrainingDivergedError if the guard finds a diverged training.
 
     Returns
         - overall average epoch loss: the mean over the samples that this
@@ -165,7 +196,18 @@ def _train(
     epoch_loss = 0
     num_samples = 0
     loss_fun.reset_recorded_loss()
-    for vals in tqdm.tqdm(train_dataloader):
+    # Position in the schedule. Every epoch has the same number of steps, so
+    # the steps of the epochs before this one are known without stored state.
+    steps_per_epoch = len(train_dataloader)
+    total_steps = steps_per_epoch * num_epochs
+    step = steps_per_epoch * (epoch - 1)
+    clip_norm = learning_rate.gradient_clip_norm if learning_rate else None
+    progress = tqdm.tqdm(train_dataloader)
+    for vals in progress:
+        if learning_rate is not None:
+            set_learning_rate(optimizer, learning_rate.learning_rate_at(step, total_steps))
+        current_lr = optimizer.param_groups[0]["lr"]
+        step += 1
         fp_imgs, minu_map_tpl, fp_labels = vals
         minu_maps, minu_map_weights = minu_map_tpl
         fp_imgs = fp_imgs.to(device=get_device())
@@ -186,8 +228,15 @@ def _train(
                     minutia_maps=minu_maps,
                     minutia_map_weights=minu_map_weights,
                 )
+            loss_value = loss.detach().item()
+            if guard is not None:
+                guard.check(loss_value, current_lr, f"epoch {epoch}, step {step}")
             # Backward pass with gradient scaling
             scaler.scale(loss).backward()
+            if clip_norm is not None:
+                # The limit applies to the true gradient, not the scaled one
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -199,11 +248,16 @@ def _train(
                 minutia_maps=minu_maps,
                 minutia_map_weights=minu_map_weights,
             )
+            loss_value = loss.detach().item()
+            if guard is not None:
+                guard.check(loss_value, current_lr, f"epoch {epoch}, step {step}")
             loss.backward()
+            if clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
             optimizer.step()
 
         # Record accuracy and loss
-        epoch_loss += float(loss) * fp_labels.shape[0]
+        epoch_loss += loss_value * fp_labels.shape[0]
         num_samples += fp_labels.shape[0]
         if output.combined_logits is not None:
             logits = output.combined_logits
@@ -214,6 +268,7 @@ def _train(
         else:
             logits = output.texture_logits + output.minutia_logits
         metric(logits, fp_labels)
+        progress.set_postfix(loss=f"{loss_value:.4g}", lr=f"{current_lr:.3g}")
 
     mean_loss = epoch_loss / num_samples if num_samples > 0 else 0.0
     multiclass_accuracy = float(metric.compute())
@@ -253,6 +308,7 @@ def train_model(
     out_dir: str,
     patience: int = 0,
     use_amp: bool = True,
+    learning_rate: LearningRateConfig | None = None,
 ) -> None:
     """
     Trains model for num_iter and saves results (training log and model parameters)
@@ -278,7 +334,21 @@ def train_model(
                   resumed.
         use_amp: Use Automatic Mixed Precision for 2-3x speedup and 30-40% less memory.
                  Recommended for large-scale training. Set to False if numerical issues occur.
+        learning_rate: Learning rate, warm-up, schedule, gradient clipping and
+                 the limit at which a rising loss stops the training. None uses
+                 the defaults from flx/setup/config.py. The schedule depends
+                 only on the number of the step, so it continues correctly when
+                 a training is resumed with the same num_epochs, training set
+                 and batch size, and all processes of a multi-GPU training use
+                 the same learning rate.
+
+    Raises:
+        TrainingDivergedError: The loss of a batch is not a finite number, or
+                 it is far higher than at the start. model.pyt is then still
+                 the end of the last completed epoch.
     """
+    if learning_rate is None:
+        learning_rate = LearningRateConfig()
     # Initialize distributed training if available
     setup_distributed()
 
@@ -293,7 +363,9 @@ def train_model(
     log = TrainingLog(join(out_dir, "log.json")) if is_main_process() else None
 
     model = model.to(device=get_device())
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(
+        params=model.parameters(), lr=learning_rate.learning_rate
+    )
     loss = loss.to(device=get_device())
     if exists(model_path):
         if is_main_process():
@@ -317,12 +389,28 @@ def train_model(
 
     # Determine starting epoch (only main process has log)
     start_epoch = (len(log) + 1) if is_main_process() else 1
+    # In a resumed training the loss may already be far below the loss at the
+    # start, so the check for an exploded loss compares with the highest epoch
+    # loss in the log (-1 if there is none)
+    logged_loss = log.highest_training_loss if is_main_process() else None
+    logged_loss = -1.0 if logged_loss is None else logged_loss
     # Broadcast start_epoch to all processes in distributed mode
     if is_distributed():
         import torch.distributed as dist
         start_tensor = torch.tensor([start_epoch], device=get_device())
         dist.broadcast(start_tensor, src=0)
         start_epoch = int(start_tensor.item())
+        loss_tensor = torch.tensor(
+            [logged_loss], dtype=torch.float64, device=get_device()
+        )
+        dist.broadcast(loss_tensor, src=0)
+        logged_loss = float(loss_tensor.item())
+    guard = DivergenceGuard(
+        learning_rate.loss_explosion_factor,
+        reference_loss=logged_loss if logged_loss >= 0 else None,
+    )
+    if is_main_process():
+        print(f"Optimizer: Adam, {learning_rate.describe()}")
 
     if (validation_fingerprints is None) != (validation_benchmark is None):
         raise ValueError(
@@ -346,7 +434,16 @@ def train_model(
                 print("\nTraining:")
 
             train_loss, loss_stats, accuracy = _train(
-                model, loss, optimizer, training_set, sampler, use_amp
+                model,
+                loss,
+                optimizer,
+                training_set,
+                sampler,
+                use_amp,
+                learning_rate=learning_rate,
+                epoch=epoch,
+                num_epochs=num_epochs,
+                guard=guard,
             )
 
             if is_main_process():
@@ -371,7 +468,12 @@ def train_model(
             should_stop = False
             if is_main_process():
                 entry = TrainingLogEntry(
-                    epoch, train_loss, loss_stats, accuracy, validation_eer
+                    epoch,
+                    train_loss,
+                    loss_stats,
+                    accuracy,
+                    validation_eer,
+                    optimizer.param_groups[0]["lr"],
                 )
                 log.add_entry(entry)
                 print(entry)

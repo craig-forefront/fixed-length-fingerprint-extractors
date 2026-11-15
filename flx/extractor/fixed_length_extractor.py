@@ -9,6 +9,7 @@ from flx.data.embedding_loader import EmbeddingLoader
 from flx.data.image_loader import ImageLoader
 from flx.extractor.extract_embeddings import extract_embeddings
 from flx.models.model_training import train_model
+from flx.models.learning_rate import LearningRateConfig
 from flx.models.deep_print_arch import (
     DeepPrint_Tex,
     DeepPrint_LocTexMinu,
@@ -45,7 +46,14 @@ class DeepPrintExtractor:
         out_dir: str,
         patience: int = 0,
         use_amp: bool = True,
+        learning_rate: LearningRateConfig | None = None,
     ) -> None:
+        """
+        Trains the model, see flx.models.model_training.train_model.
+
+        learning_rate: Learning rate, warm-up, schedule and gradient clipping.
+            None uses the defaults from flx/setup/config.py.
+        """
         if not self.training_with_minutia_map:
             minutia_maps = Dataset(ConstantDataLoader((torch.tensor([]), 0.0)), fingerprints.ids)
         train_model(
@@ -60,6 +68,7 @@ class DeepPrintExtractor:
             out_dir=out_dir,
             patience=patience,
             use_amp=use_amp,
+            learning_rate=learning_rate,
         )
 
     def extract(self, dataset: Dataset) -> tuple[EmbeddingLoader, EmbeddingLoader]:
