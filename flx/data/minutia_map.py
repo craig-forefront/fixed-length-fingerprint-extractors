@@ -123,9 +123,9 @@ def create_minutia_map(
         numpy float array of shape (num_minutiae)
         Contains the corresponding minutia orientations where e.g.
             > 0.0    is orientation in the direction of the x-Axis (to the right)
-            > 1/2 pi is the direction of the y-Axis (upwards)
+            > 1/2 pi is the direction of the y-Axis (downwards, see the coordinates above)
             > pi (or -pi) is the direction of the negative x-Axis (to the left)
-            > 3/2 pi (or - 1/2 pi) is the direction of the negative y-Axis (downwards)
+            > 3/2 pi (or - 1/2 pi) is the direction of the negative y-Axis (upwards)
     @param image_resolution :
         resolution of the fingerprint image (width, height)
     @param out_resolution :

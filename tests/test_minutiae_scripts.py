@@ -222,3 +222,93 @@ def test_run_minutiae_extractor(tmp_path, monkeypatch, fake_fingerflow, dpi_args
     assert extractor.kwargs == {"image_dpi": image_dpi}
     _assert_got_full_grayscale_image(extractor)
     _assert_is_extractor_output(join(output_dir, "a.mnt"))
+
+
+def test_run_fingerflow_minutiaenet_writes_full_image_size(tmp_path, monkeypatch):
+    """The baseline script uses the networks of the fingerflow release directly"""
+    pytest.importorskip("scipy")
+    pytest.importorskip("skimage")
+
+    class FakeMinutiaeNet:
+        def __init__(self, coarse_net, fine_net):
+            pass
+
+        def extract_minutiae_points(self, image, original_image):
+            # The network gets the image trimmed to a multiple of 8
+            assert image.shape == (HEIGHT // 8 * 8, WIDTH // 8 * 8)
+            return MINUTIAE[["x", "y", "angle", "score"]].to_numpy()
+
+    def preprocess_image_data(raw_image_data):
+        gray = cv2.cvtColor(raw_image_data, cv2.COLOR_BGR2GRAY)
+        trimmed = gray[: HEIGHT // 8 * 8, : WIDTH // 8 * 8]
+        return {"original_image": gray, "image": trimmed, "image_size": trimmed.shape}
+
+    modules = {
+        name: types.ModuleType(name)
+        for name in ["fingerflow", "fingerflow.extractor"]
+        + [f"fingerflow.extractor.{m}" for m in ["core_net", "minutiae_net", "utils"]]
+    }
+    modules["fingerflow.extractor.core_net"].CoreNet = None
+    modules["fingerflow.extractor.minutiae_net"].MinutiaeNet = FakeMinutiaeNet
+    modules["fingerflow.extractor.utils"].preprocess_image_data = preprocess_image_data
+    modules["fingerflow.extractor"].utils = modules["fingerflow.extractor.utils"]
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    script = _load_script("run_fingerflow_minutiaenet")
+    (tmp_path / "coarse.h5").touch()
+    (tmp_path / "fine.h5").touch()
+    output_dir = tmp_path / "minutiae"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_fingerflow_minutiaenet.py", "--input_dir", TEST_IMAGE_DIR, "--ext", ".png"]
+        + ["--output_dir", str(output_dir), "--models_dir", str(tmp_path)]
+        + ["--coarse_net", str(tmp_path / "coarse.h5")]
+        + ["--fine_net", str(tmp_path / "fine.h5")],
+    )
+    script.main()
+
+    locs, oris, size = read_mnt_file(str(output_dir / "1_1.mnt"))
+    assert size == (WIDTH, HEIGHT)
+    assert locs == pytest.approx(MINUTIAE[["x", "y"]].to_numpy(), abs=1e-4)
+    assert oris == pytest.approx(MINUTIAE["angle"].to_numpy(), abs=1e-4)
+
+
+@pytest.fixture
+def visualize_three_way(monkeypatch):
+    monkeypatch.setattr(sys, "path", list(sys.path))  # the script adds a directory
+    return _load_script("visualize_three_way")
+
+
+@pytest.mark.parametrize(
+    "angle, dx, dy",
+    [(0.0, 1, 0), (np.pi / 2, 0, 1), (np.pi, -1, 0), (3 * np.pi / 2, 0, -1)],
+)
+def test_visualize_three_way_arrow_direction(visualize_three_way, angle, dx, dy):
+    """The direction of a minutia is (cos(angle), sin(angle)) with y pointing down"""
+    panel = np.zeros((101, 101, 3), dtype=np.uint8)
+    visualize_three_way.draw_minutia(panel, 50, 50, angle, cls=0, r=8)
+    ys, xs = np.nonzero(panel.any(axis=2))
+    # What is drawn outside of the circle of the minutia is the arrow
+    outside = np.hypot(xs - 50, ys - 50) > 10
+    along_direction = (xs[outside] - 50) * dx + (ys[outside] - 50) * dy
+    assert along_direction.max() >= 13
+    assert along_direction.min() > 7
+
+
+def test_visualize_three_way_marker_rotation(visualize_three_way):
+    angle = 0.3
+    triangle = visualize_three_way._triangle_pts(50, 50, 20, angle).reshape(3, 2)
+    expected = [
+        (50 + 20 * np.cos(a), 50 + 20 * np.sin(a))
+        for a in angle + np.pi / 2 + np.arange(3) * 2 * np.pi / 3
+    ]
+    assert triangle == pytest.approx(np.array(expected), abs=1)
+
+    diamond = visualize_three_way._diamond_pts(50, 50, 20, angle).reshape(4, 2)
+    expected = [
+        (50 + 20 * np.cos(a), 50 + 20 * np.sin(a))
+        for a in angle + np.arange(4) * np.pi / 2
+    ]
+    assert diamond == pytest.approx(np.array(expected), abs=1)
