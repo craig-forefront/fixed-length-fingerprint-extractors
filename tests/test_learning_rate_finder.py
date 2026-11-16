@@ -360,3 +360,29 @@ def test_minutia_variant_without_minutiae_is_rejected(
     )
     with pytest.raises(SystemExit):
         find_learning_rate.main()
+
+
+def test_missing_files_stop_the_range_test_with_the_message_of_the_training(
+    find_learning_rate, tmp_path, monkeypatch, capsys
+):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    cv2.imwrite(str(image_dir / "1_1.png"), np.zeros((8, 8), dtype=np.uint8))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "find_learning_rate.py",
+            "--dataset_dir", str(image_dir),
+            "--output_dir", str(tmp_path / "out"),
+            "--num_subjects", "2",
+            "--num_impressions", "1",
+            "--assume_ppi", "500",
+        ],
+    )
+    with pytest.raises(SystemExit) as stop:
+        find_learning_rate.main()
+    assert stop.value.code == 2
+    message = capsys.readouterr().err
+    assert "1 of the 2 files that are needed are missing" in message
+    assert "2_1.png" in message and "--num_subjects 2" in message

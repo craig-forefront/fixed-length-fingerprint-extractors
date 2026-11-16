@@ -13,6 +13,7 @@ step, and reports a learning rate to start with. No model is saved.
         --num_subjects 50000 --num_impressions 10 \
         --max_subjects 2000 \
         --batch_size 64 \
+        --ppi_manifest /path/to/resolutions.csv \
         --output_dir /path/to/lr_range_test
 
 Output in --output_dir:
@@ -96,12 +97,16 @@ def build_training_set(
     with_minutiae: bool,
     normalizer=None,
     canvas_size: int = 0,
+    files=None,
 ) -> Dataset:
     """
     The zipped training set of train_model, built as train_500k.py builds it.
-    normalizer and canvas_size are those of train_500k.create_image_dataset.
+    normalizer, canvas_size and files are those of
+    train_500k.create_image_dataset.
     """
-    images = train_500k.create_image_dataset(dataset_dir, ids, normalizer, canvas_size)
+    images = train_500k.create_image_dataset(
+        dataset_dir, ids, normalizer, canvas_size, files
+    )
     minutiae = train_500k.create_minutia_dataset(
         minutiae_dir if with_minutiae else None, ids, images.data_loader, canvas_size
     )
@@ -205,12 +210,27 @@ def main():
         print(f"Note: the test needs {args.num_steps * args.batch_size:,} images and "
               f"sees each of the {len(ids):,} images more than once.")
 
+    # The same check of the file layout as in train_500k.py
+    try:
+        files = train_500k.find_dataset_files(
+            args.dataset_dir,
+            args.minutiae_dir if with_minutiae else None,
+            normalizer,
+            list(ids.identifiers),
+            list(ids.identifiers),
+            args.num_subjects,
+            args.num_impressions,
+        )
+    except train_500k.DatasetLayoutError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
     extractor = build_extractor(
         variant, len(subjects), args.embedding_dim, loss_weights
     )
     train_set = build_training_set(
         args.dataset_dir, args.minutiae_dir, ids, with_minutiae,
-        normalizer, args.canvas_size,
+        normalizer, args.canvas_size, files,
     )
     result = run_range_test(
         extractor.model,

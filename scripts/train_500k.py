@@ -521,7 +521,7 @@ def describe_layout_problem(
     else:
         seen = f"no {extension} file was found"
     return (
-        f"{len(missing):,} of the {len(wanted):,} files that the training needs "
+        f"{len(missing):,} of the {len(wanted):,} files that are needed "
         f"are missing below {directory} ({option}). The first ones: {examples}. "
         f"--num_subjects {num_subjects} and --num_impressions {num_impressions} "
         f"mean that every file <subject>_<impression>{extension} with subject 1 "
@@ -531,6 +531,57 @@ def describe_layout_problem(
         "without gaps and each needs all its impressions; see the docstring "
         "of scripts/train_500k.py for the layout."
     )
+
+
+class DatasetLayoutError(ValueError):
+    """The files of the dataset are not those that the options ask for."""
+
+
+def find_dataset_files(
+    dataset_dir: str,
+    minutiae_dir: str | None,
+    normalizer: SensorNormalizer | None,
+    image_ids: list[Identifier],
+    minutiae_ids: list[Identifier],
+    num_subjects: int,
+    num_impressions: int,
+) -> CustomFingerprintLoader:
+    """
+    Scans dataset_dir and checks that it holds an image for every identifier
+    in image_ids and, if minutiae_dir is given, that minutiae_dir holds a
+    .mnt file for every identifier in minutiae_ids.
+
+    Returns the loader of the image files. Raises DatasetLayoutError with a
+    message for the user if files are missing, two files have the same
+    identifier, or a file name is not <subject>_<impression>.
+    """
+    extension = CustomFingerprintLoader._extension()
+    print(f"Scanning {dataset_dir} for {extension} files...")
+    try:
+        files = CustomFingerprintLoader(dataset_dir, normalizer)
+    except ValueError as error:
+        raise DatasetLayoutError(str(error)) from error
+    problem = describe_layout_problem(
+        files.ids, image_ids, num_subjects, num_impressions,
+        dataset_dir, extension, "--dataset_dir",
+    )
+    if problem is None and minutiae_dir is not None:
+        try:
+            minutiae_files = FingerFlowMinutiaMapLoader(minutiae_dir).ids
+        except ValueError as error:
+            raise DatasetLayoutError(f"--minutiae_dir: {error}") from error
+        problem = describe_layout_problem(
+            minutiae_files, minutiae_ids, num_subjects, num_impressions,
+            minutiae_dir, ".mnt", "--minutiae_dir",
+        )
+        if problem is not None:
+            problem += (
+                " The .mnt files are written by scripts/extract_minutiae.py; its "
+                "error log names the images that have none."
+            )
+    if problem is not None:
+        raise DatasetLayoutError(problem)
+    return files
 
 
 def sample_resolution_sources(
@@ -1168,37 +1219,21 @@ def main():
         print(f"Created {len(validation_ids):,} validation identifiers")
 
     # The files that are there, compared with the files that the options ask for
-    print(f"Scanning {args.dataset_dir} for {CustomFingerprintLoader._extension()} files...")
-    try:
-        files = CustomFingerprintLoader(args.dataset_dir, normalizer)
-    except ValueError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(2)
     wanted = list(training_ids.identifiers)
     if validation_ids:
         wanted += list(validation_ids.identifiers)
-    problem = describe_layout_problem(
-        files.ids, wanted, args.num_subjects, args.num_impressions,
-        args.dataset_dir, CustomFingerprintLoader._extension(), "--dataset_dir",
-    )
-    if problem is None and with_minutiae:
-        try:
-            minutiae_files = FingerFlowMinutiaMapLoader(args.minutiae_dir).ids
-        except ValueError as error:
-            print(f"ERROR: --minutiae_dir: {error}", file=sys.stderr)
-            sys.exit(2)
-        # Validation needs no minutiae
-        problem = describe_layout_problem(
-            minutiae_files, list(training_ids.identifiers), args.num_subjects,
-            args.num_impressions, args.minutiae_dir, ".mnt", "--minutiae_dir",
+    try:
+        files = find_dataset_files(
+            args.dataset_dir,
+            args.minutiae_dir,
+            normalizer,
+            wanted,
+            list(training_ids.identifiers),  # validation needs no minutiae
+            args.num_subjects,
+            args.num_impressions,
         )
-        if problem is not None:
-            problem += (
-                " The .mnt files are written by scripts/extract_minutiae.py; its "
-                "error log names the images that have none."
-            )
-    if problem is not None:
-        print(f"ERROR: {problem}", file=sys.stderr)
+    except DatasetLayoutError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     unused = len(files.ids) - len(wanted)
     if unused > 0 and first_process:

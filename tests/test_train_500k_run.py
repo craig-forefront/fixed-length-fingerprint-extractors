@@ -114,7 +114,7 @@ def test_missing_files_are_named_with_the_options_that_ask_for_them(
         train_500k, tmp_path, monkeypatch, capsys,
         "--num_subjects", 5, "--num_impressions", 3,
     )
-    assert "7 of the 15 files that the training needs are missing" in message
+    assert "7 of the 15 files that are needed are missing" in message
     assert "1_3.png, 2_3.png, 3_3.png" in message
     assert "--num_subjects 5 and --num_impressions 3" in message
     assert "8 .png files of 4 subjects were found" in message
