@@ -298,3 +298,32 @@ def test_map_loss_does_not_turn_the_loss_into_float64():
     loss_fun = DeepPrintLoss_TexMinu(6, 16, 16)
     loss = loss_fun(_output(), torch.arange(4), torch.zeros(4, 6, 8, 8), weights)
     assert loss.dtype == torch.float32
+
+
+def test_map_loss_is_the_sum_over_the_cells_of_a_map():
+    generator = torch.Generator().manual_seed(4)
+    predicted = torch.rand(3, 6, 8, 8, generator=generator)
+    target = torch.rand(3, 6, 8, 8, generator=generator)
+    loss, recorded, _ = _map_loss(DeepPrintLoss_TexMinu, predicted, target, torch.ones(3))
+    expected = float(((predicted - target) ** 2).sum()) / 3
+    assert loss == pytest.approx(expected, rel=1e-5)
+    assert recorded == pytest.approx(expected, rel=1e-5)
+
+
+def test_map_loss_is_summed_in_32_bit_numbers():
+    # As with mixed precision: 16-bit maps. The sum, 4 x 98304, is above the
+    # largest 16-bit number (65504).
+    predicted = torch.full((2, 6, 128, 128), 2.0, dtype=torch.float16)
+    target = torch.zeros(2, 6, 128, 128)
+    loss, _, _ = _map_loss(DeepPrintLoss_TexMinu, predicted, target, torch.ones(2))
+    assert loss == pytest.approx(4 * 6 * 128 * 128)
+
+
+def test_former_map_loss_is_the_mean_over_the_cells():
+    # Until the sum was introduced: 0.3 times the mean over the cells
+    generator = torch.Generator().manual_seed(5)
+    predicted = torch.rand(2, 6, 128, 128, generator=generator)
+    target = torch.rand(2, 6, 128, 128, generator=generator)
+    loss, _, _ = _map_loss(DeepPrintLoss_TexMinu, predicted, target, torch.ones(2))
+    former = 0.3 * float(((predicted - target) ** 2).mean())
+    assert 0.3 / (6 * 128 * 128) * loss == pytest.approx(former, rel=1e-4)

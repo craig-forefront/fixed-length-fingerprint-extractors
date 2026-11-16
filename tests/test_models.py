@@ -81,8 +81,11 @@ def test_recorded_loss_is_the_mean_per_sample():
     assert recorded["minutia_loss"]["crossent_loss_sum"] == pytest.approx(
         expected_crossent
     )
-    # Predicted maps are all 0 and the target maps all 1: squared error 1
-    assert recorded["minutia_map_loss"] == pytest.approx(config.LOSS_WEIGHT_MINUTIA_MAP)
+    # Predicted maps are all 0 and the target maps all 1: squared error 1 in
+    # each of the 6 x 8 x 8 cells of a map
+    assert recorded["minutia_map_loss"] == pytest.approx(
+        config.LOSS_WEIGHT_MINUTIA_MAP * 6 * 8 * 8
+    )
 
 
 def test_recorded_loss_does_not_depend_on_the_batch_size():

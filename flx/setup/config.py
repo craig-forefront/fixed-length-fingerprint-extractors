@@ -61,14 +61,25 @@ LOSS_WEIGHT_CROSS_ENTROPY = 1.0
 # and at the start of a training on real images the center loss with 8.0 sent
 # about 30 times more gradient into the shared first layers than the cross
 # entropy (one batch of 8 images, DeepPrint_TexMinu, texture branch). Whether
-# a lower value gives better accuracy was not measured.
+# a lower value gives better accuracy was not measured. See "Loss weights"
+# in TRAINING_PIPELINE_GUIDE.md.
 LOSS_WEIGHT_CENTER = 8.0
 
 # Minutia map loss (variants with minutiae only): the squared difference
 # between the minutia map that the model draws and the map made from the
-# minutiae of the image, as the mean over the cells of the map (6 x 128 x 128)
-# and over the images of a batch.
-LOSS_WEIGHT_MINUTIA_MAP = 0.3
+# minutiae of the image, as the sum over the cells of the map (6 x 128 x 128 =
+# 98,304) and the mean over the images of a batch that have a map.
+#
+# 0.095 is the value of the DeepPrint paper (Engelsma et al. 2019, equation
+# 8). In short runs on real images it made the gradient of the map loss on the
+# shared first layers about as long as that of the texture cross entropy (0.4
+# to 1.2 times) and 1.5 % to 4.6 % of the whole gradient there. Until this
+# value was introduced the map loss was the mean over the cells with the
+# factor 0.3, which equals 0.3 / 98,304 = 0.00000305 here; with it the map
+# loss made up about 0.001 % of the gradient on these layers, so the minutia
+# maps hardly influenced what the shared layers learn. See "Loss weights" in
+# TRAINING_PIPELINE_GUIDE.md for the measurement and its limits.
+LOSS_WEIGHT_MINUTIA_MAP = 0.095
 
 # Change this when switching models DeepPrint has 299 while ViT has 224
 INPUT_SIZE = 299

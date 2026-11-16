@@ -13,9 +13,10 @@ This guide provides step-by-step instructions for setting up a complete training
 5. [Model Selection and Configuration](#model-selection-and-configuration)
 6. [Training the Model](#training-the-model)
 7. [Choosing the learning rate](#choosing-the-learning-rate)
-8. [Validation and Testing](#validation-and-testing)
-9. [Multi-GPU Training](#multi-gpu-training)
-10. [Troubleshooting](#troubleshooting)
+8. [Loss weights](#loss-weights)
+9. [Validation and Testing](#validation-and-testing)
+10. [Multi-GPU Training](#multi-gpu-training)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -911,6 +912,18 @@ step. Each line is one run.
 In the last line the warm-up took 11 steps, a tenth of the training, not the
 default 500.
 
+These runs were made before the weights of the parts of the loss changed (see
+[Loss weights](#loss-weights)); with the current weights the loss is larger
+(it starts near 145 instead of 14.8 for these images) and its parts are
+balanced differently. One run was repeated with the current loss:
+`DeepPrint_LocTexMinu` with all defaults, 110 steps of 8 images, warm-up 11
+steps. It did not diverge: the highest batch loss was the first one (145.1),
+and the epoch loss was 77.8, then 62.1. The recorded minutia map loss fell
+from 35.9 to 22.3 and the center loss of each embedding from 15.6 to 14.4,
+while the cross entropy of each classifier stayed at 5.40. The range tests
+were not repeated with the current loss, so the suggested rates in the table
+belong to the former loss.
+
 What these runs show: 0.0001 does not diverge in the first 110 steps for
 either variant, and it is 30 to 43 times below the rate at which the
 loss of the range test started to rise. The default is the suggestion of the range
@@ -978,8 +991,15 @@ The progress bar shows the loss and the learning rate of every step:
   distance is close to 2, because embeddings and centers both have length 1
   and point in unrelated directions; the measured values were 1.95 and 1.98
   (one batch of 8 real images, 256-dimensional embeddings). With 220 subjects
-  this gives 2 x 5.4 + 2 x 8.0 x 2 = 42.8, for every batch size, before the
-  minutia map loss is added. A starting loss far away from this sum
+  this gives 2 x 5.4 + 2 x 8.0 x 2 = 42.8, for every batch size. Variants
+  with minutiae add the minutia map loss: its weight (default 0.095) times
+  about 1,000 for a model that has not learned anything yet (measured: 1,013
+  for the first batch of `DeepPrint_TexMinu`). The measured starting loss was
+  138 for `DeepPrint_TexMinu` and 145 for `DeepPrint_LocTexMinu`. The map part
+  falls fast in the first steps, to about a quarter within 50 steps here,
+  because the model quickly learns to draw a nearly empty map; this fall is
+  not yet a sign that the model learns to tell fingers apart. A starting
+  loss far away from this sum
   points to a problem in the data.
 - **During the warm-up** the `lr` value rises and the loss changes little.
   That is normal.
@@ -999,6 +1019,207 @@ The progress bar shows the loss and the learning rate of every step:
 After the first epoch, look at `log.json`: the training loss should be below
 the starting loss, and the validation equal error rate should fall from epoch
 to epoch. The log also stores the learning rate at the end of every epoch.
+
+---
+
+## Loss weights
+
+### What the loss is made of
+
+The training minimises one number, the *loss*. It is a sum of parts, and each
+part is multiplied by a factor, its *weight*:
+
+| Part | What it measures | How it is counted | Weight in `flx/setup/config.py` | `scripts/train_500k.py` |
+|------|------------------|-------------------|--------------------------------|-------------------------|
+| Cross entropy, once per classifier | How wrong the model is when it names the subject of a training image | Mean over the images of a batch | `LOSS_WEIGHT_CROSS_ENTROPY = 1.0` | `--loss_weight_cross_entropy` |
+| Center loss, once per embedding | The squared distance between the embedding of an image and the running average of the embeddings of its subject (the *center*). It pulls the embeddings of one finger together | Mean over the images of a batch | `LOSS_WEIGHT_CENTER = 8.0` | `--loss_weight_center` |
+| Minutia map loss (variants with minutiae only) | The squared difference between the minutia map that the model draws and the map made from the minutiae of the image | Sum over the 98,304 cells of a map (6 x 128 x 128), then mean over the images of the batch that have a map | `LOSS_WEIGHT_MINUTIA_MAP = 0.095` | `--loss_weight_minutia_map` |
+
+Variants with texture and minutiae have two classifiers and two embeddings, so
+their loss is
+
+```
+loss = 1.0 x (cross entropy texture + cross entropy minutiae)
+     + 8.0 x (center loss texture + center loss minutiae)
+     + 0.095 x minutia map loss
+```
+
+`scripts/find_learning_rate.py` has the same three options. In your own
+training script, pass the weights when you create the extractor; a weight that
+you leave out takes the value from the config:
+
+```python
+from flx.extractor.fixed_length_extractor import get_DeepPrint_LocTexMinu
+from flx.models.deep_print_loss import LossWeights
+
+extractor = get_DeepPrint_LocTexMinu(
+    num_training_subjects, 256, loss_weights=LossWeights(minutia_map=0.01)
+)
+```
+
+`loss_statistics` in `log.json` holds every part multiplied by its weight.
+Divide by the weight to get the part itself.
+
+### What changed, and how to get the former loss back
+
+Earlier versions of this code weighted the parts differently. Four things
+changed:
+
+1. **The center loss is a mean over the batch, not a sum.** As a sum with the
+   factor 0.125 its weight relative to the cross entropy grew with the batch
+   size. The default 8.0 is 0.125 x 64, so with the batch size of
+   `train_model` (64) the loss is the same as before. For a batch of B images
+   the former balance is `--loss_weight_center` = 0.125 x B.
+2. **The minutia map loss is a sum over the cells of a map with the weight
+   0.095**, as in the DeepPrint paper (Engelsma et al., 2019, equation 8). It
+   was the mean over the cells with the weight 0.3, which is the same as the
+   sum with the weight 0.3 / 98,304 = 0.00000305. The reason is the
+   measurement below.
+3. **The minutia map loss is averaged over the images that have a map.** It
+   was averaged over all images of the batch, so images without a map lowered
+   the weight of the others.
+4. **An image without any minutiae has no map.** It used to get an empty map,
+   which taught the model that the image has no minutiae. A fingerprint always
+   has minutiae, so an empty list means that the extraction failed. Such an
+   image now counts in the cross entropy and the center loss only.
+
+A model that was trained before is not changed by this; the loss is only used
+during training. A training that is resumed from `model.pyt` continues with
+the new loss unless you pass the former weights:
+`--loss_weight_center` 0.125 x batch size and
+`--loss_weight_minutia_map 0.00000305`. Points 3 and 4 cannot be switched
+back.
+
+### Why the weight of the minutia map loss was raised
+
+The minutia map loss exists to make the layers that the minutia branch shares
+with the rest of the model look at minutiae. Two groups of layers are shared:
+
+- the *stem*: the first layers of the model, used by the texture branch and
+  the minutia branch;
+- the *minutia stem*: the layers after it that are used by the minutia
+  embedding and by the map.
+
+How strongly a part of the loss asks a group of layers to change is the length
+of its *gradient* on these layers. The *share* of the map loss is the length
+of its weighted gradient divided by the sum of that length and the length of
+the weighted gradient of all other parts together. A share near 0 means that
+the map loss has no say in what these layers learn.
+
+Measured on this machine (no GPU) with `DeepPrint_TexMinu`, 256 dimensions, on
+400 real images (200 fingers with two impressions each from NIST Special
+Database 302, minutiae marked by examiners), 8 images per step, Adam with
+learning rate 0.0001, center weight 8.0. Each column is one run of 40 or 50
+steps with that map weight and the same random seed; the gradients were
+measured every 10 steps (5 or 6 measurements per run), and the table gives the
+lowest and the highest value. The column 0.095 also contains a second run of
+150 steps with 7 measurements.
+
+| | Former loss (0.00000305) | 0.01 | **0.095** | 1.0 |
+|---|---|---|---|---|
+| Share of the map loss on the stem | 0.0006 % to 0.002 % | 0.2 % to 0.6 % | 1.5 % to 4.6 % | 17 % to 26 % |
+| Share of the map loss on the minutia stem | 0.07 % to 1.2 % | 24 % to 83 % | 75 % to 99 % | 97 % to 100 % |
+| Map gradient on the stem, relative to the gradient of the texture cross entropy | 0.00002 to 0.00008 | 0.06 to 0.18 | 0.4 to 1.2 | 4.8 to 10 |
+
+The column "Former loss" is the loss before these changes at 8 images per
+step (center loss 0.125 x sum); that run ended after 38 steps when the
+machine ran out of memory, so it has 4 measurements.
+
+What the numbers say:
+
+- **With the former weight the map loss did not reach the shared layers.**
+  Its share on the stem was about one part in 100,000.
+- **Nearly all of the other gradient on the stem comes from the texture
+  branch**, and most of that from the center loss: at the first step the
+  lengths were 10,986 (texture center loss with weight 8.0), 364 (texture
+  cross entropy), 180 (minutia center loss) and 6 (minutia cross entropy).
+  The minutia embedding sends very little gradient back, so the map loss is
+  what trains the minutia stem.
+- The layers that only draw the map get their gradient from the map loss
+  alone, and the optimizer (Adam) adapts its step to the size of the gradient.
+  They therefore learn with any weight. The weight decides what the *shared*
+  layers learn.
+
+**The target and the choice.** The map loss is a helper task; the cross
+entropy is the part that teaches the model to tell fingers apart. The target
+was therefore: on the stem, the map loss should pull about as strongly as the
+cross entropy of the texture branch (a ratio near 1, between one half and
+two), and its share of the whole gradient should stay well below one half, so
+that it does not decide alone what the stem learns. The weight 0.095 of the
+paper meets this (ratio 0.4 to 1.2, share 1.5 % to 4.6 %). With 0.01 the map
+loss is a fifth of the cross entropy or less; with 1.0 it is 5 to 10 times
+the cross entropy. The share of 1.5 % to 4.6 % is small because the center
+loss with its weight 8.0 dominates the stem; with a lower center weight the
+same map weight has a larger share. On the minutia stem the map loss
+dominates with 0.095 (75 % to 99 %); this is accepted, because almost no
+other gradient arrives there.
+
+### Does the map branch learn?
+
+Two numbers describe the predicted maps. The *map error* is the minutia map
+loss without its weight: the summed squared difference per image. A model
+that draws an empty map has an error equal to the summed squares of the
+target map, about 300 for these images; a model has to get below that to show
+that it places minutiae. The *correlation* between predicted and target map
+is 0 for unrelated maps and 1 for identical ones. Both were measured on 16
+images of 20 fingers that were not trained on, with the same runs as above:
+
+| After step | Former loss | 0.01 | **0.095** | 1.0 |
+|---|---|---|---|---|
+| 0 (start) | error 905, correlation -0.02 | the same | the same | the same |
+| 10 | 440, 0.08 | 382, 0.08 | 361, 0.11 | 349, 0.11 |
+| 20 | 356, 0.11 | 279, 0.15 | 252, 0.18 | 244, 0.18 |
+| 30 | 318, 0.13 | 230, 0.20 | 205, 0.24 | 200, 0.25 |
+
+An empty map has the error 190 on these 16 images.
+
+One more run with the weight 0.095 went on for 150 steps, which is three
+passes over the 400 images:
+
+| Steps | Map error on the training batches | Error of an empty map on the same batches | Correlation |
+|---|---|---|---|
+| 0 to 9 | 709 | 310 | 0.03 |
+| 40 to 49 | 255 | 301 | 0.33 |
+| 90 to 99 | 215 | 275 | 0.40 |
+| 140 to 149 | 215 | 284 | 0.43 |
+
+On the 16 images that were not trained on, the error fell from 905 to 158
+(empty map: 190) and the correlation rose to 0.34.
+
+What this shows: the map branch learns where the minutiae are. Its error
+falls below that of an empty map, also for fingers it has not seen, and it
+falls faster when the map loss reaches the shared layers (0.095 against the
+former loss in the table above).
+
+What it does not show: maps with minutiae at full height. At the cell where
+the target map is highest (0.73 to 0.87) the predicted value rose from 0.03
+to only 0.08 in these 150 steps. The model first learned to draw a nearly
+empty map and then began to raise it where the minutiae are. Whether the
+peaks reach the height of the target in a full training was not measured.
+
+### What was not measured
+
+- **Accuracy.** No equal error rate was measured with any weight. A few
+  hundred steps on 200 fingers show which parts of the loss reach which
+  layers and that the map error falls; they cannot show which weights give
+  the better model. In all runs the cross entropy stayed at its starting
+  value (5.3 for 200 subjects).
+- **The center weight.** 8.0 keeps what this code did at 64 images per step.
+  The DeepPrint paper states 0.00125 for its center loss (whether the paper
+  counts it as a sum or a mean over the batch was not checked), and on the
+  stem the gradient of the center loss was 30 times that of the cross entropy
+  at the start. Whether a lower value is better was not tested.
+- **The variants with localization network**, a batch of 64, a GPU and mixed
+  precision. The gradient shares were measured for `DeepPrint_TexMinu` only.
+  One training of `DeepPrint_LocTexMinu` with all defaults ran for 110 steps
+  without divergence (see the table in
+  [What was measured here, and what was not](#what-was-measured-here-and-what-was-not)).
+
+To decide on your data, train the same model with two or three settings for a
+few epochs and compare the validation equal error rate, for example the map
+weights 0.095, 0.01 and 1.0, and the center weights 8.0 and 0.5. Change one
+weight at a time, and repeat the learning rate range test for each setting,
+because the weights change the size of the loss and of its gradient.
 
 ---
 
@@ -1027,7 +1248,9 @@ The fields of an entry are:
 
 - `training_loss`: the value that the training minimises, averaged over the
   epoch. Lower is better.
-- `loss_statistics`: the parts of the loss, each a mean per training sample.
+- `loss_statistics`: the parts of the loss, each multiplied by its weight
+  (see [Loss weights](#loss-weights)) and averaged per training sample; the
+  minutia map loss is averaged over the samples that have a minutia map.
 - `training_accuracy`: the share of training samples whose subject the model
   named correctly. Higher is better. It says nothing about fingers that are
   not in the training set.
@@ -1249,6 +1472,12 @@ torchrun \
 ## Performance Benchmarks
 
 ### Expected Training Metrics
+
+The loss values below are from an earlier version of this guide and were not
+measured with the current loss, whose total also contains the weighted center
+loss and minutia map loss (see [Loss weights](#loss-weights)): a
+`DeepPrint_LocTexMinu` training on 220 fingers started near 145 here. Follow
+the cross entropy in `loss_statistics` and the accuracy instead of the total.
 
 **Good training progress:**
 - Epoch 1: Loss ~4-5, Accuracy ~0.3-0.4

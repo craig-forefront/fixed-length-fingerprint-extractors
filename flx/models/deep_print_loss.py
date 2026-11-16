@@ -51,7 +51,8 @@ def _compute_minutia_map_loss(
 ) -> tuple[torch.Tensor, float]:
     """
     Squared difference between the predicted maps x and the target maps, as
-    the mean over the cells of a map and the weighted mean over the samples.
+    the sum over the cells of a map (as in equation 8 of the DeepPrint paper)
+    and the weighted mean over the samples.
 
     The weight of a sample is 1 if it has a target map and 0 if it has none
     (see MinutiaMapLoader.get). The loss is divided by the sum of the weights,
@@ -59,14 +60,19 @@ def _compute_minutia_map_loss(
     not the batch also contains samples without a map. A batch without any
     map has the loss 0.
 
+    The sum is calculated in 32-bit numbers also when the model runs with
+    mixed precision, because a sum over about 98,000 cells can be too large
+    for 16-bit numbers.
+
     @returns : The loss and the sum of the weights (the number of samples with a map)
     """
+    x = x.float()
     weights = minutia_map_weights.to(dtype=x.dtype)
     mm_squared_diff = (x - minutia_maps.to(dtype=x.dtype)) ** 2
-    mm_mse = mm_squared_diff.reshape(weights.shape[0], -1).mean(dim=1)
+    mm_sse = mm_squared_diff.reshape(weights.shape[0], -1).sum(dim=1)
     weight_sum = weights.sum()
-    # Without any map the sum is 0; dividing by 1 then keeps the loss at 0
-    loss = (mm_mse * weights).sum() / torch.clamp(weight_sum, min=1e-12)
+    # Without any map both sums are 0; the lower limit avoids 0 / 0
+    loss = (mm_sse * weights).sum() / torch.clamp(weight_sum, min=1e-12)
     return loss, float(weight_sum.detach().item())
 
 
