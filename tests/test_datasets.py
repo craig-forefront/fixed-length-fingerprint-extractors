@@ -326,3 +326,15 @@ def test_dataset_SFingeExample():
 #
 # def test_dataset_MCYT330_Capacitive():
 #     _test_image_dataset(MCYTCapacitiveDataset, "mcyt330_capacitive", 3300, 3300 * 12)
+
+
+def test_embeddings_are_saved_and_loaded_with_their_identifiers(tmp_path):
+    # save() referred to an attribute that does not exist and always failed
+    ids = [Identifier(1, 1), Identifier(0, 0), Identifier(1, 0), Identifier(0, 1)]
+    embeddings = np.arange(12, dtype=np.float32).reshape(4, 3)
+    loader = EmbeddingLoader(ids, embeddings)
+    loader.save(str(tmp_path / "embeddings"))
+    loaded = EmbeddingLoader.load(str(tmp_path / "embeddings"))
+    assert len(loaded.ids) == 4
+    for identifier, row in zip(ids, embeddings):
+        assert (loaded.get(identifier) == row).all()

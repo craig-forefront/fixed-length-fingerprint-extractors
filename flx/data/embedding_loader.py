@@ -1,6 +1,7 @@
 from typing import Union
 from os.path import join
 import json
+import os
 
 import numpy as np
 
@@ -34,13 +35,14 @@ class EmbeddingLoader(DataLoader):
 
         @param outdir : absolute path of the output directory
         """
+        os.makedirs(outdir, exist_ok=True)
         outarr = self.numpy()
         outarr = outarr.astype(np.float32)
         np.save(join(outdir, "embeddings.npy"), outarr)
+        # In the order of the rows of the array
+        ids = sorted(self._id_to_idx, key=self._id_to_idx.get)
         with open(join(outdir, "ids.json"), "w") as file:
-            json.dump(
-                Identifier.ids_to_json(self._id_to_embedding.keys()), file, indent=None
-            )
+            json.dump(Identifier.ids_to_json(ids), file, indent=None)
 
     @staticmethod
     def load(dir: str) -> "EmbeddingLoader":
