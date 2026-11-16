@@ -266,47 +266,20 @@ def _train(
 
 ### Learning Rate Scaling
 
-For large datasets, adjust learning rate:
+The learning rate, the warm-up, the schedule and gradient clipping are
+settings of the training, not code edits. They are described in
+["Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate),
+together with `scripts/find_learning_rate.py`, which finds a rate for your
+data, model variant and batch size. Do not copy a rate from a small dataset or
+from another batch size: run the range test again.
 
-Edit `flx/setup/config.py`:
-
-```python
-# Original learning rate for small datasets
-# LEARNING_RATE = 0.025
-
-# For large datasets (>100K subjects), use lower learning rate
-LEARNING_RATE = 0.01  # More stable for large-scale training
-
-# Or use learning rate warmup (recommended)
-```
-
-**Add learning rate warmup** (edit optimizer in `model_training.py`):
-
-```python
-from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
-
-# After creating optimizer
-optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
-
-# Warmup for first 5 epochs, then cosine decay
-warmup_scheduler = LinearLR(
-    optimizer,
-    start_factor=0.1,
-    total_iters=5
-)
-main_scheduler = CosineAnnealingLR(
-    optimizer,
-    T_max=num_epochs - 5,
-    eta_min=LEARNING_RATE * 0.01
-)
-scheduler = SequentialLR(
-    optimizer,
-    schedulers=[warmup_scheduler, main_scheduler],
-    milestones=[5]
-)
-
-# In training loop, after each epoch:
-scheduler.step()
+```bash
+python scripts/train_500k.py \
+    --dataset_dir /path/to/fingerprints \
+    --output_dir /path/to/model \
+    --learning_rate <rate from the range test> \
+    --warmup_steps 1000 \
+    --lr_schedule cosine
 ```
 
 ### Class Balancing
@@ -415,15 +388,11 @@ Examples:
 - 8 GPUs, batch_size=128, accumulation=2 → Effective batch size = 2048
 ```
 
-Large effective batch sizes may require learning rate adjustment:
-```python
-# Linear scaling rule
-base_lr = 0.01
-effective_batch_size = 256
-base_batch_size = 64
-adjusted_lr = base_lr * (effective_batch_size / base_batch_size)
-# adjusted_lr = 0.04
-```
+A larger effective batch size usually allows a higher learning rate, but
+there is no reliable formula for the Adam optimizer that this training uses.
+Run `scripts/find_learning_rate.py` with the batch size of the planned
+training; see "How the rate changes with the batch size and the number of
+GPUs" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate).
 
 ---
 
@@ -1066,16 +1035,17 @@ num_workers = 8  # instead of 16
 ### Training Loss Unstable/NaN
 
 **Solutions:**
-```python
-# Reduce learning rate
-LEARNING_RATE = 0.005  # instead of 0.01
+The training stops by itself with a message when the loss is not a finite
+number or far above the loss at the start.
 
-# Enable gradient clipping
-torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+- Lower the learning rate (`--learning_rate` of `scripts/train_500k.py`, or
+  `LEARNING_RATE` in `flx/setup/config.py`). `scripts/find_learning_rate.py`
+  suggests a value for your data and batch size.
+- Use more warm-up steps (`--warmup_steps`).
+- Limit the gradient (`--gradient_clip_norm`).
+- Check for corrupted images: add error handling in `_load_image()`.
 
-# Check for corrupted images
-# Add error handling in _load_image()
-```
+See ["Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate).
 
 ### Slow Validation
 

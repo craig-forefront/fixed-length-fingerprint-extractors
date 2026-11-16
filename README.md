@@ -135,6 +135,9 @@ The following preprocessing steps are applied to the fingerprint images before t
 
 For training the model, the Adam optimizer is used, the optimal learning rate differs between the individual variants. For simpler variants like `DeepPrint_Tex_512` a higher
 learning rate can be chosen to speed up training. For more complex variants like `DeepPrint_LocTexMinu_512` a lower learning rate is necessary to avoid overfitting.
+The learning rate, a warm-up, a cosine schedule and gradient clipping are set in `flx/setup/config.py` or passed to `fit` as a `LearningRateConfig`. `scripts/find_learning_rate.py` runs a short
+range test that suggests a learning rate for a dataset, model variant and batch size; see "Choosing the learning rate" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate).
+The training stops with a message when the loss is not a finite number or more than ten times the loss at the start.
 The number of epochs is chosen based on the equal error rate on a validation set (subjects that are not in the training set). The training is stopped when this error rate does not decrease anymore,
 and the epoch with the lowest validation error rate is saved as `best_model.pyt`. Without a validation set, the epoch with the lowest training loss is saved instead, which does not detect overfitting.
 

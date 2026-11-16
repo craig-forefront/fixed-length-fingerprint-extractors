@@ -12,9 +12,10 @@ This guide provides step-by-step instructions for setting up a complete training
 4. [Configuring Your Dataset](#configuring-your-dataset)
 5. [Model Selection and Configuration](#model-selection-and-configuration)
 6. [Training the Model](#training-the-model)
-7. [Validation and Testing](#validation-and-testing)
-8. [Multi-GPU Training](#multi-gpu-training)
-9. [Troubleshooting](#troubleshooting)
+7. [Choosing the learning rate](#choosing-the-learning-rate)
+8. [Validation and Testing](#validation-and-testing)
+9. [Multi-GPU Training](#multi-gpu-training)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -731,6 +732,274 @@ Equal Error Rate: 0.2453
 
 ---
 
+## Choosing the learning rate
+
+### What the learning rate is
+
+Training repeats one small action millions of times. The model looks at a
+handful of images (a *batch*), a number called the *loss* says how wrong its
+answers were, and the optimizer changes every parameter of the model a little
+in the direction that makes the loss smaller. One such action is a *step*.
+
+The *learning rate* is the size of that change. It decides whether a
+training works at all:
+
+- **Too low:** every step changes almost nothing. The loss falls very slowly
+  or not at all, and GPU time is wasted.
+- **Too high:** every step overshoots. The loss jumps up instead of down, the
+  next step is computed from a worse model and overshoots further, and within
+  a few steps the loss is in the thousands or is no longer a number ("NaN").
+  The training has then *diverged* and the model is useless.
+- **About right:** the loss falls steadily, with some noise from batch to
+  batch.
+
+This repository uses the Adam optimizer. In its first step Adam changes
+every parameter by about the learning rate itself, whatever the data look
+like. In a fresh `DeepPrint_LocTexMinu` model, 93 % of the 68 million
+parameters are smaller than 0.025 in size, so the former default of 0.025
+changed most parameters by more than their own size in the first step. On
+real fingerprint images it destroyed the training at once: the loss was 14.9 in the first step and 5,717
+in the second (one run, 8 images per step). With 0.01, the value that
+LARGE_SCALE_TRAINING_GUIDE.md used to recommend, the loss was 690 in the
+third step.
+
+### What warm-up does
+
+At the start the model is random, and the direction that the optimizer
+computes from the first few batches is unreliable. *Warm-up* means that the
+training starts with a tiny learning rate and raises it in a straight line,
+step by step, until it reaches the chosen learning rate. During these steps
+the model moves carefully into a region where larger steps are safe.
+
+The warm-up is counted in steps (default: 500). It is never longer than a
+tenth of the whole training, so a short training on a small dataset still
+reaches the chosen rate; the training prints the number of warm-up steps it
+uses. For a large training set, 500 to 2,000 steps are a tiny part of the
+first epoch.
+
+After the warm-up there are two choices (the *schedule*):
+
+- `constant`: the rate stays at the chosen value.
+- `cosine`: the rate falls smoothly and reaches 1 % of the chosen value in the
+  last step of the last epoch. Large steps at the start find a good region
+  quickly, small steps at the end settle into it. This is common practice for
+  long trainings; whether it gives a lower error rate than `constant` on your
+  data was not measured here and is worth one comparison.
+
+### Where the settings are
+
+| Setting | `scripts/train_500k.py` | Default in `flx/setup/config.py` |
+|---------|------------------------|----------------------------------|
+| Learning rate after the warm-up | `--learning_rate` | `LEARNING_RATE = 0.0001` |
+| Number of warm-up steps | `--warmup_steps` | `LEARNING_RATE_WARMUP_STEPS = 500` |
+| Schedule after the warm-up | `--lr_schedule constant` or `cosine` | `LEARNING_RATE_SCHEDULE = "constant"` |
+| Upper limit for the gradient (see below) | `--gradient_clip_norm` | `GRADIENT_CLIP_NORM = None` (no limit) |
+| Stop when the loss is this many times the starting loss | (config only) | `LOSS_EXPLOSION_FACTOR = 10.0` |
+
+In your own training script, pass the settings to `fit`:
+
+```python
+from flx.models.learning_rate import LearningRateConfig
+
+extractor.fit(
+    ...,
+    learning_rate=LearningRateConfig(
+        learning_rate=1e-4, warmup_steps=1000, schedule="cosine"
+    ),
+)
+```
+
+*Gradient clipping* is a safety belt. The *gradient* is the list of changes
+that the optimizer would like to make in one step; its *norm* is the overall
+length of that list. With a limit, a step whose gradient is longer than the
+limit is scaled down to the limit, so a single bad batch cannot throw the
+model far away. It is off by default, and the stability runs below did not
+use it. If you use one, take it from your own range test: the column
+`gradient_norm` of `lr_range_test.csv` holds the gradient norm of every step,
+and a limit of a few times the typical value in the falling part of the curve
+only acts on unusual batches. In the range tests here the norm was in the
+hundreds to thousands at rates up to 0.0005, so a limit such as 1.0 from
+other projects would shrink every single step.
+
+The training follows the schedule by counting steps, so it continues
+correctly when you resume a training from `model.pyt`, as long as the number
+of epochs, the training set and the batch size are the same as before. If you
+resume with a larger number of epochs, the `cosine` schedule is stretched to
+the new length and the rate jumps back up; prefer to set the number of epochs
+once. In a multi-GPU training all processes use the same rate.
+
+### How to run the range test
+
+The right learning rate depends on the data, the model variant and the batch
+size. `scripts/find_learning_rate.py` finds a starting value. It trains a
+fresh model on a subset of your data for a few hundred steps and multiplies the learning rate by a constant factor after
+every step, from far too low (0.0000001) to far too high (1). It reads the
+same directory layout as `scripts/train_500k.py` and saves no model.
+
+```bash
+python scripts/find_learning_rate.py \
+    --dataset_dir /path/to/fingerprints \
+    --minutiae_dir /path/to/minutiae \
+    --num_subjects 50000 --num_impressions 10 \
+    --max_subjects 2000 \
+    --batch_size 64 \
+    --output_dir /path/to/lr_range_test
+```
+
+- `--max_subjects 2000` uses a random 2,000 of the subjects. The test needs
+  `--num_steps` times `--batch_size` images (19,200 with the defaults); a
+  subset with at least that many images is enough.
+- `--batch_size` must be the batch size of the planned training.
+- `--variant` chooses the model (`LocTexMinu`, `TexMinu`, `LocTex`, `Tex`).
+  Without it the script tests what `train_500k.py` would train.
+- `--gradient_clip_norm` must be the value of the planned training.
+- `--seed` changes the subset, the starting model and the order of the
+  images. Run the test with two or three seeds; if the suggestions differ by
+  more than a factor of 3, take the lowest.
+
+The script writes `lr_range_test.csv` (learning rate and loss of every step),
+draws `lr_range_test.png` and prints a suggested rate.
+
+### How to read the plot
+
+![Range test of DeepPrint_TexMinu on 440 real fingerprint images](figures/lr_range_test_example.png)
+
+The picture is the range test of `DeepPrint_TexMinu` on 440 real images with
+8 images per step (see "What was measured here" below). The fall is shallow
+because the test is short and the data set is tiny.
+
+The horizontal axis is the learning rate; each tick is ten times the one
+before. The grey line is the loss of each batch, the blue line is its moving
+average. Read it from left to right:
+
+1. **Flat part on the left.** The rate is too low to change the model in so
+   few steps. The loss stays at its starting value.
+2. **Falling part.** The model learns. The further right, the faster.
+3. **Lowest point and rise on the right.** The rate is too high. The test
+   ends when the average loss is four times its lowest value or is no longer
+   a number.
+
+A good learning rate lies in the falling part, clearly left of the lowest
+point. The lowest point itself is not a good choice: the loss is low there
+because of all the steps before it, and the next steps diverge. The script
+marks the rate where the loss fell fastest (orange, dashed) and suggests one
+tenth of it (green). The factor of ten is a safety margin, because a real
+training runs thousands of times longer than the test and an instability can
+take longer than the test to show.
+
+If the plot has no flat part on the left, start lower (`--min_lr`). If the
+loss never falls, no rate is suggested: look for a problem in the data or the
+labels before you look at the learning rate.
+
+### What was measured here, and what was not
+
+The default learning rate of 0.0001 comes from runs on the only real data
+that was available when this was written: 440 images of 220 fingers (two
+impressions each, rolled and slap prints from five devices of NIST Special
+Database 302, with minutiae marked by examiners), on a CPU, with 8 images per
+step. Each line is one run.
+
+| Run | `DeepPrint_TexMinu` | `DeepPrint_LocTexMinu` |
+|-----|--------------------|------------------------|
+| Range test, 100 steps from 0.000001 to 0.1: smoothed loss above 15 (start: 14.8) from | 0.0031 | 0.0043 |
+| Range test: steepest fall at | 0.00067 | 0.00067 |
+| Range test: suggested rate | 0.000067 | 0.000067 |
+| Training with the former default 0.025, no warm-up | stopped in step 2 (loss 14.7, then 5,119) | stopped in step 2 (loss 14.9, then 5,717) |
+| Training with 0.01, no warm-up | not run | stopped in step 3 (loss 14.9, 43.8, 690) |
+| Training with the new defaults (0.0001, warm-up, constant), 110 steps | no divergence; highest batch loss 14.9; epoch loss 14.70, then 14.44 | no divergence; highest batch loss 14.9; epoch loss 14.70, then 14.41 |
+
+In the last line the warm-up took 11 steps, a tenth of the training, not the
+default 500.
+
+What these runs show: 0.0001 does not diverge in the first 110 steps for
+either variant, and it is 30 to 43 times below the rate at which the
+loss of the range test started to rise. The default is the suggestion of the range
+test rounded up to a round number.
+
+What they do not show:
+
+- **Whether 0.0001 is the best rate, or even a good one, for your data.** In
+  110 steps on 440 images the model learned almost nothing about the
+  subjects: the loss of each classifier stayed between 5.39 and 5.40 and the share
+  of correctly named training subjects stayed near chance. The fall of the
+  loss came from the center loss and the map loss. These runs are a check
+  that the training does not break, not a measurement of how well it learns.
+- **Anything about a batch of 64 images or about several GPUs.** Every run
+  used 8 images per step. No run used a GPU, mixed precision, or more than
+  one process.
+- **Anything about accuracy.** No equal error rate was measured.
+- **Whether a long training stays stable.** Some instabilities need
+  thousands of steps to show.
+
+The value must be found again on your data and with your batch size: run the
+range test, start a training with the suggested rate, and watch the first
+thousand steps as described below.
+
+### How the rate changes with the batch size and the number of GPUs
+
+`train_model` uses a batch of 64 images per GPU (`get_dataloader_args` in
+`flx/models/torch_helpers.py`). With `torchrun` on several GPUs every GPU
+processes its own batch of 64 and the results are averaged, so one step sees
+**64 times the number of GPUs** images. That product is the *effective batch
+size*, and it is the batch size that matters for the learning rate.
+
+- A larger effective batch gives a more reliable direction per step, so it
+  usually tolerates a higher rate. There is no exact rule for Adam. A
+  common first guess is to multiply the rate by the square root of the factor
+  by which the effective batch grew (4 GPUs instead of 1: twice the rate).
+  Multiplying by the factor itself (4 GPUs: four times the rate) is the upper
+  end and often too much. Neither was measured here.
+- The safe way is to measure. The range test runs on one GPU. If the
+  effective batch fits on one GPU, run the test with it
+  (`--batch_size 256` for 4 GPUs). If it does not fit, run the test with the
+  largest batch that fits and treat the suggestion as a rate that is on the
+  low, safe side for the larger batch.
+- More GPUs also mean fewer steps per epoch. The warm-up is counted in
+  steps, so it covers more images; this is intended. Use a longer warm-up
+  (2,000 steps or more) when you raise the rate for a large batch.
+- One part of the loss (the center loss) is a sum over the images of a batch,
+  not a mean, so its share of the loss grows with the batch size. This is
+  another reason to repeat the range test when the batch size changes.
+
+### What to watch in the first thousand steps
+
+The progress bar shows the loss and the learning rate of every step:
+
+```
+  3%|▎         | 212/7032 [02:41<1:26:35,  1.31it/s, loss=21.3, lr=4.24e-05]
+```
+
+- **The starting loss.** A fresh model guesses, so each of its classifiers
+  starts with a loss near the natural logarithm of the number of training
+  subjects (about 10.8 for 50,000 subjects). Variants with texture and
+  minutiae have two classifiers. The center loss adds an amount that grows
+  with the batch size: in the runs here it was about 0.24 per image of the
+  batch and classifier (256-dimensional embeddings). With 220 subjects and 8
+  images per step that gives 2 x 5.4 + 2 x 8 x 0.24 = 14.6; the measured
+  starting loss was 14.7 to 14.9. The same sum for 64 images per step is
+  about 31 above the two logarithms (calculated, not measured). A starting loss far away from this sum
+  points to a problem in the data.
+- **During the warm-up** the `lr` value rises and the loss changes little.
+  That is normal.
+- **After the warm-up** the loss should start to fall within a few hundred
+  steps, slowly and with noise. With very many subjects it falls slowly,
+  because each subject is seen rarely.
+- **Bad signs:** the loss doubles from one step to the next and keeps
+  rising; the loss is `nan` or `inf`; the loss swings widely between
+  neighbouring steps. The training stops by itself with a message when the
+  loss is not a number or more than ten times its starting value, before the
+  broken model is saved. The last completed epoch stays in `model.pyt`.
+- **If the training stops this way:** divide the learning rate by 3, double
+  the warm-up steps, and consider a limit for the gradient. Then start again.
+- **If the loss does not move at all for the first thousand steps after the
+  warm-up,** the rate is too low (multiply it by 3), or the labels are wrong.
+
+After the first epoch, look at `log.json`: the training loss should be below
+the starting loss, and the validation equal error rate should fall from epoch
+to epoch. The log also stores the learning rate at the end of every epoch.
+
+---
+
 ## Validation and Testing
 
 ### Step 12: Monitor Training Progress
@@ -760,6 +1029,8 @@ The fields of an entry are:
 - `training_accuracy`: the share of training samples whose subject the model
   named correctly. Higher is better. It says nothing about fingers that are
   not in the training set.
+- `learning_rate`: the learning rate of the last step of the epoch (see
+  [Choosing the learning rate](#choosing-the-learning-rate)).
 - `validation_equal_error_rate` (EER): measured on the validation set. The
   equal error rate is the error rate at the decision threshold where false
   matches and false non-matches are equally frequent. Lower is better. It is
@@ -901,7 +1172,7 @@ torchrun \
 - 8 GPUs: ~6.5x faster
 
 **Notes:**
-- Batch size is automatically split across GPUs
+- Every GPU processes its own batch of 64 images, so one training step sees 64 times the number of GPUs images. The learning rate must be chosen for that number, see [Choosing the learning rate](#choosing-the-learning-rate)
 - Only rank 0 process saves models and logs
 - All processes participate in training
 
@@ -945,7 +1216,7 @@ torchrun \
 **Problem:** Model not learning.
 
 **Solutions:**
-- Check learning rate (default: 0.025 in [flx/setup/config.py](flx/setup/config.py))
+- Check the learning rate (default: 0.0001 in [flx/setup/config.py](flx/setup/config.py)); see [Choosing the learning rate](#choosing-the-learning-rate)
 - Verify data augmentation isn't too aggressive
 - Ensure images are properly normalized [0, 1]
 - Check that labels are correct (consecutive 0-indexed integers)

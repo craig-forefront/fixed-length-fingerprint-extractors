@@ -8,12 +8,16 @@ INTERACTIVE_VIS = False
 # TRAINING_PIPELINE_GUIDE.md). These values are only the defaults of
 # flx.models.learning_rate.LearningRateConfig.
 
-# Learning rate after the warm-up.
-LEARNING_RATE = 0.025
+# Learning rate after the warm-up. 0.0001 trained DeepPrint_TexMinu and
+# DeepPrint_LocTexMinu without divergence in short runs on real images with
+# 8 images per step; the former default 0.025 diverged in the second step.
+# The value was not tested with large batches or on other data.
+LEARNING_RATE = 0.0001
 
 # Number of training steps (batches) over which the learning rate rises in a
 # straight line from near zero to LEARNING_RATE. 0 switches the warm-up off.
-LEARNING_RATE_WARMUP_STEPS = 0
+# The warm-up is never longer than a tenth of all steps of the training.
+LEARNING_RATE_WARMUP_STEPS = 500
 
 # What the learning rate does after the warm-up:
 #   "constant": it stays at LEARNING_RATE
