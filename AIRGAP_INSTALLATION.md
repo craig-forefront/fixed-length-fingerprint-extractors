@@ -12,9 +12,10 @@ Training DeepPrint models in an air-gapped environment requires pre-downloading 
 - **Python**: 3.11 or higher (3.12 also supported)
 - **Operating System**: Linux (RHEL 9, Ubuntu, or compatible)
 - **GPU**: NVIDIA GPU with CUDA 12.8 support (recommended for training)
-- **CPU**: Multi-core CPU (8+ cores recommended for data preprocessing)
-- **RAM**: 16GB+ recommended
-- **Storage**: 10GB+ for dependencies, plus space for datasets and models
+- **CPU, RAM and storage**: no figures that hold in general. They depend on the number of images and subjects;
+  see [Storage Requirements](#storage-requirements) below for what was measured and what was not. The numbers
+  that were in this list before (8 cores, 16 GB of RAM, 10 GB of storage) were not measured and are far too small
+  for a large corpus.
 
 ---
 
@@ -22,7 +23,8 @@ Training DeepPrint models in an air-gapped environment requires pre-downloading 
 
 ### Step 1: Download Python Packages
 
-Create a directory for all offline packages:
+Create a directory for all offline packages. All commands of Step 1 run inside it; the last command of Step 1
+leaves it again.
 
 ```bash
 mkdir -p airgap-packages
@@ -89,15 +91,20 @@ This is a fork of https://github.com/tourmii/minutiae_extractor. `scripts/extrac
 of it whose `Extractor` has the `image_dpi` option (direction refinement, file
 `src/fingerflow/extractor/direction_sense.py`) and accepts `None` for the ClassifyNet and CoreNet paths. That is
 the branch `claude/serene-albattani-s6ehsj` from its commit "Make ClassifyNet and CoreNet optional in the
-Extractor" on. When this was written the branch was to go into `main` of that repository through a pull request;
-once it is merged, `main` works and the `git checkout` line is not needed. To check a checkout:
+Extractor" on. When this was written the branch was on the server with that commit, and pull request #3 of that
+repository was open to bring it into `main`; `main` itself did not have it yet. Once the pull request is merged,
+`main` works and the `git checkout` line is not needed. To check a checkout:
 
 ```bash
 grep -c "classify_net_path is not None" minutiae_extractor/src/fingerflow/extractor/extractor.py   # must print 1
 ```
 
-If it prints 0, the checkout does not hold that commit: the branch on the server may not have been updated yet.
-Ask for the commit before you build the bundle; nothing in the air-gapped environment can replace it.
+If it prints 0, the checkout does not hold that commit: it is most likely `main` from before the merge, or the
+`git checkout` line was left out. Check out the branch before you build the bundle; nothing in the air-gapped
+environment can replace it.
+
+The clone must stay where these commands put it, in `airgap-packages/minutiae_extractor`: Part 2 sets
+`PYTHONPATH` to `airgap-packages/minutiae_extractor/src`.
 
 An older checkout and the `fingerflow` release on PyPI do not work. With them `scripts/extract_minutiae.py` stops
 at the first image with exit status 2 and a message that names this branch.
@@ -113,6 +120,14 @@ pip download pillow tqdm --dest ./packages-fingerflow
 
 **Note**: FingerFlow requires pre-trained model weights. `scripts/extract_minutiae.py` needs CoarseNet.h5 and FineNet.h5; ClassifyNet_6_classes.h5 is optional for it and CoreNet.weights is not used by it. See Step 2 below.
 
+#### Leave the Package Directory
+
+Steps 2 to 4 run in the directory that holds `airgap-packages`, not inside it:
+
+```bash
+cd ..
+```
+
 ### Step 2: Download Pre-trained Models (Optional)
 
 #### DeepPrint Pre-trained Model
@@ -120,13 +135,14 @@ pip download pillow tqdm --dest ./packages-fingerflow
 The authors provide a pre-trained DeepPrint model (512-dimensional embeddings):
 
 1. Download from Google Drive: https://drive.google.com/drive/folders/1vV2skXApZMhqWTlF2j_qgXDxRYan5U1f?usp=drive_link
-2. Save the model files to `pretrained-models/deepprint-512/`
+2. Save the model files to `pretrained-models/deepprint-512/` (next to `airgap-packages`, not inside it; create
+   `pretrained-models` also if you download no models, because Step 4 moves it)
 
 #### FingerFlow Minutiae Extraction Models
 
 If using the FingerFlow minutiae extractor, download the required model weights:
 
-1. In the minutiae_extractor checkout, run `python scripts/install_model.py` as described in its README. It downloads
+1. In the minutiae_extractor checkout (`airgap-packages/minutiae_extractor`), run `python scripts/install_model.py` as described in its README. It downloads
    the model files to its `models/` directory:
    - `CoarseNet.h5`
    - `FineNet.h5`
@@ -149,14 +165,23 @@ tar -czf flx-source.tar.gz fixed-length-fingerprint-extractors/
 ### Step 4: Package Everything for Transfer
 
 ```bash
-# Create final package directory
+# Create final package directory (in the directory that holds airgap-packages)
 mkdir flx-airgap-bundle
 mv airgap-packages flx-airgap-bundle/
+mkdir -p pretrained-models
 mv pretrained-models flx-airgap-bundle/
 mv flx-source.tar.gz flx-airgap-bundle/
 
 # Create the transfer archive
 tar -czf flx-airgap-bundle.tar.gz flx-airgap-bundle/
+```
+
+The bundle must now hold `airgap-packages/packages` (and `packages-cuda`, `packages-dev`, `packages-fingerflow`,
+`minutiae_extractor` if you downloaded them), `pretrained-models` and `flx-source.tar.gz`. Check it before the
+transfer:
+
+```bash
+ls flx-airgap-bundle flx-airgap-bundle/airgap-packages
 ```
 
 Transfer `flx-airgap-bundle.tar.gz` to your air-gapped environment via approved media (USB drive, approved file transfer, etc.).
@@ -339,7 +364,9 @@ training; a new `--output_dir` starts a new one.
 
 The notebooks [model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb) and
 [embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb) show the classes underneath
-on the SFinGe example data.
+on the SFinGe example data. They need the development dependencies (`jupyter`; the embedding notebook also
+imports `tikzplotlib` through `flx.visualization`), so download and install "Development Dependencies" for them.
+The notebooks were not run for this guide.
 
 ---
 
@@ -368,12 +395,18 @@ You'll need to prepare your own datasets in the appropriate format.
 
 ### Storage Requirements
 
-Estimate storage needs:
-- **Python packages**: ~2-5 GB
-- **Pre-trained models**: ~100-500 MB
-- **Training datasets**: Varies (plan for 10-100+ GB)
-- **Model checkpoints**: `model.pyt` and `best_model.pyt`, 0.8 GB each plus 8.2 kB per training subject (measured)
-- **Embeddings**: Depends on dataset size
+What was measured, and what was not:
+- **Python packages and pre-trained models**: not measured; the download commands of this guide were not run.
+  Look at the size of `flx-airgap-bundle` after Step 4.
+- **Training images**: the size of your corpus. The 500 ppi PNG files of rolled prints that were used for the
+  guides were about 200 kB each; at that size 1 million images are about 200 GB and 100 million about 20 TB. See
+  the storage table in [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
+- **Model checkpoints**: `model.pyt` and `best_model.pyt`, 0.8 GB each plus 8.2 kB per training subject (measured).
+  While one of them is written, a third file of the same size exists for a moment (`model.pyt.tmp` or
+  `best_model.pyt.tmp`).
+- **Embeddings and minutiae files**: grow with the number of images; see the same storage table.
+- **RAM and GPU memory**: grow with the number of subjects and images; see "Above about one million subjects" in
+  [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for what was measured and what is calculated.
 
 ---
 
@@ -403,6 +436,7 @@ Extraction" above. The message shows where it was imported from.
 - **Training Tutorial**: [notebooks/model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb)
 - **Dataset Setup**: [notebooks/dataset_tutorial.ipynb](notebooks/dataset_tutorial.ipynb)
 - **Embedding Extraction**: [notebooks/embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb)
+  (needs `tikzplotlib` from the development dependencies)
 - **DeepPrint Paper**: https://arxiv.org/abs/1909.09901
 - **BIOSIG 2023 Paper**: Benchmarking fixed-length Fingerprint Representations
 
