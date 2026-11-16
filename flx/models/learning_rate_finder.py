@@ -86,6 +86,7 @@ def suggest_learning_rate(
     smoothing: float = 0.9,
     safety_divisor: float = 10.0,
     skip_first: int = 5,
+    max_factor_below_lowest: float = 100.0,
 ) -> RangeTestSuggestion:
     """
     Reads a starting learning rate off the result of a range test.
@@ -98,9 +99,18 @@ def suggest_learning_rate(
     rate the test is already close to the rates that diverge, and a real
     training runs far longer than the test.
 
+    A part of the loss can fall from the first step at any learning rate. The
+    minutia map loss does: an untrained model draws a map that is far from
+    empty, and tiny changes correct that. The steepest fall is then found at
+    the very low rates at the start of the test and says nothing about the
+    learning rate. Therefore, if the steepest rate is more than
+    max_factor_below_lowest times below the rate with the lowest loss, the
+    suggestion is the rate with the lowest loss divided by safety_divisor.
+
     Args:
         skip_first: Number of steps at the start that are not considered,
             because the average of very few losses is still noisy.
+        max_factor_below_lowest: See above.
     """
     if len(learning_rates) != len(losses):
         raise ValueError("learning_rates and losses must have the same length")
@@ -139,6 +149,21 @@ def suggest_learning_rate(
             "The loss did not fall during the test, so no rate can be "
             "suggested. Start the test at a lower learning rate (--min_lr), "
             "or use more steps.",
+        )
+    if steepest_lr * max_factor_below_lowest < lowest_lr:
+        suggested = lowest_lr / safety_divisor
+        return RangeTestSuggestion(
+            steepest_lr,
+            lowest_lr,
+            suggested,
+            f"The smoothed loss fell fastest at learning rate {steepest_lr:.3g}, "
+            f"more than {max_factor_below_lowest:g} times below the rate "
+            f"where it was lowest ({lowest_lr:.3g}). A fall that early comes "
+            "from a part of the loss that falls at any rate (for example the "
+            "minutia map loss in the first steps), not from the learning "
+            f"rate. Suggested starting value: {suggested:.3g} (the rate with "
+            f"the lowest loss divided by {safety_divisor:g}). Check it with a "
+            "real training run and watch the loss in the first thousand steps.",
         )
     suggested = steepest_lr / safety_divisor
     return RangeTestSuggestion(

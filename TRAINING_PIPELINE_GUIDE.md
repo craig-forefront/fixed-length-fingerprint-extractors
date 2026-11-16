@@ -818,9 +818,10 @@ model far away. It is off by default, and the stability runs below did not
 use it. If you use one, take it from your own range test: the column
 `gradient_norm` of `lr_range_test.csv` holds the gradient norm of every step,
 and a limit of a few times the typical value in the falling part of the curve
-only acts on unusual batches. In the range tests here the norm was in the
-hundreds to thousands at rates up to 0.0005, so a limit such as 1.0 from
-other projects would shrink every single step.
+only acts on unusual batches. In the range test here with the current loss
+the norm was between 10,000 and 15,200 at rates up to 0.0001 and fell to a
+few hundred near 0.001, so a limit such as 1.0 from other projects would
+shrink every single step.
 
 The training follows the schedule by counting steps, so it continues
 correctly when you resume a training from `model.pyt`, as long as the number
@@ -892,6 +893,17 @@ If the plot has no flat part on the left, start lower (`--min_lr`). If the
 loss never falls, no rate is suggested: look for a problem in the data or the
 labels before you look at the learning rate.
 
+**Variants with minutiae look different.** Their loss contains the minutia
+map loss (see [Loss weights](#loss-weights)), which falls from the first step
+at any learning rate: a model that has not learned anything draws a map that
+is far from empty, and tiny changes correct that. The curve then has no flat
+part and falls evenly from the left edge to the lowest point, and the place
+of the steepest fall says nothing about the learning rate. The script
+notices this (the steepest fall is more than 100 times below the rate with
+the lowest loss) and then suggests one tenth of the rate with the lowest
+loss instead; the printed explanation says which rule was used. Starting
+lower does not help in this case.
+
 ### What was measured here, and what was not
 
 The default learning rate of 0.0001 comes from runs on the only real data
@@ -920,9 +932,18 @@ balanced differently. One run was repeated with the current loss:
 steps. It did not diverge: the highest batch loss was the first one (145.1),
 and the epoch loss was 77.8, then 62.1. The recorded minutia map loss fell
 from 35.9 to 22.3 and the center loss of each embedding from 15.6 to 14.4,
-while the cross entropy of each classifier stayed at 5.40. The range tests
-were not repeated with the current loss, so the suggested rates in the table
-belong to the former loss.
+while the cross entropy of each classifier stayed at 5.40.
+
+The range test of `DeepPrint_TexMinu` was also repeated with the current
+loss (one run, same settings as in the table). The smoothed loss started at
+133 and fell from the first step (100 at the rate 0.000016, 86 at 0.0001). It
+was lowest (64) at 0.00135, rose from 0.0017 and the test ended after 69
+steps at 0.0027. The steepest fall was found at 0.0000036, which is the
+effect described under "Variants with minutiae look different" above; the
+suggestion by the rule for that case is 0.000135. The default 0.0001 is 13
+times below the rate with the lowest loss. The range test of
+`DeepPrint_LocTexMinu` was not repeated, so its line in the table belongs to
+the former loss.
 
 What these runs show: 0.0001 does not diverge in the first 110 steps for
 either variant, and it is 30 to 43 times below the rate at which the

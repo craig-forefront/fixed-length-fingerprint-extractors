@@ -97,6 +97,21 @@ def test_one_lucky_batch_at_the_lowest_point_is_not_the_steepest_fall():
     assert suggestion.steepest_learning_rate == pytest.approx(1e-3, rel=0.2)
 
 
+def test_a_fall_from_the_first_step_does_not_lead_to_a_tiny_suggestion():
+    # A part of the loss falls from the first step, whatever the learning
+    # rate (the minutia map loss does this). The steepest fall is then at the
+    # start of the test, at rates that are far too low.
+    rates, losses = _typical_curve()
+    losses = [loss + 100 * math.exp(-step / 12) for step, loss in enumerate(losses)]
+    suggestion = suggest_learning_rate(rates, losses, smoothing=0.0)
+    assert suggestion.steepest_learning_rate < 1e-5
+    assert suggestion.lowest_loss_learning_rate == pytest.approx(1e-2, rel=0.5)
+    assert suggestion.suggested_learning_rate == pytest.approx(
+        suggestion.lowest_loss_learning_rate / 10
+    )
+    assert "falls at any rate" in suggestion.explanation
+
+
 def test_no_suggestion_when_the_loss_never_falls():
     rates = range_test_learning_rates(1e-3, 1.0, 50)
     losses = [10.0 + i for i in range(50)]
