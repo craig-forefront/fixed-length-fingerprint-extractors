@@ -24,6 +24,7 @@ from flx.models.learning_rate import (
     localization_learning_rate,
     parameter_groups,
     set_learning_rate,
+    set_localization_factor,
 )
 from flx.models.torch_helpers import (
     get_device,
@@ -399,6 +400,22 @@ def train_model(
         if is_main_process():
             print(f"Loaded existing model from {model_path}")
         load_model_parameters(model_path, model, loss, optimizer)
+        # The stored optimizer state holds the localization factor of the run
+        # that wrote the file. The factor of this run is the one that counts.
+        stored_factor = set_localization_factor(
+            optimizer, learning_rate.localization_factor
+        )
+        set_learning_rate(optimizer, learning_rate.learning_rate)
+        if (
+            is_main_process()
+            and stored_factor is not None
+            and stored_factor != learning_rate.localization_factor
+        ):
+            print(
+                "The stored training used the localization learning rate "
+                f"factor {stored_factor:g}; this run continues with "
+                f"{learning_rate.localization_factor:g}."
+            )
     else:
         if is_main_process():
             print(f"No model file found at {model_path}")

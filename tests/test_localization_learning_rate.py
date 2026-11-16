@@ -143,6 +143,44 @@ def test_training_moves_the_localization_network_by_the_smaller_rate(
     assert model.localization.weight.item() == pytest.approx(-0.001, rel=1e-3)
 
 
+def _train_tiny_loc_model(model, out_dir, num_epochs, factor):
+    ids = IdentifierSet([Identifier(0, 0), Identifier(1, 0)])
+    model_training.train_model(
+        fingerprints=Dataset(ConstantDataLoader(torch.ones(1)), ids),
+        minutia_maps=Dataset(ConstantDataLoader((torch.zeros(0), 0.0)), ids),
+        labels=Dataset(ConstantDataLoader(0), ids),
+        validation_fingerprints=None,
+        validation_benchmark=None,
+        model=model,
+        loss=_SumLoss(),
+        num_epochs=num_epochs,
+        out_dir=str(out_dir),
+        learning_rate=LearningRateConfig(
+            learning_rate=0.01,
+            warmup_steps=0,
+            localization_factor=factor,
+            loss_explosion_factor=0,
+        ),
+    )
+
+
+def test_resumed_training_uses_the_factor_of_the_new_run(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        model_training,
+        "get_dataloader_args",
+        lambda train: {"batch_size": 2, "shuffle": train},
+    )
+    # Epoch 1 with factor 0.1: one step of 0.001 for the localization weight
+    _train_tiny_loc_model(_TinyLocModel(), tmp_path, num_epochs=1, factor=0.1)
+    # Epoch 2 is resumed from model.pyt with factor 1. The gradient is the
+    # same in both steps, so Adam moves each weight by its learning rate again.
+    model = _TinyLocModel()
+    _train_tiny_loc_model(model, tmp_path, num_epochs=2, factor=1.0)
+    assert model.embeddings.weight.item() == pytest.approx(-0.02, rel=1e-3)
+    assert model.localization.weight.item() == pytest.approx(-0.011, rel=1e-3)
+    assert "factor 0.1; this run continues with 1" in capsys.readouterr().out
+
+
 def test_optimizer_state_with_one_group_is_skipped_with_a_note(tmp_path, capsys):
     # A parameter file of a Loc* variant written before the second group existed
     model = _TinyLocModel()

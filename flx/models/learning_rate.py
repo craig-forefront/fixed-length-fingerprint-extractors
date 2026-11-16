@@ -230,6 +230,23 @@ def localization_learning_rate(optimizer: torch.optim.Optimizer) -> float | None
     return None
 
 
+def set_localization_factor(optimizer: torch.optim.Optimizer, factor: float) -> float | None:
+    """
+    Writes the factor of the localization network into its parameter group.
+
+    Needed after the state of an optimizer was loaded from a parameter file:
+    the stored state holds the factor of the run that wrote the file and
+    replaces the one the optimizer was built with. Returns the factor that
+    was in force before (None if the optimizer has no such group).
+    """
+    previous = None
+    for group in optimizer.param_groups:
+        if LR_FACTOR_KEY in group:
+            previous = group[LR_FACTOR_KEY]
+            group[LR_FACTOR_KEY] = float(factor)
+    return previous
+
+
 def set_learning_rate(optimizer: torch.optim.Optimizer, learning_rate: float) -> None:
     """
     Sets the learning rate of all parameters. A group with the entry
