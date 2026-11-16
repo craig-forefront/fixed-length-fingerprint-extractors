@@ -4,30 +4,40 @@ fingerprint images.
 
 Uses the Extractor of that package, i.e. MinutiaeNet (CoarseNet + FineNet),
 the image-based refinement of the minutia direction and ClassifyNet, which
-assigns one of six minutiae types to every extracted point.  The core points
-found by CoreNet are not written.
+assigns one of six minutiae types to every extracted point (left out with
+--no_classify).  CoreNet is not run, because the core points are not written.
 
-Feed the images in their native resolution.  --image_dpi is only used to find
-the direction of the minutiae and depends on the ridge period of the images:
-roughly 500 * period_px / 9.5 (500 for ordinary 500 ppi prints).  Extract all
-.mnt files of a dataset with the same setting.
+The images are prepared like in scripts/extract_minutiae.py (see there and
+flx/preparation/sensor_normalization.py): the minutiae extractor only works
+near 500 ppi, so every image is resampled to 500 ppi first.  The resolution
+of a file comes from --ppi, else from --ppi_manifest, else from the metadata
+of the file, else from --assume_ppi; a file whose resolution is not known
+fails.  --ridges light inverts images with light ridges.  --image_dpi is only
+used to find the direction of the minutiae; leave it at 500.
+
+The exit status is 1 if the extraction failed for any image.  For large
+datasets use scripts/extract_minutiae.py, which can continue a run and work in
+shards.
 
 Output .mnt format (compatible with scripts/compare_minutiae_outputs.py):
     Line 1: <num_minutiae>
-    Line 2: <image_width> <image_height>
+    Line 2: <image_width> <image_height>   (of the image at 500 ppi)
     Lines 3+: <x> <y> <angle_radians> <class_index> <direction_confidence>
               class index: 0=ending  1=bifurcation  2=fragment
                            3=enclosure  4=crossbar  5=other
+                           -1=not classified
+    Last line: # <how the image was prepared>
 
-    x is the column and y the row of the image (y pointing down). The angle is
-    the direction of the minutia, the direction vector is (cos(angle), sin(angle))
-    in these axes.
+    x is the column and y the row of the 500 ppi image (y pointing down). The
+    angle is the direction of the minutia, the direction vector is
+    (cos(angle), sin(angle)) in these axes.
 
 Usage:
     python scripts/run_minutiae_extractor.py \\
         --input_dir MinutiaeNet-master/Dataset/CoarseNet_test/img_files \\
         --output_dir /tmp/me_mnt \\
-        --models_dir minutiae_extractor-main/models
+        --models_dir minutiae_extractor-main/models \\
+        --assume_ppi 500
 """
 
 import argparse
@@ -45,8 +55,13 @@ _ME_SRC = os.path.join(os.path.dirname(_HERE),
 if _ME_SRC not in sys.path:
     sys.path.insert(0, _ME_SRC)
 
-import cv2
-import numpy as np
+# The flx package of this repository, also when it is not installed
+_REPOSITORY = os.path.dirname(_HERE)
+if _REPOSITORY not in sys.path:
+    sys.path.insert(0, _REPOSITORY)
+
+from flx.preparation import sensor_normalization
+from flx.preparation.minutiae_extraction import extract_to_file, make_extractor
 
 
 CLASS_NAMES = {
@@ -59,31 +74,17 @@ CLASS_NAMES = {
 }
 
 
-def _write_mnt(filepath, df, width, height):
-    """Write .mnt file — standard 3-column format plus class and direction confidence."""
-    with open(filepath, 'w') as f:
-        f.write('%d\n' % len(df))
-        f.write('%d %d\n' % (width, height))
-        for _, row in df.iterrows():
-            cls = int(row['class']) if 'class' in df.columns and not np.isnan(row['class']) else -1
-            f.write('%.4f %.4f %.6f %d %.4f\n' % (
-                row['x'], row['y'], row['angle'], cls, row['direction_confidence']))
+def process_image(extractor, image_path, output_path, normalizer):
+    """Prepare one image, extract its minutiae and write them to output_path.
 
-
-def process_image(extractor, image_path, output_path):
-    """Extract the minutiae of one image and write them to output_path.
+    normalizer: the SensorNormalizer that loads the image (resolution and
+    ridge polarity, see flx/preparation/sensor_normalization.py).
 
     Returns the minutiae DataFrame of the extractor.
     """
-    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise ValueError('Could not read image: %s' % image_path)
-
-    df = extractor.extract_minutiae(image)['minutiae']
-
-    # The minutiae coordinates refer to the full image
-    height, width = image.shape[:2]
-    _write_mnt(output_path, df, width, height)
+    df, info = extract_to_file(extractor, normalizer, image_path, output_path)
+    if info.polarity_warning:
+        print('WARNING %s: %s' % (image_path, info.polarity_warning))
     return df
 
 
@@ -103,28 +104,40 @@ def main():
     parser.add_argument('--ext', default='.bmp',
                         help='Image file extension (default: .bmp)')
     parser.add_argument('--image_dpi', type=float, default=500,
-                        help='Resolution of the images, used to find the direction of the '
-                             'minutiae; roughly 500 * ridge_period_px / 9.5 (default: 500)')
+                        help='Used to find the direction of the minutiae only. The images are '
+                             'at 500 ppi after the resampling: leave it at 500 (default)')
+    parser.add_argument('--no_classify', action='store_true',
+                        help='Do not run ClassifyNet: the class index is -1 and the '
+                             'extraction is faster')
+    sensor_normalization.add_arguments(parser)
     args = parser.parse_args()
+
+    try:
+        normalizer = sensor_normalization.from_arguments(args, args.input_dir)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
 
     models_dir = args.models_dir
     coarse_net  = os.path.join(models_dir, 'CoarseNet.h5')
     fine_net    = os.path.join(models_dir, 'FineNet.h5')
     classify_net = os.path.join(models_dir, 'ClassifyNet_6_classes.h5')
-    core_net    = os.path.join(models_dir, 'CoreNet.weights')
+    if args.no_classify:
+        classify_net = None
 
     for path, label in [(coarse_net, 'CoarseNet'), (fine_net, 'FineNet'),
-                        (classify_net, 'ClassifyNet'), (core_net, 'CoreNet')]:
+                        (classify_net, 'ClassifyNet')]:
+        if path is None:
+            continue
         if not os.path.isfile(path):
             print('ERROR: %s not found: %s' % (label, path))
             sys.exit(1)
 
-    # Lazy import after path checks (TF startup is slow)
-    from fingerflow.extractor import Extractor
-
+    # The extractor is imported after the path checks (TF startup is slow)
     print('Loading Extractor...')
-    extractor = Extractor(coarse_net, fine_net, classify_net, core_net,
-                          image_dpi=args.image_dpi)
+    extractor = make_extractor(
+        {'coarse_net': coarse_net, 'fine_net': fine_net, 'classify_net': classify_net},
+        image_dpi=args.image_dpi)
+    print('Images: %s' % normalizer.describe())
 
     print('Models loaded.')
 
@@ -145,11 +158,11 @@ def main():
         basename = os.path.splitext(os.path.basename(image_path))[0]
         output_path = os.path.join(args.output_dir, basename + '.mnt')
         try:
-            df = process_image(extractor, image_path, output_path)
+            df = process_image(extractor, image_path, output_path, normalizer)
             cls_info = (
                 ' (endings=%d bifurcs=%d)' % (
                     (df['class'] == 0).sum(), (df['class'] == 1).sum())
-                if len(df) > 0 else '')
+                if len(df) > 0 and not args.no_classify else '')
             print('[%d/%d] %s — %d minutiae%s' % (
                 i + 1, len(image_files), basename, len(df), cls_info))
             success += 1
@@ -165,6 +178,8 @@ def main():
         for name, err in errors:
             print('  ERROR %s: %s' % (name, err))
     print('Output: %s' % args.output_dir)
+    if errors:
+        sys.exit(1)
 
 
 if __name__ == '__main__':

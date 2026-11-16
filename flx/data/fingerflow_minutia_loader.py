@@ -8,6 +8,13 @@ them to minutia maps for DeepPrint training.
     Line 1: <num_minutiae>
     Line 2: <image_width> <image_height>
     Lines 3+: <x> <y> <angle_radians> [<class_index> [<direction_confidence>]]
+    What follows the minutiae (a comment line of extract_minutiae.py) is not read.
+
+The image size is that of the image the minutiae were extracted from, and it
+can differ from file to file (different sensors). extract_minutiae.py resamples
+every image to 500 pixels per inch first, so it is the size of the 500 ppi
+image. The training must load the image in the same way; the
+PoseTransformedMinutiaMapLoader compares the two sizes.
 
 x is the column and y the row of the image (y pointing down). The angle is the
 direction of the minutia, the direction vector is (cos(angle), sin(angle)) in
@@ -78,10 +85,21 @@ class _MntFileMinutiaMapLoader(MinutiaMapLoader):
     """
 
     _files: FileIndex
+    # Identifier and (width, height) in the header of the file read last
+    _last_frame_size: tuple[Identifier, tuple[int, int]] = None
 
     @property
     def ids(self) -> IdentifierSet:
         return self._files.ids
+
+    def get_frame_size(self, identifier: Identifier) -> tuple[int, int]:
+        """
+        @returns (width, height) of the image that the minutiae of the sample
+            were extracted from, as stated in the header of its .mnt file
+        """
+        if self._last_frame_size is not None and self._last_frame_size[0] == identifier:
+            return self._last_frame_size[1]
+        return read_mnt_file(self._files.get(identifier))[2]
 
     def get_minutiae(self, identifier: Identifier) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -94,6 +112,7 @@ class _MntFileMinutiaMapLoader(MinutiaMapLoader):
         """
         filepath = self._files.get(identifier)
         locs, oris, (width, height) = read_mnt_file(filepath)
+        self._last_frame_size = (identifier, (width, height))
 
         if len(locs) == 0:
             return locs, oris

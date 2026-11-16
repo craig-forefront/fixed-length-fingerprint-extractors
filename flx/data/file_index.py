@@ -67,6 +67,19 @@ class FileIndex(DataLoader):
         ):
             for f in files:
                 identifier = id_from_path(subdir, f)
+                if identifier in self._id_to_path_components:
+                    # The later file would silently replace the earlier one
+                    first = os.path.join(*self._id_to_path_components[identifier])
+                    second = os.path.join(subdir, f)
+                    raise ValueError(
+                        f"Two files below {self._root_dir} have the same "
+                        f"identifier {identifier}: {os.path.normpath(first)}"
+                        f"{self._file_extension} and {os.path.normpath(second)}"
+                        f"{self._file_extension}. Every file needs its own "
+                        "identifier (subject and impression); rename one of "
+                        "them, for example by giving each source its own "
+                        "range of subject numbers."
+                    )
                 self._id_to_path_components[identifier] = (subdir, f)
 
         if len(self._id_to_path_components) == 0:

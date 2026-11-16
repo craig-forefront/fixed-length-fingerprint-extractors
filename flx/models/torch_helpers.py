@@ -1,5 +1,4 @@
 import os
-import time
 
 import torch
 import torch.distributed as dist
@@ -119,22 +118,41 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
+# Images per step in each training process (each GPU). Change it with
+# set_training_batch_size, or --batch_size of scripts/train_500k.py.
+DEFAULT_TRAINING_BATCH_SIZE = 64
+_training_batch_size = DEFAULT_TRAINING_BATCH_SIZE
+
+
+def set_training_batch_size(batch_size: int) -> None:
+    """
+    Sets the number of images per training step of this process. With several
+    GPUs every process (GPU) uses a batch of this size. Embedding extraction
+    and validation use twice the value. Call it before train_model.
+    """
+    global _training_batch_size
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"batch_size must be a whole number of at least 1, got {batch_size}")
+    _training_batch_size = batch_size
+
+
+def get_training_batch_size() -> int:
+    return _training_batch_size
+
+
 def get_dataloader_args(train: bool) -> dict:
     """
     Get DataLoader arguments optimized for training scale.
 
-    Batch sizes:
-    - Small datasets (<100K samples): batch_size=32
-    - Large datasets (>100K samples): batch_size=64-128
-    - Adjust based on GPU memory (reduce if OOM errors)
+    The batch size is the one of set_training_batch_size (default 64, chosen
+    for GPUs with 24 GB or more; reduce it if the GPU runs out of memory),
+    and twice that outside of training.
 
     Workers:
     - Rule of thumb: 2-4 workers per GPU
     - For 4 GPUs: 16 workers, 8 GPUs: 16-32 workers
     """
-    # Default batch size for modern GPUs (24GB+ VRAM)
-    # Reduce to 32 if you get OOM errors
-    batch_size = 64
+    batch_size = _training_batch_size
 
     if not train:
         batch_size *= 2  # More memory available without gradients
@@ -184,22 +202,37 @@ def save_model_parameters(
     optim: torch.optim.Optimizer,
 ) -> None:
     """
-    Tries to save the parameters of model and optimizer in the given path
+    Saves the parameters of model, loss and optimizer in the given path.
+
+    The file is written under a temporary name and renamed when it is
+    complete, so a crash or an interruption during the save leaves the
+    former file in place and never half a file. The temporary name is the
+    same in every run (only the main process of a training saves), so what a
+    killed process left behind is overwritten by the next save.
     """
-    try:
+    temporary = f"{full_param_path}.tmp"
+
+    def save() -> None:
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
                 "loss_state_dict": loss.state_dict(),
                 "optimizer_state_dict": optim.state_dict(),
             },
-            full_param_path,
+            temporary,
         )
-    except KeyboardInterrupt:
-        print("\n>>>>>>>>> Model is being saved! Will exit when done <<<<<<<<<<\n")
-        save_model_parameters(full_param_path, model, optim)
-        time.sleep(10)
-        raise KeyboardInterrupt()
+        os.replace(temporary, full_param_path)
+
+    try:
+        try:
+            save()
+        except KeyboardInterrupt:
+            print("\n>>>>>>>>> Model is being saved! Will exit when done <<<<<<<<<<\n")
+            save()
+            raise
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def load_model_parameters(
@@ -219,4 +252,17 @@ def load_model_parameters(
     if loss is not None:
         loss.load_state_dict(checkpoint["loss_state_dict"])
     if optim is not None:
-        optim.load_state_dict(checkpoint["optimizer_state_dict"])
+        state = checkpoint["optimizer_state_dict"]
+        if len(state["param_groups"]) != len(optim.param_groups):
+            # A file of a Loc* variant that was written before the
+            # localization network got its own learning rate (one parameter
+            # group instead of two). The running averages of the optimizer
+            # cannot be assigned to the groups; model and loss are loaded.
+            print(
+                f"Note: the optimizer state in {full_param_path} has "
+                f"{len(state['param_groups'])} parameter group(s), the optimizer "
+                f"now has {len(optim.param_groups)}. The optimizer starts "
+                "without its stored state; the model parameters were loaded."
+            )
+        else:
+            optim.load_state_dict(state)

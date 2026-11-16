@@ -11,7 +11,7 @@ Using the `flx` package
 
 To install the package, clone the repository and run `pip install -e .` in the root directory of the repository.
 
-The package requires Python 3.9 or higher. Other dependencies are listed in the `requirements.txt` file. Install them with
+The package requires Python 3.11 or higher (`requires-python` in `pyproject.toml`). The dependencies are listed in `pyproject.toml` and in the `requirements.txt` file. Install them with
 
 ```pip install -r requirements.txt```
 
@@ -23,9 +23,13 @@ To learn how to add your own dataset to the package, see the [dataset tutorial n
 
 To learn how to train a variant of the DeepPrint model on a small example dataset, see the [training example notebook](notebooks/model_training_tutorial.ipynb).
 
-To learn how to extract embeddings from a dataset using a trained model, see the [embedding extraction tutorial notebook](notebooks/embedding_extraction_tutorial.ipynb).
+To learn how to extract embeddings from a dataset using a trained model, see the [embedding generation tutorial notebook](notebooks/embedding_generation_tutorial.ipynb).
 
-To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, `--image_dpi`, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md).
+The notebooks need `jupyter`, and the embedding notebook also imports `tikzplotlib` (through `flx.visualization`). Both are among the development dependencies ("Development Dependencies" in [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md)), not among the core ones.
+
+To train on your own images with the scripts of this repository (`scripts/extract_minutiae.py`, `scripts/find_learning_rate.py`, `scripts/train_500k.py`), follow the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). It describes the file layout that the training script reads, one complete training command, how a training is continued or started again, and how the trained model is loaded. For large datasets see [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md) and the section "Above about one million subjects" of the training guide, which states what the code cannot do today.
+
+To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). For prints from different sensors (resolution, ridge polarity, image sizes) and for the extraction of very large datasets (continuing a run, shards, failure log), see "Images from different sensors" there. The extraction and `scripts/train_500k.py` resample every image to 500 pixels per inch and need to know the resolution of each file.
 
 ### Pre-trained model
 
@@ -38,7 +42,8 @@ Project Organization
     ├── LICENSE
     ├── README.md          <- The top-level README for developers using this project.
     ├── requirements.txt   <- The requirements file for reproducing the analysis environment
-    ├── setup.py           <- makes project pip installable (pip install -e .) so you can  `import flx. ...`
+    ├── pyproject.toml     <- makes project pip installable (pip install -e .) so you can  `import flx. ...`
+    ├── scripts            <- Minutiae extraction, learning rate range test and training (`train_500k.py`) for your own data
     ├── figures            <- Figures for the README
     ├── models             <- Trained and serialized models, training logs
     ├── notebooks          <- Jupyter notebooks for tutorials and examples
@@ -50,7 +55,7 @@ Project Organization
     │   ├── embeddings     <- Output folder for fingerprint embeddings.
     │   └── fingerprints   <- Folder with fingerprint datasets.
     │
-    ├── reports            <- Contains folders with the full benchmark results of all trained models
+    ├── reports            <- Not in the repository: created by the benchmark code (`flx/setup/paths.py`) for the benchmark results of trained models
     │   ├── ...            <- Output folders for the benchmark results (in .json format) are here.
     │   └── figures        <- Generated graphics and figures to be used in reporting
     │
@@ -60,7 +65,8 @@ Project Organization
         ├── data           <- Code to manage datasets of fingerprints, poses, embeddings etc.
         ├── extractor      <- Embedding extraction code using the DeepPrint model
         ├── models         <- DeepPrint model architectures, loss functions and pytorch code for training
-        ├── preprocessing  <- Data augmentation and contrast enhancement
+        ├── image_processing <- Data augmentation and contrast enhancement
+        ├── preparation    <- Images from different sensors (500 ppi, dark ridges) and the minutiae extraction
         ├── reweighting    <- Code to reweight embedding dimensions after extraction
         ├── scripts        <- Different scripts for running benchmarks, generating embeddings etc.
         ├── setup          <- Settings, predefined models and datasets are defined here. This allows to easily benchmark different models and datasets.
@@ -72,7 +78,7 @@ Project Organization
 
 - Remi Cadene; Inception v4 pytorch implementation (see `flx/models/Inceptionv4.py`); https://github.com/Cadene/pretrained-models.pytorch
 
-- Dong Chengdong Hang Zhou; iso-19794-2 fingerprint template encoder and decoder (see `flx/data/iso-encoder-decoder`); https://github.com/DongChengdongHangZhou/iso-19794-2-decoder-encoder
+- Dong Chengdong Hang Zhou; iso-19794-2 fingerprint template encoder and decoder (see `flx/data/iso_encoder_decoder`); https://github.com/DongChengdongHangZhou/iso-19794-2-decoder-encoder
 
 
 Paper: Benchmarking fixed-length Fingerprint Representations across different Embedding Sizes and Sensor Types
@@ -94,7 +100,7 @@ Furthermore, the impact of rotation and translation of fingerprint images on the
 ![Conceptual overview of fixed-length fingerprint representation extraction](figures/conceptual-overview-deepprint.png)
 
 The full DeepPrint model consists of the following components:
- - Localization network: Localizes the fingerprint in the image and crops it to a fixed size. (Not shown in the figure)
+ - Localization network: Proposes a rotation and a shift for the fingerprint image, with which the image is resampled before the other components see it (learned alignment). (Not shown in the figure) The rotation is bounded to 60 degrees and the shift to half the image side, the network has its own, smaller learning rate, and the training stops when the aligned images are mostly empty; `scripts/train_500k.py --localization on|off` trains with or without it. See "Learned alignment" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#learned-alignment).
  - Inception v4 stem: Processes the fingerprint image and extracts a feature map.
  - Texture-branch: Processes the feature map and extracts a fixed-length fingerprint representation.
  - Minutiae-branch: Processes the feature map and extracts a fixed-length minutiae representation as well as a minutia map. The minutia map is used during training to focus the training on the minutiae regions of the fingerprint. It is not used to create the fixed-length fingerprint representation.
@@ -103,7 +109,7 @@ In this project, many smaller variants of the DeepPrint model were examined. In 
 
 `DeepPrint_[Loc][Tex][Minu]_<NDIMS>`
 
-Where `[Loc]` means that the localization network is included, `[Tex]` means that the texture branch is included and `[Minu]` means that the minutiae branch is included. `<NDIMS>` is the dimensionality of the fixed-length fingerprint representation (i.e. the number of neurons in the last linear layer).
+Where `[Loc]` means that the localization network is included, `[Tex]` means that the texture branch is included and `[Minu]` means that the minutiae branch is included. `<NDIMS>` is the dimensionality of the fixed-length fingerprint representation (i.e. the number of neurons in the last linear layer). In `scripts/train_500k.py`, `--embedding_dim` is the size per branch: a variant with texture and minutiae branch gives twice that many values per print (512 with the default of 256).
 
 ### Databases
 
@@ -125,6 +131,8 @@ During training, data augumentation is applied to the fingerprint images. The fo
  - Random translation of up to 25 pixels in x and y direction
  - Random gain and contrast adjustment (see `flx/setup/datasets.py` -> `QUALITY_AUGMENTATION`)
 
+These values belong to the predefined datasets of the paper in `flx/setup/datasets.py`. `scripts/train_500k.py`, the script for your own images, uses a rotation between -30° and 30° and a translation of up to 40 pixels (`POSE_AUGMENTATION` in the script).
+
 The rotation and translation are also applied to the minutiae, so that the minutia map of a training sample follows the augmentation of its image (see `PoseTransformedMinutiaMapLoader` in `flx/data/minutia_map_loader.py`). This does not correct a minutia map that does not match its image without augmentation.
 
 The following preprocessing steps are applied to the fingerprint images before they are fed into the network:
@@ -135,10 +143,17 @@ The following preprocessing steps are applied to the fingerprint images before t
 
 For training the model, the Adam optimizer is used, the optimal learning rate differs between the individual variants. For simpler variants like `DeepPrint_Tex_512` a higher
 learning rate can be chosen to speed up training. For more complex variants like `DeepPrint_LocTexMinu_512` a lower learning rate is necessary to avoid overfitting.
-The number of epochs is chosen based on the validation loss. The training is stopped when the validation loss does not decrease anymore.
+The learning rate, a warm-up, a cosine schedule and gradient clipping are set in `flx/setup/config.py` or passed to `fit` as a `LearningRateConfig`. `scripts/find_learning_rate.py` runs a short
+range test that suggests a learning rate for a dataset, model variant and batch size; see "Choosing the learning rate" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate).
+The training stops with a message when the loss is not a finite number or more than ten times the loss at the start.
+The loss is a weighted sum of the cross entropy, the center loss and, for variants with minutiae, the minutia map loss. The three weights are set in `flx/setup/config.py`
+or passed as `LossWeights`; see "Loss weights" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#loss-weights) for what they mean, what was measured and how they differ from earlier versions.
+The number of epochs is chosen based on the equal error rate on a validation set (subjects that are not in the training set). The training is stopped when this error rate does not decrease anymore,
+and the epoch with the lowest validation error rate is saved as `best_model.pyt`. Without a validation set, the epoch with the lowest training loss is saved instead, which does not detect overfitting.
 
-Depending on the learning rate and model, up to 100 epochs are necessary to train the model. Expect roughly 10-15 minutes per epoch on an A100. As much of the preprocessing
-happens on the CPU, a CPU with at least 8 cores is recommended in order to fully utilize the GPU.
+For the datasets of the paper (60,000 training images), up to 100 epochs were necessary depending on the learning rate and model, at roughly 10-15 minutes per epoch on an A100
+(figures of the original authors, not measured again). `scripts/train_500k.py` defaults to at most 10 epochs with early stopping after 3 epochs without a lower validation error rate; how many
+epochs a large dataset needs was not measured. Most of the preprocessing happens on the CPU: about 1 second per rolled 800x750 print per core was measured here, so the number of CPU cores per GPU matters.
 
 ### Experiments
 
