@@ -41,9 +41,25 @@ class MinutiaMapLoader(DataLoader):
 
     def get(self, identifier: Identifier) -> tuple[torch.Tensor, float]:
         """
-        @returns : Minutia map generated from the minutia points in the given file
+        @returns : Minutia map generated from the minutia points in the given file,
+            and the weight of the map in the minutia map loss: 1.0, or 0.0 if the
+            sample has no minutiae.
+
+        A sample without minutiae gets the weight 0.0, so it does not count in the
+        minutia map loss (it still counts in the other parts of the loss). A
+        fingerprint always has minutiae; an empty list means that the extraction
+        failed, that the file is empty or that the pose augmentation moved all
+        minutiae out of the image. An empty map with weight 1.0 would teach the
+        model that such an image has no minutiae.
         """
         minutiae_loc, minutiae_ori = self.get_minutiae(identifier)
+        if len(minutiae_loc) == 0:
+            return (
+                torch.zeros(
+                    (MINUTIA_MAP_CHANNELS, MINUTIA_MAP_SIZE, MINUTIA_MAP_SIZE),
+                ),
+                0.0,
+            )
         # Minutiae are often extracted from a different resolution than
         # that of the resized images that serve as input to DeepPrint
         minu_map = create_minutia_map(
