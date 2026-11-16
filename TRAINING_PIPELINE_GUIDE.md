@@ -957,9 +957,9 @@ size*, and it is the batch size that matters for the learning rate.
 - More GPUs also mean fewer steps per epoch. The warm-up is counted in
   steps, so it covers more images; this is intended. Use a longer warm-up
   (2,000 steps or more) when you raise the rate for a large batch.
-- One part of the loss (the center loss) is a sum over the images of a batch,
-  not a mean, so its share of the loss grows with the batch size. This is
-  another reason to repeat the range test when the batch size changes.
+- All parts of the loss are means over the images of a batch, so the balance
+  between them does not change with the batch size. (The center loss used to
+  be a sum over the batch; see `LOSS_WEIGHT_CENTER` in `flx/setup/config.py`.)
 
 ### What to watch in the first thousand steps
 
@@ -972,12 +972,14 @@ The progress bar shows the loss and the learning rate of every step:
 - **The starting loss.** A fresh model guesses, so each of its classifiers
   starts with a loss near the natural logarithm of the number of training
   subjects (about 10.8 for 50,000 subjects). Variants with texture and
-  minutiae have two classifiers. The center loss adds an amount that grows
-  with the batch size: in the runs here it was about 0.24 per image of the
-  batch and classifier (256-dimensional embeddings). With 220 subjects and 8
-  images per step that gives 2 x 5.4 + 2 x 8 x 0.24 = 14.6; the measured
-  starting loss was 14.7 to 14.9. The same sum for 64 images per step is
-  about 31 above the two logarithms (calculated, not measured). A starting loss far away from this sum
+  minutiae have two classifiers. The center loss adds, per classifier, its
+  weight (`LOSS_WEIGHT_CENTER`, default 8.0) times the mean squared distance
+  between an embedding and the center of its subject. At the start that
+  distance is close to 2, because embeddings and centers both have length 1
+  and point in unrelated directions; the measured values were 1.95 and 1.98
+  (one batch of 8 real images, 256-dimensional embeddings). With 220 subjects
+  this gives 2 x 5.4 + 2 x 8.0 x 2 = 42.8, for every batch size, before the
+  minutia map loss is added. A starting loss far away from this sum
   points to a problem in the data.
 - **During the warm-up** the `lr` value rises and the loss changes little.
   That is normal.

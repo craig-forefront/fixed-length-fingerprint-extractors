@@ -14,6 +14,11 @@ class CenterLoss(nn.Module):
         num_classes (int): number of classes.
         feat_dim (int): feature dimension.
         alpha: "learning rate" of the centers. For each datapoint centers are updated by center + alpha * (datapoint - center)
+
+    The loss is the squared distance between a feature vector and the center
+    of its class, as the mean over the samples of the batch. With the mean,
+    the weight of the center loss relative to a cross entropy (also a mean)
+    does not depend on the batch size.
     """
 
     def __init__(self, num_classes: int, feat_dim: int, alpha: float = 0.01):
@@ -42,5 +47,5 @@ class CenterLoss(nn.Module):
         with torch.no_grad():
             self.centers.index_add_(0, labels, diff, alpha=self.alpha)
             # self._disperse_centers()
-        # Return mean loss
-        return torch.sum(diff**2)
+        # Mean over the samples of the sum over the feature dimensions
+        return torch.sum(diff**2) / x.shape[0]

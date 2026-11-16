@@ -186,3 +186,51 @@ def test_train_500k_options_set_the_weights(train_500k, tmp_path, monkeypatch):
 def test_train_500k_rejects_a_negative_weight(train_500k, tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         _run_main(train_500k, tmp_path, monkeypatch, ["--loss_weight_center", "-1"])
+
+
+def _embedding_loss(batch_size: int, repeat: int, weights: LossWeights | None = None):
+    """Cross entropy part and center part of the loss of `batch_size` samples,
+    each of which is `repeat` times in the batch."""
+    torch.manual_seed(0)
+    loss_fun = DeepPrintLoss_Tex(6, 16, weights)
+    output = _output(batch_size)
+    labels = torch.arange(batch_size) % 6
+    loss = loss_fun(
+        DeepPrintTrainingOutput(
+            texture_logits=output.texture_logits.repeat(repeat, 1),
+            texture_embeddings=output.texture_embeddings.repeat(repeat, 1),
+        ),
+        labels.repeat(repeat),
+        torch.zeros(batch_size * repeat, 0),
+        torch.zeros(batch_size * repeat),
+    )
+    return float(loss), loss_fun.get_recorded_loss()
+
+
+def test_center_loss_does_not_grow_with_the_batch_size():
+    # The same samples twice in the batch: every mean stays the same
+    only_center = LossWeights(cross_entropy=0, center=1)
+    small, small_recorded = _embedding_loss(4, 1, only_center)
+    large, large_recorded = _embedding_loss(4, 2, only_center)
+    assert small > 0
+    assert large == pytest.approx(small, rel=1e-5)
+    assert large_recorded["center_loss_sum"] == pytest.approx(small, rel=1e-5)
+    assert small_recorded["center_loss_sum"] == pytest.approx(small, rel=1e-5)
+
+
+def test_center_loss_is_the_mean_squared_distance_to_the_class_center():
+    from flx.models.center_loss import CenterLoss
+
+    center_loss = CenterLoss(num_classes=2, feat_dim=3)
+    center_loss.centers.copy_(torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]))
+    features = torch.tensor([[1.0, 2.0, 2.0], [1.0, 1.0, 3.0]])
+    # Squared distances 9 and 4
+    assert float(center_loss(features, torch.tensor([0, 1]))) == pytest.approx(6.5)
+
+
+def test_default_center_weight_keeps_the_former_loss_for_a_batch_of_64():
+    # Formerly: 0.125 times the sum over the batch
+    only_center = LossWeights(cross_entropy=0)
+    mean_distance, _ = _embedding_loss(64, 1, LossWeights(cross_entropy=0, center=1))
+    loss, _ = _embedding_loss(64, 1, only_center)
+    assert loss == pytest.approx(0.125 * 64 * mean_distance, rel=1e-5)

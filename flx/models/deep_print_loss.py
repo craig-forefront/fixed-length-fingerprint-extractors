@@ -95,14 +95,15 @@ class _DeepPrint_Embedding_Loss(nn.Module):
     ) -> torch.Tensor:
         crossent_loss = self.crossent_loss_fun(logits, labels)
         center_loss = self.center_loss_fun(embeddings, labels)
-        # The cross entropy is the mean over the batch, so it counts once per
-        # sample. The center loss is already a sum over the batch.
+        # Both parts are means over the batch, so they count once per sample
         self.crossent_loss_sum += (
             crossent_loss.detach().item()
             * self.weights.cross_entropy
             * labels.shape[0]
         )
-        self.center_loss_sum += center_loss.detach().item() * self.weights.center
+        self.center_loss_sum += (
+            center_loss.detach().item() * self.weights.center * labels.shape[0]
+        )
         self.n_datapoints += labels.shape[0]
         return (
             self.weights.cross_entropy * crossent_loss

@@ -48,9 +48,21 @@ LOSS_WEIGHT_CROSS_ENTROPY = 1.0
 
 # Center loss of each embedding: the squared distance between the embedding of
 # an image and the running average of the embeddings of its subject (the
-# "center"). It pulls the embeddings of one finger together. It is the sum
+# "center"). It pulls the embeddings of one finger together. It is the mean
 # over the images of a batch.
-LOSS_WEIGHT_CENTER = 0.125
+#
+# Until this value was introduced the center loss was the sum over the batch
+# with the factor 0.125, so its weight relative to the cross entropy grew with
+# the batch size. 8.0 = 0.125 x 64 gives the same loss as before for the batch
+# size of train_model (64 images, get_dataloader_args in
+# flx/models/torch_helpers.py) and now gives that same balance for every
+# batch size. For a batch of B images the former balance is 0.125 x B.
+# The value is high: the DeepPrint paper (Engelsma et al. 2019) states 0.00125,
+# and at the start of a training on real images the center loss with 8.0 sent
+# about 30 times more gradient into the shared first layers than the cross
+# entropy (one batch of 8 images, DeepPrint_TexMinu, texture branch). Whether
+# a lower value gives better accuracy was not measured.
+LOSS_WEIGHT_CENTER = 8.0
 
 # Minutia map loss (variants with minutiae only): the squared difference
 # between the minutia map that the model draws and the map made from the
