@@ -81,5 +81,29 @@ LOSS_WEIGHT_CENTER = 8.0
 # TRAINING_PIPELINE_GUIDE.md for the measurement and its limits.
 LOSS_WEIGHT_MINUTIA_MAP = 0.095
 
+# --- Localization network (learned alignment, the Loc* variants) --------------
+# The localization network proposes a rotation and a shift for every image,
+# and the image is resampled with them before the rest of the model sees it
+# (see flx/models/localization_network.py). These values are the largest
+# rotation, shift and scale change it can propose at all. They are only the
+# defaults of flx.models.localization_network.LocalizationNetwork.
+
+# Largest rotation in degrees, in both directions. 60 is the value of the
+# DeepPrint paper (Engelsma et al. 2019, section 3.2).
+LOCALIZATION_MAX_ROTATION_DEGREES = 60.0
+
+# Largest shift in x and in y, as a share of the image side. 0.5 is the value
+# of the DeepPrint paper (224 pixels of its 448 pixel images): the centre of
+# the aligned image can be any point of the input image.
+LOCALIZATION_MAX_SHIFT = 0.5
+
+# Largest change of scale, as a factor: with 1.25 the network can show the
+# print up to 1.25 times larger or smaller. 1.0 fixes the scale, as in the
+# DeepPrint paper, where the network proposes rotation and shift only. A
+# model built with a value above 1.0 has one more output in the localization
+# network, so its parameter files do not fit a model built with 1.0 and the
+# other way round. No training was run with a value above 1.0.
+LOCALIZATION_MAX_SCALE_FACTOR = 1.0
+
 # Change this when switching models DeepPrint has 299 while ViT has 224
 INPUT_SIZE = 299
