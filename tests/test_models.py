@@ -140,3 +140,20 @@ def test_texminu_loss_accepts_different_embedding_sizes():
         output, torch.tensor([0, 1, 2, 3]), torch.ones(4, 6, 8, 8), torch.ones(4)
     )
     assert torch.isfinite(loss)
+
+
+def test_model_accepts_a_batch_of_one_image_in_training():
+    # The last batch of an epoch holds one image when the number of training
+    # images leaves the remainder 1 when divided by the batch size. The
+    # texture branch squeezed its output and lost the batch dimension.
+    from flx.extractor.fixed_length_extractor import get_DeepPrint_TexMinu
+
+    model = get_DeepPrint_TexMinu(num_training_subjects=5, num_dims=16).model
+    model.train()
+    output = model(torch.rand(1, 1, 299, 299))
+    assert output.texture_logits.shape == (1, 5)
+    assert output.minutia_logits.shape == (1, 5)
+    model.eval()
+    with torch.no_grad():
+        embeddings = model(torch.rand(1, 1, 299, 299))
+    assert embeddings.texture_embeddings.shape == (1, 16)

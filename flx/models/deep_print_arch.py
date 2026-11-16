@@ -90,7 +90,9 @@ class _Branch_TextureEmbedding(nn.Module):
         x = self._4_flatten(x)
         x = self._5_dropout(x)
         x = self._6_linear(x)
-        x = torch.nn.functional.normalize(torch.squeeze(x), dim=1)
+        # x is (batch, dimensions). No squeeze: it removed the batch dimension
+        # of a batch of one image, and the next line then failed.
+        x = torch.nn.functional.normalize(x, dim=1)
         return x
 
 
