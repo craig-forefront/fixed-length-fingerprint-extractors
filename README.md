@@ -25,6 +25,8 @@ To learn how to train a variant of the DeepPrint model on a small example datase
 
 To learn how to extract embeddings from a dataset using a trained model, see the [embedding generation tutorial notebook](notebooks/embedding_generation_tutorial.ipynb).
 
+The notebooks need `jupyter`, and the embedding notebook also imports `tikzplotlib` (through `flx.visualization`). Both are among the development dependencies ("Development Dependencies" in [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md)), not among the core ones.
+
 To train on your own images with the scripts of this repository (`scripts/extract_minutiae.py`, `scripts/find_learning_rate.py`, `scripts/train_500k.py`), follow the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). It describes the file layout that the training script reads, one complete training command, how a training is continued or started again, and how the trained model is loaded. For large datasets see [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md) and the section "Above about one million subjects" of the training guide, which states what the code cannot do today.
 
 To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). For prints from different sensors (resolution, ridge polarity, image sizes) and for the extraction of very large datasets (continuing a run, shards, failure log), see "Images from different sensors" there. The extraction and `scripts/train_500k.py` resample every image to 500 pixels per inch and need to know the resolution of each file.
@@ -53,7 +55,7 @@ Project Organization
     │   ├── embeddings     <- Output folder for fingerprint embeddings.
     │   └── fingerprints   <- Folder with fingerprint datasets.
     │
-    ├── reports            <- Contains folders with the full benchmark results of all trained models
+    ├── reports            <- Not in the repository: created by the benchmark code (`flx/setup/paths.py`) for the benchmark results of trained models
     │   ├── ...            <- Output folders for the benchmark results (in .json format) are here.
     │   └── figures        <- Generated graphics and figures to be used in reporting
     │
@@ -76,7 +78,7 @@ Project Organization
 
 - Remi Cadene; Inception v4 pytorch implementation (see `flx/models/Inceptionv4.py`); https://github.com/Cadene/pretrained-models.pytorch
 
-- Dong Chengdong Hang Zhou; iso-19794-2 fingerprint template encoder and decoder (see `flx/data/iso-encoder-decoder`); https://github.com/DongChengdongHangZhou/iso-19794-2-decoder-encoder
+- Dong Chengdong Hang Zhou; iso-19794-2 fingerprint template encoder and decoder (see `flx/data/iso_encoder_decoder`); https://github.com/DongChengdongHangZhou/iso-19794-2-decoder-encoder
 
 
 Paper: Benchmarking fixed-length Fingerprint Representations across different Embedding Sizes and Sensor Types
@@ -128,6 +130,8 @@ During training, data augumentation is applied to the fingerprint images. The fo
  - Random rotation between -15° and 15°
  - Random translation of up to 25 pixels in x and y direction
  - Random gain and contrast adjustment (see `flx/setup/datasets.py` -> `QUALITY_AUGMENTATION`)
+
+These values belong to the predefined datasets of the paper in `flx/setup/datasets.py`. `scripts/train_500k.py`, the script for your own images, uses a rotation between -30° and 30° and a translation of up to 40 pixels (`POSE_AUGMENTATION` in the script).
 
 The rotation and translation are also applied to the minutiae, so that the minutia map of a training sample follows the augmentation of its image (see `PoseTransformedMinutiaMapLoader` in `flx/data/minutia_map_loader.py`). This does not correct a minutia map that does not match its image without augmentation.
 
