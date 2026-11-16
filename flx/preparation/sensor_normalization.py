@@ -66,6 +66,51 @@ _POLARITY_MIN_BACKGROUND_SHARE = 0.02
 _POLARITY_MIN_DIFFERENCE = 10.0
 
 
+def resolution_source_label(ppi: float, origin: str) -> str:
+    """Key of the counts per resolution source, e.g. "metadata, 300 ppi"."""
+    return f"{origin}, {ppi:g} ppi"
+
+
+# What the origins mean, for messages
+_ORIGIN_TEXT = {
+    "argument": "--ppi",
+    "manifest": "manifest",
+    "metadata": "metadata of the file",
+    "assumed": "--assume_ppi",
+}
+
+
+def describe_resolution_sources(
+    counts: dict, assume_ppi: Optional[float] = None, target_ppi: float = TARGET_PPI
+) -> list[str]:
+    """
+    Lines that say how many files took their resolution from where: one line
+    per source and value (the keys of counts are those of
+    resolution_source_label), the most frequent first. If files took a
+    resolution from their metadata although an assumption was given, a note
+    says that the assumption does not override metadata: a corpus whose files
+    carry a wrong but plausible value (300 or 600 written by an image
+    program) would be resampled by the wrong factor without any other sign.
+    """
+    lines = []
+    from_metadata = 0
+    for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        origin, _, value = key.partition(", ")
+        resampled = "" if value == f"{target_ppi:g} ppi" else f" (resampled to {target_ppi:g} ppi)"
+        lines.append(f"  {count:>12,}  {value} from {_ORIGIN_TEXT.get(origin, origin)}{resampled}")
+        if origin == "metadata":
+            from_metadata += count
+    if from_metadata and assume_ppi is not None:
+        lines.append(
+            f"  Note: {from_metadata:,} file(s) took the resolution from their own "
+            f"metadata, not from --assume_ppi {assume_ppi:g}. --assume_ppi is only "
+            "used for files without a plausible value; it does not override "
+            "metadata. If every file has one known resolution, give it with "
+            "--ppi; if the metadata of some files is wrong, list them in a manifest."
+        )
+    return lines
+
+
 class UnknownResolutionError(ValueError):
     """The resolution of an image file is not known."""
 
@@ -257,6 +302,11 @@ class PreparedImageInfo:
             )
         return None
 
+    @property
+    def resolution_source(self) -> str:
+        """Where the resolution came from and its value, e.g. "metadata, 300 ppi"."""
+        return resolution_source_label(self.ppi, self.ppi_origin)
+
     def describe(self) -> str:
         """One line for the end of a .mnt file."""
         return (
@@ -339,6 +389,10 @@ class SensorNormalizer:
             "assume_ppi": self._assume_ppi,
             "ridges": self._ridges,
         }
+
+    @property
+    def assume_ppi(self) -> Optional[float]:
+        return self._assume_ppi
 
     def describe(self) -> str:
         """The settings in one sentence."""
@@ -480,15 +534,20 @@ def add_arguments(parser) -> None:
     )
     group.add_argument("--ppi", type=float, default=None,
                        help="Resolution of ALL images in pixels per inch. Use it only if "
-                            "every file has this resolution")
+                            "every file has this resolution. It wins over the manifest and "
+                            "over the metadata of the files, so it is the option for a "
+                            "corpus of one known resolution")
     group.add_argument("--ppi_manifest", type=str, default=None,
                        help="CSV file with the columns path,ppi[,ridges]: resolution (and "
                             "ridge polarity, dark or light) per file or per directory, "
                             "paths relative to the image directory")
     group.add_argument("--assume_ppi", type=float, default=None,
-                       help="Resolution to assume for files that state none (or an "
-                            "implausible one) and have no manifest row. Without it such "
-                            "files fail")
+                       help="Resolution to assume for files that state none (or one "
+                            "outside of 200 to 2100 ppi) and have no manifest row. Without "
+                            "it such files fail. It does NOT override a plausible value in "
+                            "the metadata of a file: a 500 ppi file that states 300 or 600 "
+                            "is resampled by that value. Use --ppi if all files have one "
+                            "known resolution")
     group.add_argument("--ridges", type=str, default=RIDGES_DARK, choices=RIDGE_CHOICES,
                        help="What the images hold: dark ridges on a light background "
                             "(default), light ridges on a dark background (these images "

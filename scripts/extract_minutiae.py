@@ -68,9 +68,10 @@ Very large file lists:
     extraction_errors.txt in the output directory as they happen (with
     shards: extraction_errors.shard-00003-of-00016.txt), one line per file:
     path, tab, reason. The exit status is 1 if the extraction failed for any
-    image of this run and 0 otherwise; 2 means that the run did not start.
-    The script stops with an exception if the extractor itself can not be
-    set up.
+    image of this run and 0 otherwise; 2 means that the run did not start
+    (other settings than the files in the output directory, or a minutiae
+    extractor that is too old). The script stops with an exception if the
+    extractor can not be set up for another reason (e.g. missing model files).
 
     All .mnt files of one output directory must come from the same settings.
     The first run stores them in extraction_settings.json; a run with other
@@ -83,8 +84,21 @@ Minutia class:
     never run, because the core points are not written (--core_net is accepted
     and ignored).
 
---image_dpi is only used to find the direction of the minutiae. The images
-are at 500 ppi after the resampling, so leave it at 500.
+--image_dpi is only used to find the direction of the minutiae. It refers to
+the image after the resampling, which is at 500 ppi: leave it at 500. It is
+not the option for the resolution of the files (that is --ppi); the script
+warns when it is not 500.
+
+--assume_ppi does not override the metadata of a file. A file that states a
+plausible value (200 to 2100 ppi) is resampled by that value, also if an image
+program wrote a wrong 300 or 600 into it. For a corpus of one known resolution
+use --ppi. At its end the script prints how many files took their resolution
+from where.
+
+The extractor that this script needs is named in AIRGAP_INSTALLATION.md
+(repository minutiae_extractor, branch claude/serene-albattani-s6ehsj until it
+is merged into its main). With an older one the script stops with exit status
+2 and says so.
 
 Output format (.mnt files):
     Line 1: <num_minutiae>
@@ -110,6 +124,7 @@ import tqdm
 from flx.preparation import minutiae_extraction, sensor_normalization
 from flx.preparation.minutiae_extraction import (
     ExtractionConfig,
+    ExtractorTooOldError,
     SettingsChangedError,
     check_settings,
     iter_file_list,
@@ -125,7 +140,8 @@ def extract_single_image(image_path, output_path, model_paths, normalizer, image
     Extract minutiae from a single image.
 
     Returns:
-        (image_path, success, error_message, warning, num_minutiae)
+        (image_path, success, error_message, warning, num_minutiae,
+        resolution source)
 
     An extractor that can not be set up (missing package or model files,
     version without the options used here) is not an error of the image:
@@ -197,6 +213,16 @@ def main() -> int:
         parser.error("--allow_settings_change can not be combined with --skip_existing: "
                      "the files that are skipped were extracted with the former settings")
 
+    if args.image_dpi != 500:
+        print(
+            f"WARNING: --image_dpi {args.image_dpi:g}: every image is resampled to 500 "
+            "ppi before the extraction, and --image_dpi refers to that resampled "
+            "image. A value other than 500 gives the direction step the wrong "
+            "resolution. To state the resolution of the FILES use --ppi, "
+            "--ppi_manifest or --assume_ppi, and leave --image_dpi at 500.",
+            file=sys.stderr,
+        )
+
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
@@ -240,16 +266,20 @@ def main() -> int:
     if args.num_shards > 1:
         print(f"Shard:    {args.shard_index} of {args.num_shards} (index 0 .. {args.num_shards - 1})")
 
-    with tqdm.tqdm(desc="Extracting minutiae", unit="img") as progress:
-        summary = run_extraction(
-            ExtractionConfig(model_paths, normalizer, args.image_dpi),
-            jobs,
-            str(error_log),
-            str(warning_log),
-            workers=args.workers,
-            skip_existing=args.skip_existing,
-            progress=progress,
-        )
+    try:
+        with tqdm.tqdm(desc="Extracting minutiae", unit="img") as progress:
+            summary = run_extraction(
+                ExtractionConfig(model_paths, normalizer, args.image_dpi),
+                jobs,
+                str(error_log),
+                str(warning_log),
+                workers=args.workers,
+                skip_existing=args.skip_existing,
+                progress=progress,
+            )
+    except ExtractorTooOldError as error:
+        print(f"\nERROR: {error}", file=sys.stderr)
+        return 2
 
     # Summary
     print(f"\n{'=' * 60}")
@@ -261,6 +291,13 @@ def main() -> int:
     print(f"  Extracted without any minutia: {summary.without_minutiae:,}")
     print(f"  Output dir: {output_dir}")
     print(f"{'=' * 60}")
+
+    if summary.resolution_sources:
+        print("\nResolution of the files extracted in this run:")
+        for line in sensor_normalization.describe_resolution_sources(
+            summary.resolution_sources, normalizer.assume_ppi
+        ):
+            print(line)
 
     if summary.warnings:
         print(f"\nWarnings (files that were extracted but look wrong): {warning_log}")

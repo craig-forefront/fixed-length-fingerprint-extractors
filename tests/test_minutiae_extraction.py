@@ -161,6 +161,34 @@ def test_a_file_of_unknown_resolution_fails_and_the_run_goes_on(
     assert images_seen(fake_fingerflow) == 2
 
 
+def test_plausible_metadata_wins_over_the_assumption_and_the_run_says_so(
+    tmp_path, monkeypatch, fake_fingerflow, capsys
+):
+    # 500 ppi prints; an image program stamped 300 into two of them
+    save(tmp_path / "images" / "1_1.png", marker_image(500), ppi=300)
+    save(tmp_path / "images" / "1_2.png", marker_image(500), ppi=300)
+    save(tmp_path / "images" / "1_3.png", marker_image(500))
+    out = tmp_path / "minutiae"
+    assert run_script(monkeypatch, tmp_path / "images", out, "--assume_ppi", 500) == 0
+    output = capsys.readouterr().out
+    assert "Resolution of the files extracted in this run:" in output
+    lines = [" ".join(line.split()) for line in output.splitlines()]
+    assert "2 300 ppi from metadata of the file (resampled to 500 ppi)" in lines
+    assert "1 500 ppi from --assume_ppi" in lines
+    assert "2 file(s) took the resolution from their own metadata" in output
+    assert "does not override" in output
+
+    # --ppi is the option for a corpus of one resolution: no file is resampled
+    capsys.readouterr()
+    out = tmp_path / "minutiae_ppi"
+    assert run_script(monkeypatch, tmp_path / "images", out, "--ppi", 500) == 0
+    output = capsys.readouterr().out
+    assert "3 500 ppi from --ppi" in [" ".join(l.split()) for l in output.splitlines()]
+    assert "Note:" not in output
+    for extractor in fake_fingerflow.instances[-1:]:
+        assert all(image.shape == (HEIGHT_500, WIDTH_500) for image in extractor.images)
+
+
 def test_resolution_from_the_argument_and_from_the_manifest(
     tmp_path, monkeypatch, fake_fingerflow
 ):

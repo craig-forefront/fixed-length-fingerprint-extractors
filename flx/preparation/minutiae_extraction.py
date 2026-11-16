@@ -81,6 +81,21 @@ def write_mnt_file(
     os.replace(temporary, path)
 
 
+# What scripts/extract_minutiae.py needs of the minutiae extractor
+EXTRACTOR_REQUIREMENT = (
+    "the fingerflow package of the minutiae_extractor repository in a revision "
+    "whose Extractor has the image_dpi option and accepts None for the "
+    "ClassifyNet and CoreNet paths: branch claude/serene-albattani-s6ehsj "
+    "(commit \"Make ClassifyNet and CoreNet optional in the Extractor\" or "
+    "later), or main once that branch is merged. Older checkouts and the "
+    "fingerflow release on PyPI do not work. See AIRGAP_INSTALLATION.md."
+)
+
+
+class ExtractorTooOldError(TypeError):
+    """The installed minutiae extractor lacks what the extraction needs."""
+
+
 def make_extractor(model_paths: dict, image_dpi: float = 500):
     """
     The extractor of the minutiae_extractor repository.
@@ -92,13 +107,26 @@ def make_extractor(model_paths: dict, image_dpi: float = 500):
     """
     from fingerflow.extractor import Extractor
 
-    return Extractor(
-        model_paths["coarse_net"],
-        model_paths["fine_net"],
-        model_paths.get("classify_net"),
-        None,
-        image_dpi=image_dpi,
-    )
+    try:
+        return Extractor(
+            model_paths["coarse_net"],
+            model_paths["fine_net"],
+            model_paths.get("classify_net"),
+            None,
+            image_dpi=image_dpi,
+        )
+    except TypeError as error:
+        # An Extractor without image_dpi rejects the keyword; one that needs
+        # all four networks fails on the path None
+        import fingerflow
+
+        location = getattr(fingerflow, "__file__", None) or "location unknown"
+        raise ExtractorTooOldError(
+            "The Extractor of the installed fingerflow package could not be "
+            f"set up ({type(error).__name__}: {error}). Most likely the package "
+            f"is too old (it was imported from {location}). The extraction "
+            f"needs {EXTRACTOR_REQUIREMENT}"
+        ) from error
 
 
 def extract_to_file(extractor, normalizer: SensorNormalizer, image_path: str, output_path: str):
@@ -233,6 +261,9 @@ class ExtractionSummary:
     warnings: int = 0
     without_minutiae: int = 0
     first_failures: list = field(default_factory=list)
+    # Extracted files per resolution source and value, e.g.
+    # {"metadata, 300 ppi": 12}; see PreparedImageInfo.resolution_source
+    resolution_sources: dict = field(default_factory=dict)
 
 
 # The configuration and the extractor of this process. The models are loaded
@@ -254,14 +285,16 @@ def _get_extractor():
     return _extractor
 
 
-def extract_one(job: tuple[str, str]) -> tuple[str, bool, Optional[str], Optional[str], int]:
+def extract_one(
+    job: tuple[str, str],
+) -> tuple[str, bool, Optional[str], Optional[str], int, Optional[str]]:
     """
     Extracts the minutiae of one image in a worker process.
 
     job: (path of the image, path of the .mnt file)
 
     Returns (path of the image, success, error message, warning, number of
-    minutiae). An error of the image (unreadable, resolution unknown, failure
+    minutiae, where the resolution came from and its value). An error of the image (unreadable, resolution unknown, failure
     inside the extractor) is returned, not raised, so that the run goes on.
     An extractor that can not be set up (missing package or model files, a
     version without the options used here) is not an error of the image: that
@@ -271,9 +304,16 @@ def extract_one(job: tuple[str, str]) -> tuple[str, bool, Optional[str], Optiona
     extractor = _get_extractor()
     try:
         minutiae, info = extract_to_file(extractor, _config.normalizer, image_path, output_path)
-        return (image_path, True, None, info.polarity_warning, len(minutiae))
+        return (
+            image_path,
+            True,
+            None,
+            info.polarity_warning,
+            len(minutiae),
+            info.resolution_source,
+        )
     except Exception as error:  # one bad file must not stop the run
-        return (image_path, False, f"{type(error).__name__}: {error}", None, 0)
+        return (image_path, False, f"{type(error).__name__}: {error}", None, 0, None)
 
 
 class _Log:
@@ -337,9 +377,13 @@ def run_extraction(
             yield (image_path, output_path)
 
     def record(result) -> None:
-        image_path, success, error, warning, num_minutiae = result
+        image_path, success, error, warning, num_minutiae, source = result
         if success:
             summary.extracted += 1
+            if source is not None:
+                summary.resolution_sources[source] = (
+                    summary.resolution_sources.get(source, 0) + 1
+                )
             if num_minutiae == 0:
                 summary.without_minutiae += 1
             if warning:
@@ -390,7 +434,7 @@ def _run_in_processes(config, jobs: Iterator[tuple[str, str]], workers: int, rec
             record(future.result())
             return True
         except BrokenProcessPool:
-            record((job[0], False, _WORKER_DIED, None, 0))
+            record((job[0], False, _WORKER_DIED, None, 0, None))
             return False
 
     def replace_broken_executor() -> ProcessPoolExecutor:

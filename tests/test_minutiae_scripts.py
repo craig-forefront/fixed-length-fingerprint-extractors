@@ -132,7 +132,7 @@ def test_extract_minutiae_single_image(tmp_path, fake_fingerflow):
     image_path = join(TEST_IMAGE_DIR, "1_1.png")
     mnt_path = join(tmp_path, "1_1.mnt")
     result = script.extract_single_image(image_path, mnt_path, MODEL_PATHS, ASSUME_500)
-    assert result == (image_path, True, None, None, len(MINUTIAE))
+    assert result == (image_path, True, None, None, len(MINUTIAE), "assumed, 500 ppi")
     _assert_got_full_grayscale_image(fake_fingerflow.instances[0])
     _assert_is_extractor_output(mnt_path)
 
@@ -168,8 +168,14 @@ def test_extract_minutiae_reports_failed_images(tmp_path, monkeypatch, fake_fing
     assert "Could not read the file as an image" in error_log[0]
 
 
-def test_extract_minutiae_stops_without_extractor(tmp_path, monkeypatch, fake_fingerflow):
-    """E.g. a fingerflow version whose Extractor has no image_dpi option"""
+def test_extract_minutiae_stops_without_extractor(
+    tmp_path, monkeypatch, fake_fingerflow, capsys
+):
+    """
+    E.g. a fingerflow version whose Extractor has no image_dpi option, or one
+    that fails on the path None of ClassifyNet and CoreNet: the script stops
+    with exit status 2 and names the revision that it needs.
+    """
     attempts = []
 
     class ExtractorWithoutImageDpi:
@@ -185,8 +191,11 @@ def test_extract_minutiae_stops_without_extractor(tmp_path, monkeypatch, fake_fi
     monkeypatch.setattr(
         sys, "argv", _extract_minutiae_argv(TEST_IMAGE_DIR, str(output_dir))
     )
-    with pytest.raises(TypeError, match="image_dpi"):
-        script.main()
+    assert script.main() == 2
+    message = capsys.readouterr().err
+    assert "unexpected keyword argument 'image_dpi'" in message
+    assert "too old" in message
+    assert "claude/serene-albattani-s6ehsj" in message
     # Not tried again for each of the 8 images
     assert attempts == [{"image_dpi": 500}]
     assert not list(output_dir.glob("*.mnt"))
@@ -327,3 +336,21 @@ def test_visualize_three_way_marker_rotation(visualize_three_way):
         for a in angle + np.arange(4) * np.pi / 2
     ]
     assert diamond == pytest.approx(np.array(expected), abs=1)
+
+
+def test_image_dpi_other_than_500_is_warned_about(
+    tmp_path, monkeypatch, fake_fingerflow, capsys
+):
+    script = _load_script("extract_minutiae")
+    argv = _extract_minutiae_argv(TEST_IMAGE_DIR, str(tmp_path / "a"))
+    monkeypatch.setattr(sys, "argv", argv)
+    assert script.main() == 0
+    assert "WARNING" not in capsys.readouterr().err
+
+    monkeypatch.setattr(
+        sys, "argv", _extract_minutiae_argv(TEST_IMAGE_DIR, str(tmp_path / "b"))
+        + ["--image_dpi", "1000"],
+    )
+    assert script.main() == 0
+    message = capsys.readouterr().err
+    assert "WARNING: --image_dpi 1000" in message and "--ppi" in message
