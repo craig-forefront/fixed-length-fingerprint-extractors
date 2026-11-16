@@ -2,7 +2,7 @@ from flx.models import InceptionV4
 import torch
 from torch import nn
 
-from flx.models.localization_network import LocalizationNetwork
+from flx.models.localization_network import Alignment, LocalizationNetwork
 
 """
 Terminology:
@@ -166,9 +166,13 @@ class DeepPrintOutput:
         self,
         minutia_embeddings: torch.Tensor = None,
         texture_embeddings: torch.Tensor = None,
+        alignment: Alignment | None = None,
     ):
         self.minutia_embeddings: torch.Tensor = minutia_embeddings
         self.texture_embeddings: torch.Tensor = texture_embeddings
+        # What the localization network did to the images of the batch; None
+        # for the variants without localization network
+        self.alignment: Alignment | None = alignment
 
     @staticmethod
     def training():
@@ -360,14 +364,18 @@ class DeepPrint_LocTex(nn.Module):
 
     def forward(self, input: torch.Tensor) -> DeepPrintOutput:
         if self.training:
-            x = self.localization(input)
+            x, alignment = self.localization.align(input)
             self.embeddings.train()
-            return self.embeddings(x)
+            output = self.embeddings(x)
+            output.alignment = alignment
+            return output
 
         with torch.no_grad():
-            x = self.localization(input)
+            x, alignment = self.localization.align(input)
             self.embeddings.eval()
-            return self.embeddings(x)
+            output = self.embeddings(x)
+            output.alignment = alignment
+            return output
 
 
 class DeepPrint_LocMinu(nn.Module):
@@ -397,14 +405,18 @@ class DeepPrint_LocMinu(nn.Module):
 
     def forward(self, input: torch.Tensor) -> DeepPrintOutput:
         if self.training:
-            x = self.localization(input)
+            x, alignment = self.localization.align(input)
             self.embeddings.train()
-            return self.embeddings(x)
+            output = self.embeddings(x)
+            output.alignment = alignment
+            return output
 
         with torch.no_grad():
-            x = self.localization(input)
+            x, alignment = self.localization.align(input)
             self.embeddings.eval()
-            return self.embeddings(x)
+            output = self.embeddings(x)
+            output.alignment = alignment
+            return output
 
 
 class DeepPrint_LocTexMinu(nn.Module):
@@ -436,14 +448,18 @@ class DeepPrint_LocTexMinu(nn.Module):
 
     def forward(self, input: torch.Tensor) -> DeepPrintOutput:
         if self.training:
-            x = self.localization(input)
+            x, alignment = self.localization.align(input)
             self.embeddings.train()
-            return self.embeddings(x)
+            output = self.embeddings(x)
+            output.alignment = alignment
+            return output
 
         with torch.no_grad():
-            x = self.localization(input)
+            x, alignment = self.localization.align(input)
             self.embeddings.eval()
-            return self.embeddings(x)
+            output = self.embeddings(x)
+            output.alignment = alignment
+            return output
 
 
 def main():

@@ -17,6 +17,7 @@ from flx.data.embedding_loader import EmbeddingLoader
 from flx.data.dataset import Dataset, ZippedDataLoader
 from flx.extractor.extract_embeddings import extract_embeddings
 from flx.models.deep_print_arch import DeepPrintTrainingOutput
+from flx.models.alignment_check import AlignmentMonitor
 from flx.models.learning_rate import (
     DivergenceGuard,
     LearningRateConfig,
@@ -52,6 +53,10 @@ class TrainingLogEntry:
     # Learning rate of the last step of the epoch. None in logs that were
     # written before this field existed.
     learning_rate: float | None = None
+    # What the localization network (learned alignment) did in the epoch, see
+    # AlignmentMonitor.summary. None for variants without localization
+    # network and in logs that were written before this field existed.
+    alignment: dict | None = None
 
     def __str__(self):
         s = "TrainingLogEntry(\n"
@@ -155,6 +160,7 @@ def _train(
     epoch: int = 1,
     num_epochs: int = 1,
     guard: DivergenceGuard | None = None,
+    alignment_monitor: AlignmentMonitor | None = None,
 ) -> float:
     """
     Trains the model for one epoch.
@@ -169,9 +175,14 @@ def _train(
         num_epochs: number of epochs of the whole training. Together with the
                  number of batches they give the position in the schedule.
         guard: Stops the training when the loss is not finite or has exploded.
+        alignment_monitor: Warns or stops the training when the localization
+                 network moves the prints out of the frame, and collects what
+                 it did in the epoch.
 
     Raises
         TrainingDivergedError if the guard finds a diverged training.
+        AlignmentCollapsedError (a TrainingDivergedError) if the monitor finds
+        that most aligned images of a batch are mostly empty.
 
     Returns
         - overall average epoch loss: the mean over the samples that this
@@ -233,6 +244,10 @@ def _train(
             loss_value = loss.detach().item()
             if guard is not None:
                 guard.check(loss_value, current_lr, f"epoch {epoch}, step {step}")
+            if alignment_monitor is not None:
+                alignment_monitor.check(
+                    output.alignment, f"epoch {epoch}, step {step}"
+                )
             # Backward pass with gradient scaling
             scaler.scale(loss).backward()
             if clip_norm is not None:
@@ -253,6 +268,10 @@ def _train(
             loss_value = loss.detach().item()
             if guard is not None:
                 guard.check(loss_value, current_lr, f"epoch {epoch}, step {step}")
+            if alignment_monitor is not None:
+                alignment_monitor.check(
+                    output.alignment, f"epoch {epoch}, step {step}"
+                )
             loss.backward()
             if clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
@@ -348,6 +367,9 @@ def train_model(
         TrainingDivergedError: The loss of a batch is not a finite number, or
                  it is far higher than at the start. model.pyt is then still
                  the end of the last completed epoch.
+        AlignmentCollapsedError: (a TrainingDivergedError) The localization
+                 network of a Loc* variant moved most prints of a batch out
+                 of the frame, see flx/models/alignment_check.py.
     """
     if learning_rate is None:
         learning_rate = LearningRateConfig()
@@ -415,6 +437,8 @@ def train_model(
         learning_rate.loss_explosion_factor,
         reference_loss=logged_loss if logged_loss >= 0 else None,
     )
+    # Does nothing for variants without localization network
+    alignment_monitor = AlignmentMonitor()
     if is_main_process():
         # Number of steps of the whole training in this process, as _train
         # counts them: the batches of one epoch times the epochs
@@ -455,6 +479,7 @@ def train_model(
                 print(f"\n\n --- Starting Epoch {epoch} of {num_epochs} ---")
                 print("\nTraining:")
 
+            alignment_monitor.reset()
             train_loss, loss_stats, accuracy = _train(
                 model,
                 loss,
@@ -466,11 +491,27 @@ def train_model(
                 epoch=epoch,
                 num_epochs=num_epochs,
                 guard=guard,
+                alignment_monitor=alignment_monitor,
             )
+            # With several GPUs these are the images of the main process only
+            alignment_stats = alignment_monitor.summary()
 
             if is_main_process():
                 print(f"Average Loss: {train_loss}")
                 print(f"Multiclass accuracy: {accuracy}")
+                if alignment_stats is not None:
+                    print(
+                        "Learned alignment: mean rotation "
+                        f"{alignment_stats['mean_rotation_degrees']:.2f} degrees "
+                        f"(largest {alignment_stats['max_rotation_degrees']:.2f}), "
+                        f"mean shift {alignment_stats['mean_shift']:.3f} of the "
+                        f"image side (largest {alignment_stats['max_shift']:.3f}), "
+                        "share of the print kept in the frame "
+                        f"{alignment_stats['mean_kept_content']:.1%} on average "
+                        f"(lowest {alignment_stats['min_kept_content']:.1%}), "
+                        f"{alignment_stats['share_mostly_empty']:.1%} of the "
+                        "aligned images mostly empty"
+                    )
 
                 # Save model (unwrap from DDP if wrapped)
                 save_model_parameters(
@@ -496,6 +537,7 @@ def train_model(
                     accuracy,
                     validation_eer,
                     optimizer.param_groups[0]["lr"],
+                    alignment_stats,
                 )
                 log.add_entry(entry)
                 print(entry)

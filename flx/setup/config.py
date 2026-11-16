@@ -112,5 +112,18 @@ LOCALIZATION_MAX_SCALE_FACTOR = 1.0
 # slowly than the model that learns from it.
 LOCALIZATION_LEARNING_RATE_FACTOR = 0.035
 
+# Check of the aligned images during training (flx/models/alignment_check.py).
+# An aligned image counts as "mostly empty" when less than this share of its
+# frame shows the input image, or when less than this share of the pixel
+# content of the input (the print, in images with background 0) is still in
+# the frame.
+ALIGNMENT_EMPTY_BELOW = 0.5
+# The training prints a warning (once per epoch) when more than this share of
+# the images of one batch is mostly empty; 0 switches the warning off.
+ALIGNMENT_WARN_SHARE = 0.1
+# The training stops with an error when more than this share of the images
+# of one batch is mostly empty; 0 switches the stop off.
+ALIGNMENT_STOP_SHARE = 0.5
+
 # Change this when switching models DeepPrint has 299 while ViT has 224
 INPUT_SIZE = 299
