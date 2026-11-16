@@ -6,7 +6,13 @@ import pytest
 import torch
 
 import flx.models.model_training as model_training
-from flx.data.dataset import ConstantDataLoader, Dataset, Identifier, IdentifierSet
+from flx.data.dataset import (
+    ConstantDataLoader,
+    DataLoader,
+    Dataset,
+    Identifier,
+    IdentifierSet,
+)
 from flx.models.model_training import TrainingLog, TrainingLogEntry, train_model
 
 
@@ -393,3 +399,52 @@ def test_epoch_loss_is_the_mean_over_the_samples_of_the_sampler():
         use_amp=False,
     )
     assert mean_loss == pytest.approx(2.0)
+
+
+class _PerSubjectLoader(DataLoader):
+    """Returns the value that the function gives for the subject."""
+
+    def __init__(self, function):
+        self._function = function
+
+    def get(self, identifier):
+        return self._function(identifier.subject)
+
+
+class _ModelThatNamesTheClassInTheImage(torch.nn.Module):
+    def __init__(self, num_classes: int):
+        super().__init__()
+        self.num_classes = num_classes
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, images):
+        from flx.models.deep_print_arch import DeepPrintTrainingOutput
+
+        named = images.flatten().long()
+        logits = torch.nn.functional.one_hot(named, self.num_classes).float()
+        return DeepPrintTrainingOutput(texture_logits=logits + 0.0 * self.weight)
+
+
+def test_accuracy_is_the_share_of_samples_named_correctly_also_with_many_classes():
+    # 200,000 classes: the metric that was used before needs the square of
+    # the number of classes in memory (320 GB here) and failed from about
+    # 100,000 classes. The model names the right subject for 6 of 8 samples.
+    num_classes = 200_000
+    subjects = [0, 1, 2, 3, 50_000, 100_000, 150_000, 199_999]
+    wrong = {2: 7, 150_000: 3}  # subject -> the class that the model names
+    ids = IdentifierSet([Identifier(s, 0) for s in subjects])
+    train_set = Dataset.zip(
+        Dataset(_PerSubjectLoader(lambda s: torch.tensor([float(wrong.get(s, s))])), ids),
+        Dataset(ConstantDataLoader((torch.zeros(0), 0.0)), ids),
+        Dataset(_PerSubjectLoader(lambda s: s), ids),
+    )
+    model = _ModelThatNamesTheClassInTheImage(num_classes)
+    _, _, accuracy = model_training._train(
+        model,
+        _ConstantLoss(),
+        torch.optim.SGD(model.parameters(), lr=0.1),
+        train_set,
+        None,
+        use_amp=False,
+    )
+    assert accuracy == pytest.approx(6 / 8)

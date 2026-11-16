@@ -7,7 +7,6 @@ import tqdm
 import shutil
 
 import torch
-import torchmetrics
 
 from flx.setup.paths import get_best_model_file
 from flx.setup.paths import get_newest_model_file
@@ -205,9 +204,11 @@ def _train(
         - a dict with the epoch loss of individual loss components
         - the share of these samples whose subject was named correctly
     """
-    metric = torchmetrics.classification.MulticlassAccuracy(
-        num_classes=train_set.num_subjects
-    ).to(device=get_device())
+    # Samples whose subject was named correctly. Counted directly: the
+    # MulticlassAccuracy of torchmetrics that was used here allocates
+    # (number of classes)^2 x 8 bytes in every step, which is 16 GB for
+    # 45,000 training subjects and failed for 100,000.
+    num_correct = 0
 
     # Initialize mixed precision scaler
     scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
@@ -303,11 +304,11 @@ def _train(
             logits = output.minutia_logits
         else:
             logits = output.texture_logits + output.minutia_logits
-        metric(logits, fp_labels)
+        num_correct += int((logits.detach().argmax(dim=1) == fp_labels).sum())
         progress.set_postfix(loss=f"{loss_value:.4g}", lr=f"{current_lr:.3g}")
 
     mean_loss = epoch_loss / num_samples if num_samples > 0 else 0.0
-    multiclass_accuracy = float(metric.compute())
+    multiclass_accuracy = num_correct / num_samples if num_samples > 0 else 0.0
     return mean_loss, loss_fun.get_recorded_loss(), multiclass_accuracy
 
 
