@@ -328,6 +328,28 @@ def test_dataset_SFingeExample():
 #     _test_image_dataset(MCYTCapacitiveDataset, "mcyt330_capacitive", 3300, 3300 * 12)
 
 
+def test_two_files_with_the_same_identifier_are_an_error(tmp_path):
+    # The later file used to replace the earlier one without a message
+    from flx.data.file_index import FileIndex
+
+    for sensor in ("sensor_a", "sensor_b"):
+        (tmp_path / sensor).mkdir()
+        (tmp_path / sensor / "1_1.png").write_bytes(b"")
+    (tmp_path / "sensor_a" / "1_2.png").write_bytes(b"")
+
+    def to_id(subdir: str, filename: str) -> Identifier:
+        subject, impression = filename.split("_")
+        return Identifier(int(subject), int(impression))
+
+    with pytest.raises(ValueError, match="same identifier") as error:
+        FileIndex(str(tmp_path), ".png", to_id)
+    assert "sensor_a/1_1.png" in str(error.value)
+    assert "sensor_b/1_1.png" in str(error.value)
+
+    (tmp_path / "sensor_b" / "1_1.png").rename(tmp_path / "sensor_b" / "2_1.png")
+    assert len(FileIndex(str(tmp_path), ".png", to_id).ids) == 3
+
+
 def test_embeddings_are_saved_and_loaded_with_their_identifiers(tmp_path):
     # save() referred to an attribute that does not exist and always failed
     ids = [Identifier(1, 1), Identifier(0, 0), Identifier(1, 0), Identifier(0, 1)]
