@@ -95,6 +95,12 @@ def describe_resolution_sources(
     lines = []
     from_metadata = 0
     for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        if key == "unknown":
+            lines.append(
+                f"  {count:>12,}  resolution unknown: these files fail (give --ppi, "
+                "a manifest row or --assume_ppi)"
+            )
+            continue
         origin, _, value = key.partition(", ")
         resampled = "" if value == f"{target_ppi:g} ppi" else f" (resampled to {target_ppi:g} ppi)"
         lines.append(f"  {count:>12,}  {value} from {_ORIGIN_TEXT.get(origin, origin)}{resampled}")

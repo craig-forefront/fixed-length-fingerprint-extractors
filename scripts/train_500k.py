@@ -1,22 +1,67 @@
 """
-Training script for large-scale fingerprint dataset (500K images)
-Uses DeepPrint with or without learned alignment (LocalizationNetwork)
+Training script for DeepPrint on a large fingerprint dataset, with or without
+learned alignment (LocalizationNetwork). The name is historical: the script
+was first written for 500,000 images. TRAINING_PIPELINE_GUIDE.md walks
+through its use; the section "Above about one million subjects" there says
+what it cannot do today.
 
-Single GPU usage:
+One GPU (or the CPU):
     python scripts/train_500k.py \
         --dataset_dir /path/to/fingerprints \
-        --output_dir /path/to/model
-
-Multi-GPU usage (recommended for large datasets):
-    torchrun --nproc_per_node=NUM_GPUS scripts/train_500k.py \
-        --dataset_dir /path/to/fingerprints \
-        --output_dir /path/to/model
-
-With FingerFlow-extracted minutiae:
-    torchrun --nproc_per_node=4 scripts/train_500k.py \
-        --dataset_dir /path/to/fingerprints \
         --minutiae_dir /path/to/minutiae \
+        --num_subjects 50000 --num_impressions 10 \
+        --ppi_manifest /path/to/resolutions.csv \
         --output_dir /path/to/model
+
+Several GPUs: the same options after
+    torchrun --nproc_per_node=NUM_GPUS scripts/train_500k.py ...
+
+Without --minutiae_dir the texture-only variant is trained.
+
+Layout of the files:
+    --dataset_dir holds the images as <subject>_<impression>.png, directly
+    or in any subdirectories (for example one per sensor). Subjects are
+    numbered 1 .. --num_subjects without gaps, impressions
+    1 .. --num_impressions, and every subject needs all its impressions:
+
+        dataset_dir/
+            sensor_a/1_1.png        subject 1, impression 1
+            sensor_a/1_2.png        subject 1, impression 2
+            sensor_b/2_1.png
+            ...
+            50000_10.png            subject 50000, impression 10
+
+    A "subject" is one finger: two fingers of one person are two subjects.
+    --minutiae_dir holds one .mnt file per image under the same name
+    (1_1.mnt, ...), as scripts/extract_minutiae.py writes them.
+
+    The script checks this before it trains and stops with a message that
+    names the first missing files. Two files with the same name in different
+    subdirectories are an error. Image files with a subject number above
+    --num_subjects or an impression number above --num_impressions are not
+    used; the script says how many. For other names, other image formats or
+    an uneven number of impressions per subject, rename (or link) the files
+    to this layout, or change CustomFingerprintLoader and the identifier
+    lists in this script.
+
+Continuing and starting again:
+    The script writes model.pyt (the newest epoch), best_model.pyt, log.json
+    and training_settings.json to --output_dir. If model.pyt is there, the
+    same command CONTINUES that training with the next epoch. To start
+    again from nothing, use a new --output_dir (or delete the old one).
+
+    A continued training must be the same training. The script stops if the
+    model variant (--localization, --minutiae_dir), --embedding_dim, the
+    subjects and the validation split, --batch_size or the image preparation
+    differ from training_settings.json. Learning rate options, loss weights,
+    --num_epochs and --patience may change; the script lists the changes and
+    they hold from the next epoch on. If all epochs are already trained, or
+    the training ended by early stopping, nothing is trained and the script
+    says so: a changed learning rate has no effect on a finished training.
+
+    --batch_size 64                 images per step on each GPU (default 64)
+    --allow_changed_settings        continue although settings that must stay
+                                    the same differ (at your own risk)
 
 Images from different sensors (see "Dataset Preparation" in
 TRAINING_PIPELINE_GUIDE.md):
@@ -81,11 +126,13 @@ Validation (on by default):
     --validation_split 0.1          share of the subjects to hold out
                                     (default 0.1; 0 switches validation off)
     --max_validation_subjects 5000  upper limit for the number of held-out
-                                    subjects (default 0 = no limit). Set this
-                                    for large training sets: validation runs
-                                    after every epoch on all impressions of
-                                    the held-out subjects, and every subject
-                                    above the limit stays in the training set.
+                                    subjects (default 5000; 0 = no limit).
+                                    Validation runs after every epoch on all
+                                    impressions of the held-out subjects, and
+                                    its pair list is built in a time that
+                                    grows with the square of their number.
+                                    Every subject above the limit stays in
+                                    the training set.
     --validation_seed 42            seed of the random choice of the held-out
                                     subjects (default 42). The same seed, share,
                                     limit and number of subjects always give
@@ -117,8 +164,12 @@ Learning rate (see "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md):
                                     "cosine" lowers it smoothly to 1 % of
                                     --learning_rate in the last step of the
                                     last epoch
-    --gradient_clip_norm 5.0        upper limit for the length of the gradient
-                                    in one step (0 = no limit)
+    --gradient_clip_norm 0          upper limit for the length of the gradient
+                                    in one step (0 = no limit, the default).
+                                    Take a value from your own range test:
+                                    gradient norms of 10,000 and more were
+                                    measured, so a small limit such as 5
+                                    would shrink every step
 
     Options that are not given use the values in flx/setup/config.py. The
     training stops with a message when the loss is not a finite number or far
@@ -126,6 +177,7 @@ Learning rate (see "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md):
 """
 
 import os
+import sys
 import argparse
 import functools
 import json
@@ -151,6 +203,9 @@ from flx.extractor.fixed_length_extractor import (
 from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
 from flx.image_processing.binarization import LazilyAllocatedBinarizer
 from flx.models.learning_rate import SCHEDULES, LearningRateConfig
+from flx.models.model_training import TrainingLog
+from flx.models import torch_helpers
+from flx.setup.paths import get_best_model_file, get_newest_model_file
 from flx.models.deep_print_loss import LossWeights
 from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
 from flx.preparation import sensor_normalization
@@ -240,12 +295,25 @@ class CustomFingerprintLoader(ImageLoader):
         return ".png"
 
     @staticmethod
-    def _file_to_id_fun(_: str, filename: str) -> Identifier:
+    def _file_to_id_fun(subdir: str, filename: str) -> Identifier:
         # Modify this to parse your filename pattern
         # Example pattern: "<subject_id>_<impression_id>.png"
-        subject_id, impression_id = filename.split("_")
-        # Convert to 0-indexed for PyTorch compatibility
-        return Identifier(int(subject_id) - 1, int(impression_id) - 1)
+        try:
+            subject_id, impression_id = filename.split("_")
+            # Convert to 0-indexed for PyTorch compatibility
+            identifier = Identifier(int(subject_id) - 1, int(impression_id) - 1)
+        except ValueError:
+            identifier = None
+        if identifier is None or identifier.subject < 0 or identifier.impression < 0:
+            raise ValueError(
+                f"The image file {os.path.join(subdir, filename)}"
+                f"{CustomFingerprintLoader._extension()} is not named "
+                "<subject>_<impression> with whole numbers from 1 (for example "
+                "17_3.png). Rename the files, move files that are no training "
+                "images out of --dataset_dir, or change "
+                "CustomFingerprintLoader in scripts/train_500k.py."
+            )
+        return identifier
 
     @staticmethod
     def _load_image(filepath: str) -> torch.Tensor:
@@ -269,8 +337,224 @@ VALIDATION_SEED = 42
 # and non-mated pairs (impressions of two subjects)
 MIN_VALIDATION_SUBJECTS = 2
 
-# Above this number of validation subjects the script recommends a limit
-LARGE_VALIDATION_SET = 5000
+# Default of --max_validation_subjects. Validation embeds all impressions of
+# the held-out subjects after every epoch, and create_validation_benchmark
+# needs a time that grows with the square of their number.
+DEFAULT_MAX_VALIDATION_SUBJECTS = 5000
+
+# Above this number of training subjects the script prints what grows with
+# the number of subjects (see "Above about one million subjects" in
+# TRAINING_PIPELINE_GUIDE.md)
+MANY_SUBJECTS = 1_000_000
+
+# File in --output_dir with the settings of the training
+SETTINGS_FILE = "training_settings.json"
+
+# Settings that must be the same when a training is continued. A change of
+# the first group makes model.pyt unusable or changes which subjects the
+# model has seen; a change of the others changes what is trained silently.
+FIXED_SETTINGS = (
+    "variant",
+    "embedding_dim",
+    "num_subjects",
+    "num_impressions",
+    "validation_split",
+    "max_validation_subjects",
+    "validation_seed",
+    "batch_size",
+    "canvas_size",
+    "preparation",
+)
+
+# Settings that may change when a training is continued; changes are listed
+CHANGEABLE_SETTINGS = (
+    "num_epochs",
+    "patience",
+    "learning_rate",
+    "warmup_steps",
+    "lr_schedule",
+    "gradient_clip_norm",
+    "localization_lr_factor",
+    "loss_weights",
+)
+
+
+class SettingsChangedError(RuntimeError):
+    """The output directory holds a training with other settings."""
+
+
+def _is_first_process() -> bool:
+    """False in the processes of a multi-GPU training other than the first."""
+    return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))) == 0
+
+
+def _write_json(path: str, obj: dict) -> None:
+    temporary = f"{path}.tmp{os.getpid()}"
+    with open(temporary, "w") as file:
+        json.dump(obj, file, indent=2, sort_keys=True)
+        file.write("\n")
+    os.replace(temporary, path)
+
+
+def check_training_settings(
+    output_dir: str, settings: dict, allow_change: bool = False
+) -> list[str]:
+    """
+    Stores the settings of a new training in output_dir, or compares them
+    with those of the training that is already there (model.pyt exists).
+
+    - A difference in one of FIXED_SETTINGS raises SettingsChangedError,
+      unless allow_change is set.
+    - Differences in CHANGEABLE_SETTINGS are returned as lines of text; the
+      new values are stored.
+    - A directory with model.pyt but without the settings file was written
+      by an earlier version of the script: only the image preparation can be
+      compared (with data_preparation.json), and a line says so.
+
+    Returns the lines to print. Only the first process of a multi-GPU
+    training writes files.
+    """
+    path = os.path.join(output_dir, SETTINGS_FILE)
+    notes = []
+    stored = None
+    if os.path.exists(get_newest_model_file(output_dir)):
+        if os.path.exists(path):
+            with open(path) as file:
+                stored = json.load(file)
+        else:
+            stored = {}
+            notes.append(
+                f"{output_dir} holds a training that was started before "
+                f"{SETTINGS_FILE} existed. Only its image preparation can be "
+                "compared with this command; make sure yourself that the other "
+                "options are those of the first start. If that training had "
+                f"more than {DEFAULT_MAX_VALIDATION_SUBJECTS:,} validation "
+                "subjects, pass --max_validation_subjects 0: the limit was not "
+                "the default then."
+            )
+            preparation_path = os.path.join(output_dir, "data_preparation.json")
+            if os.path.exists(preparation_path):
+                with open(preparation_path) as file:
+                    old = json.load(file)
+                stored["canvas_size"] = old.pop("canvas_size", None)
+                old.pop("ppi_manifest", None)
+                stored["preparation"] = old
+    if stored:
+        changed = [
+            key for key in FIXED_SETTINGS
+            if key in stored and stored[key] != settings[key]
+        ]
+        if changed and not allow_change:
+            lines = [
+                f"  {key}: stored {json.dumps(stored[key], sort_keys=True)}, "
+                f"now {json.dumps(settings[key], sort_keys=True)}"
+                for key in changed
+            ]
+            raise SettingsChangedError(
+                f"{output_dir} holds a training with other settings, and the "
+                "same --output_dir continues that training:\n"
+                + "\n".join(lines)
+                + "\nThese settings cannot change in a running training. To "
+                "train with the new settings, use a new --output_dir. To "
+                "continue the stored training, use its settings (they are in "
+                f"{path}). --allow_changed_settings continues anyway."
+            )
+        for key in changed:
+            notes.append(
+                f"Continuing although {key} changed (--allow_changed_settings): "
+                f"stored {json.dumps(stored[key], sort_keys=True)}, now "
+                f"{json.dumps(settings[key], sort_keys=True)}"
+            )
+        for key in CHANGEABLE_SETTINGS:
+            if key in stored and stored[key] != settings[key]:
+                notes.append(
+                    f"Changed since the last start, used from the next epoch "
+                    f"on: {key} {json.dumps(stored[key], sort_keys=True)} -> "
+                    f"{json.dumps(settings[key], sort_keys=True)}"
+                )
+        if "cosine" in (stored.get("lr_schedule"), settings["lr_schedule"]) and any(
+            key in stored and stored[key] != settings[key]
+            for key in ("num_epochs", "lr_schedule", "learning_rate")
+        ):
+            notes.append(
+                "The cosine schedule is computed from the step number and the "
+                "total number of steps, so with these changes the learning "
+                "rate of the next epoch does not continue where the last one "
+                "ended."
+            )
+    if _is_first_process():
+        _write_json(path, settings)
+    return notes
+
+
+def describe_layout_problem(
+    found: IdentifierSet,
+    wanted: list[Identifier],
+    num_subjects: int,
+    num_impressions: int,
+    directory: str,
+    extension: str,
+    option: str,
+) -> str | None:
+    """
+    Compares the files that were found below a directory with the identifiers
+    that the training needs. Returns None if all are there, else a message
+    that names the first missing files and the options that decide which
+    files are needed.
+    """
+    available = set(found.identifiers)
+    missing = [i for i in wanted if i not in available]
+    if not missing:
+        return None
+    examples = ", ".join(
+        f"{i.subject + 1}_{i.impression + 1}{extension}" for i in missing[:3]
+    )
+    if found.identifiers:
+        subjects = [i.subject for i in found.identifiers]
+        impressions = [i.impression for i in found.identifiers]
+        seen = (
+            f"{len(found):,} {extension} files of {found.num_subjects:,} subjects "
+            f"were found (subject numbers {min(subjects) + 1} to "
+            f"{max(subjects) + 1}, impression numbers {min(impressions) + 1} to "
+            f"{max(impressions) + 1})"
+        )
+    else:
+        seen = f"no {extension} file was found"
+    return (
+        f"{len(missing):,} of the {len(wanted):,} files that the training needs "
+        f"are missing below {directory} ({option}). The first ones: {examples}. "
+        f"--num_subjects {num_subjects} and --num_impressions {num_impressions} "
+        f"mean that every file <subject>_<impression>{extension} with subject 1 "
+        f"to {num_subjects} and impression 1 to {num_impressions} must exist, "
+        f"directly in the directory or in a subdirectory; {seen}. Set the two "
+        "options to what the directory holds. Subjects must be numbered "
+        "without gaps and each needs all its impressions; see the docstring "
+        "of scripts/train_500k.py for the layout."
+    )
+
+
+def sample_resolution_sources(
+    normalizer: SensorNormalizer, paths: list[str], max_files: int = 1000
+) -> tuple[dict, int]:
+    """
+    Where the resolution of the training images comes from, counted on at
+    most max_files of the paths, evenly spread over the list. Only the file
+    headers are read. Files whose resolution is unknown are counted under
+    "unknown".
+
+    Returns (counts per source and value, number of files looked at).
+    """
+    step = max(1, len(paths) // max_files)
+    sample = paths[::step][:max_files]
+    counts: dict[str, int] = {}
+    for path in sample:
+        try:
+            ppi, origin = normalizer.resolve_ppi(path)
+            key = sensor_normalization.resolution_source_label(ppi, origin)
+        except ValueError:
+            key = "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts, len(sample)
 
 
 def split_subjects(
@@ -480,6 +764,7 @@ def create_image_dataset(
     training_ids: IdentifierSet,
     normalizer: SensorNormalizer | None = None,
     canvas_size: int = 0,
+    files: CustomFingerprintLoader | None = None,
 ) -> Dataset:
     """
     Create image dataset with augmentation pipeline.
@@ -491,9 +776,11 @@ def create_image_dataset(
         canvas_size: Side in pixels of the square that every image is cut or
             padded to before it is scaled to the input size. 0 pads every
             image to a square of its own longer side.
+        files: The loader of the image files, if the directory was already
+            scanned; None scans dataset_dir.
     """
     image_loader = TransformedImageLoader(
-        images=CustomFingerprintLoader(dataset_dir, normalizer),
+        images=files or CustomFingerprintLoader(dataset_dir, normalizer),
         poses=POSE_AUGMENTATION,  # Random pose for training robustness
         transforms=[
             QUALITY_AUGMENTATION,
@@ -508,6 +795,7 @@ def create_validation_image_loader(
     dataset_dir: str,
     normalizer: SensorNormalizer | None = None,
     canvas_size: int = 0,
+    files: CustomFingerprintLoader | None = None,
 ) -> TransformedImageLoader:
     """
     The images as the model gets them outside of the training: prepared like
@@ -515,7 +803,7 @@ def create_validation_image_loader(
     normalizer and canvas_size) when embeddings are extracted with the model.
     """
     return TransformedImageLoader(
-        images=CustomFingerprintLoader(dataset_dir, normalizer),
+        images=files or CustomFingerprintLoader(dataset_dir, normalizer),
         poses=None,  # No pose augmentation for validation
         transforms=[
             LazilyAllocatedBinarizer(BINARIZATION_THRESHOLD),
@@ -561,8 +849,73 @@ def create_minutia_dataset(
         return Dataset(ConstantDataLoader((torch.tensor([]), 0.0)), training_ids)
 
 
+def load_trained_model(
+    output_dir: str,
+    dataset_dir: str,
+    ppi_manifest: str | None = None,
+    best: bool = True,
+):
+    """
+    The model of a training of this script and a loader that prepares images
+    as that training did (same resolution sources, ridge polarity and canvas,
+    no augmentation), read from training_settings.json in output_dir.
+
+    Args:
+        output_dir: The --output_dir of the training
+        dataset_dir: Directory with the images to embed, in the layout that
+            this script reads (<subject>_<impression>.png)
+        ppi_manifest: Manifest for the images in dataset_dir, if the training
+            used one. None uses the path that the training was given, which
+            only fits if dataset_dir is the directory of the training.
+        best: Load best_model.pyt (True) or model.pyt, the newest epoch
+
+    Returns:
+        (extractor, image_loader). Embeddings:
+            dataset = Dataset(image_loader, image_loader.ids)
+            texture, minutia = extractor.extract(dataset)
+    """
+    path = os.path.join(output_dir, SETTINGS_FILE)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path} not found. It is written by scripts/train_500k.py; a model "
+            "of an earlier version must be loaded by hand with the options of "
+            "its training."
+        )
+    with open(path) as file:
+        settings = json.load(file)
+    variant = settings["variant"]
+    extractor = create_extractor(
+        variant.startswith("Loc"),
+        variant.endswith("Minu"),
+        num_training_subjects=settings["num_training_subjects"],
+        embedding_dim=settings["embedding_dim"],
+    )
+    model_file = get_best_model_file(output_dir) if best else get_newest_model_file(output_dir)
+    torch_helpers.load_model_parameters(model_file, extractor.model, None, None)
+
+    preparation = settings["preparation"]
+    if ppi_manifest is None and preparation["ppi_manifest_sha256"] is not None:
+        ppi_manifest = settings["ppi_manifest"]
+    normalizer = SensorNormalizer(
+        root_dir=dataset_dir,
+        ppi=preparation["ppi"],
+        manifest=ppi_manifest,
+        assume_ppi=preparation["assume_ppi"],
+        ridges=preparation["ridges"],
+        target_ppi=preparation["target_ppi"],
+    )
+    image_loader = create_validation_image_loader(
+        dataset_dir, normalizer, settings["canvas_size"]
+    )
+    return extractor, image_loader
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Train DeepPrint on 500K fingerprints")
+    parser = argparse.ArgumentParser(
+        description="Train DeepPrint on a large fingerprint dataset",
+        epilog="See the docstring at the top of this script and "
+               "TRAINING_PIPELINE_GUIDE.md.",
+    )
     parser.add_argument("--dataset_dir", type=str, required=True,
                         help="Path to fingerprint images directory")
     parser.add_argument("--output_dir", type=str, required=True,
@@ -574,7 +927,19 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=NUM_EPOCHS,
                         help=f"Number of training epochs (default: {NUM_EPOCHS})")
     parser.add_argument("--embedding_dim", type=int, default=EMBEDDING_DIM,
-                        help=f"Embedding dimension (default: {EMBEDDING_DIM})")
+                        help="Embedding dimensions PER BRANCH. With --minutiae_dir the model "
+                             "has a texture and a minutia branch, so the embedding of a print "
+                             f"has twice this many values (default: {EMBEDDING_DIM}, that is "
+                             f"{2 * EMBEDDING_DIM} in total with minutiae)")
+    parser.add_argument("--batch_size", type=int,
+                        default=torch_helpers.DEFAULT_TRAINING_BATCH_SIZE,
+                        help="Images per step on each GPU (default: "
+                             f"{torch_helpers.DEFAULT_TRAINING_BATCH_SIZE}). With torchrun on "
+                             "several GPUs one step sees this many images times the number "
+                             "of GPUs. Validation uses twice the value")
+    parser.add_argument("--allow_changed_settings", action="store_true",
+                        help="Continue the training in --output_dir although settings that "
+                             "must stay the same differ from training_settings.json")
     parser.add_argument("--minutiae_dir", type=str, default=None,
                         help="Path to extracted minutiae (.mnt files from extract_minutiae.py)")
     parser.add_argument("--localization", type=str, default=DEFAULT_LOCALIZATION,
@@ -589,9 +954,11 @@ def main():
     parser.add_argument("--validation_split", type=float, default=0.1,
                         help="Share of the subjects (not images) that is held out of the "
                              "training set for validation (default: 0.1, 0=no validation)")
-    parser.add_argument("--max_validation_subjects", type=int, default=0,
-                        help="Upper limit for the number of validation subjects "
-                             "(default: 0 = no limit). Recommended for large sets, e.g. 5000")
+    parser.add_argument("--max_validation_subjects", type=int,
+                        default=DEFAULT_MAX_VALIDATION_SUBJECTS,
+                        help="Upper limit for the number of validation subjects (default: "
+                             f"{DEFAULT_MAX_VALIDATION_SUBJECTS}, 0 = no limit). Subjects above "
+                             "the limit stay in the training set")
     parser.add_argument("--validation_seed", type=int, default=VALIDATION_SEED,
                         help="Seed of the random choice of the validation subjects and "
                              f"of the validation pairs (default: {VALIDATION_SEED})")
@@ -631,6 +998,11 @@ def main():
     if args.canvas_size < 0:
         parser.error("--canvas_size must not be negative")
     try:
+        torch_helpers.set_training_batch_size(args.batch_size)
+    except ValueError as error:
+        parser.error(f"--{error}")
+    first_process = _is_first_process()
+    try:
         normalizer = sensor_normalization.from_arguments(args, args.dataset_dir)
     except (ValueError, OSError) as error:
         parser.error(str(error))
@@ -657,26 +1029,72 @@ def main():
     with_minutiae = args.minutiae_dir is not None
     model_type = variant_name(localization, with_minutiae)
 
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    # How the images are prepared; needed again when the model is used
-    preparation = dict(
-        normalizer.settings(), canvas_size=args.canvas_size, ppi_manifest=args.ppi_manifest
-    )
-    with open(os.path.join(args.output_dir, "data_preparation.json"), "w") as file:
-        json.dump(preparation, file, indent=2, sort_keys=True)
-
     # Create identifiers for training and validation. Whole subjects are held
     # out for validation; the model gets one class per training subject.
-    training_ids, validation_ids = create_training_and_validation_ids(
-        args.num_subjects,
-        args.num_impressions,
-        args.validation_split,
-        args.validation_seed,
-        args.max_validation_subjects,
-    )
+    try:
+        training_ids, validation_ids = create_training_and_validation_ids(
+            args.num_subjects,
+            args.num_impressions,
+            args.validation_split,
+            args.validation_seed,
+            args.max_validation_subjects,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     num_train_subjects = training_ids.num_subjects
     num_val_subjects = validation_ids.num_subjects if validation_ids else 0
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    # The settings of the training. A training that is already in the output
+    # directory is continued, so its settings must fit this command.
+    preparation = normalizer.settings()
+    settings = {
+        "variant": model_type,
+        "embedding_dim": args.embedding_dim,
+        "num_subjects": args.num_subjects,
+        "num_impressions": args.num_impressions,
+        "num_training_subjects": num_train_subjects,
+        "validation_split": args.validation_split,
+        "max_validation_subjects": args.max_validation_subjects,
+        "validation_seed": args.validation_seed,
+        "batch_size": args.batch_size,
+        "canvas_size": args.canvas_size,
+        "preparation": preparation,
+        "ppi_manifest": args.ppi_manifest,
+        "dataset_dir": args.dataset_dir,
+        "minutiae_dir": args.minutiae_dir,
+        "num_epochs": args.num_epochs,
+        "patience": args.patience,
+        "learning_rate": learning_rate.learning_rate,
+        "warmup_steps": learning_rate.warmup_steps,
+        "lr_schedule": learning_rate.schedule,
+        "gradient_clip_norm": learning_rate.gradient_clip_norm,
+        "localization_lr_factor": learning_rate.localization_factor if localization else None,
+        "loss_weights": {
+            "cross_entropy": loss_weights.cross_entropy,
+            "center": loss_weights.center,
+            "minutia_map": loss_weights.minutia_map if with_minutiae else None,
+        },
+    }
+    try:
+        notes = check_training_settings(
+            args.output_dir, settings, args.allow_changed_settings
+        )
+    except SettingsChangedError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    if first_process:
+        for note in notes:
+            print(f"Note: {note}")
+        # How the images are prepared; needed again when the model is used
+        # (the same values are part of training_settings.json)
+        _write_json(
+            os.path.join(args.output_dir, "data_preparation.json"),
+            dict(preparation, canvas_size=args.canvas_size, ppi_manifest=args.ppi_manifest),
+        )
+    log_path = os.path.join(args.output_dir, "log.json")
+    epochs_before = len(TrainingLog(log_path)) if os.path.exists(log_path) else 0
 
     model_name = model_type + (" (texture + minutiae)" if with_minutiae else " (texture-only)")
     print(f"=" * 60)
@@ -689,6 +1107,7 @@ def main():
     print(f"Canvas:       "
           + (f"{args.canvas_size}x{args.canvas_size} pixels at 500 ppi for every image"
              if args.canvas_size else "square of the longer side of each image"))
+    print(f"Batch size:   {args.batch_size} images per step and GPU")
     print(f"Subjects:     {args.num_subjects:,} total")
     print(f"  Training:   {num_train_subjects:,} subjects")
     print(f"  Validation: {num_val_subjects:,} subjects held out (seed {args.validation_seed})")
@@ -701,7 +1120,8 @@ def main():
     else:
         print(f"Patience:     not used (no validation set)")
         print(f"Best model:   lowest training loss (no validation set)")
-    print(f"Embedding:    {args.embedding_dim} dims")
+    print(f"Embedding:    {args.embedding_dim} values per branch, "
+          f"{args.embedding_dim * (2 if with_minutiae else 1)} per print")
     print(f"Optimizer:    Adam, {learning_rate.describe()}")
     if localization:
         print(f"Alignment:    learned (--localization on), learning rate of the "
@@ -717,16 +1137,85 @@ def main():
         print(f"GPUs:         {torch.cuda.device_count()}")
     print(f"=" * 60)
 
-    if num_val_subjects > LARGE_VALIDATION_SET and args.max_validation_subjects == 0:
+    wanted_validation = int(args.num_subjects * args.validation_split)
+    if 0 < num_val_subjects < wanted_validation:
         print(
-            f"\nNote: {num_val_subjects:,} validation subjects are embedded and "
-            f"compared after every epoch. --max_validation_subjects {LARGE_VALIDATION_SET} "
-            f"keeps validation short and leaves the other subjects in the training set."
+            f"\nNote: --validation_split {args.validation_split:g} would hold out "
+            f"{wanted_validation:,} subjects; --max_validation_subjects limits this to "
+            f"{num_val_subjects:,}. The others stay in the training set."
+        )
+    if num_val_subjects > DEFAULT_MAX_VALIDATION_SUBJECTS:
+        print(
+            f"\nWARNING: {num_val_subjects:,} validation subjects. All their "
+            "impressions are embedded after every epoch, and the list of pairs is "
+            "built in a time that grows with the square of this number (not "
+            f"measured above {DEFAULT_MAX_VALIDATION_SUBJECTS:,}). "
+            f"--max_validation_subjects {DEFAULT_MAX_VALIDATION_SUBJECTS} is the default."
+        )
+    if num_train_subjects > MANY_SUBJECTS:
+        print(
+            f"\nWARNING: {num_train_subjects:,} training subjects. The classifier and "
+            "the centers of the loss have one row per subject and are not sharded: "
+            "about 10 kB of GPU memory per subject with Adam (a calculation, not a "
+            f"measurement), so about {num_train_subjects * 10 / 1e6:,.0f} GB here, in "
+            "every GPU process, and model.pyt grows with it. This script was never "
+            "run at this size. See \"Above about one million subjects\" in "
+            "TRAINING_PIPELINE_GUIDE.md."
         )
 
     print(f"\nCreated {len(training_ids):,} training identifiers")
     if validation_ids:
         print(f"Created {len(validation_ids):,} validation identifiers")
+
+    # The files that are there, compared with the files that the options ask for
+    print(f"Scanning {args.dataset_dir} for {CustomFingerprintLoader._extension()} files...")
+    try:
+        files = CustomFingerprintLoader(args.dataset_dir, normalizer)
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    wanted = list(training_ids.identifiers)
+    if validation_ids:
+        wanted += list(validation_ids.identifiers)
+    problem = describe_layout_problem(
+        files.ids, wanted, args.num_subjects, args.num_impressions,
+        args.dataset_dir, CustomFingerprintLoader._extension(), "--dataset_dir",
+    )
+    if problem is None and with_minutiae:
+        try:
+            minutiae_files = FingerFlowMinutiaMapLoader(args.minutiae_dir).ids
+        except ValueError as error:
+            print(f"ERROR: --minutiae_dir: {error}", file=sys.stderr)
+            sys.exit(2)
+        # Validation needs no minutiae
+        problem = describe_layout_problem(
+            minutiae_files, list(training_ids.identifiers), args.num_subjects,
+            args.num_impressions, args.minutiae_dir, ".mnt", "--minutiae_dir",
+        )
+        if problem is not None:
+            problem += (
+                " The .mnt files are written by scripts/extract_minutiae.py; its "
+                "error log names the images that have none."
+            )
+    if problem is not None:
+        print(f"ERROR: {problem}", file=sys.stderr)
+        sys.exit(2)
+    unused = len(files.ids) - len(wanted)
+    if unused > 0 and first_process:
+        print(
+            f"Note: {unused:,} image files below {args.dataset_dir} are not used: their "
+            "subject number is above --num_subjects or their impression number above "
+            "--num_impressions."
+        )
+    if first_process:
+        counts, looked_at = sample_resolution_sources(
+            normalizer, [files._files.get(i) for i in training_ids.identifiers[:: max(1, len(training_ids) // 1000)]]
+        )
+        print(f"Resolution of {looked_at:,} training images spread over the set:")
+        for line in sensor_normalization.describe_resolution_sources(
+            counts, normalizer.assume_ppi
+        ):
+            print(line)
 
     # Initialize the model: with or without learned alignment
     # (LocalizationNetwork), with the minutia branch when minutiae are available
@@ -742,7 +1231,7 @@ def main():
     # Create training datasets
     print(f"Loading training image dataset from {args.dataset_dir}...")
     image_dataset = create_image_dataset(
-        args.dataset_dir, training_ids, normalizer, args.canvas_size
+        args.dataset_dir, training_ids, normalizer, args.canvas_size, files
     )
 
     print(f"Creating minutia dataset...")
@@ -760,7 +1249,7 @@ def main():
         print(f"\nCreating validation dataset...")
         # For validation, we don't use augmentation - just basic preprocessing
         validation_image_loader = create_validation_image_loader(
-            args.dataset_dir, normalizer, args.canvas_size
+            args.dataset_dir, normalizer, args.canvas_size, files
         )
         validation_fingerprints = Dataset(validation_image_loader, validation_ids)
 
@@ -788,11 +1277,25 @@ def main():
         learning_rate=learning_rate,
     )
 
+    if not first_process:
+        return
+    log = TrainingLog(log_path)
+    trained = len(log) - epochs_before
     print(f"\n{'=' * 60}")
-    print(f"Training complete!")
+    if trained == 0:
+        print("Nothing was trained in this run: the training in the output directory")
+        print(f"was already finished ({len(log)} epochs in its log, see the message above).")
+        print("Options of this command that differ from that training had no effect.")
+        print("To train again with other settings, use a new --output_dir.")
+    else:
+        print(f"Training complete! {trained} epoch(s) trained in this run, "
+              f"{len(log)} in the log.")
     print(f"Model type: DeepPrint_{model_type}")
     print(f"Model saved to: {args.output_dir}")
-    print(f"Best model: {args.output_dir}/best_model.pyt")
+    if log.best_entry is not None:
+        print(f"Best model: {get_best_model_file(args.output_dir)} "
+              f"(epoch {log.best_entry.epoch})")
+    print(f"Settings:   {os.path.join(args.output_dir, SETTINGS_FILE)}")
     print(f"{'=' * 60}")
 
 
