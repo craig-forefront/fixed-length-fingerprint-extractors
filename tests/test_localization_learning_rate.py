@@ -171,3 +171,26 @@ def test_optimizer_state_with_two_groups_is_loaded(tmp_path):
     new_optimizer = torch.optim.Adam(parameter_groups(new_model, 0.5), lr=1.0)
     load_model_parameters(path, new_model, _SumLoss(), new_optimizer)
     assert len(new_optimizer.state) == 2  # the running averages of Adam
+
+
+def test_range_test_uses_the_factor_too():
+    from flx.models.learning_rate_finder import run_range_test
+
+    model = _TinyLocModel()
+    run_range_test(
+        model,
+        _SumLoss(),
+        _training_set(4),
+        min_lr=1e-4,
+        max_lr=1e-2,
+        num_steps=3,
+        batch_size=2,
+        use_amp=False,
+        localization_factor=0.1,
+    )
+    # The gradient is the same in every step, so Adam moves each parameter by
+    # the sum of its learning rates
+    assert model.embeddings.weight.item() < 0
+    assert model.localization.weight.item() == pytest.approx(
+        0.1 * model.embeddings.weight.item(), rel=1e-3
+    )

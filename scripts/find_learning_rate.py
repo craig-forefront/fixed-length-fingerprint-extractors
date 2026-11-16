@@ -119,8 +119,16 @@ def main():
     parser.add_argument("--embedding_dim", type=int, default=train_500k.EMBEDDING_DIM)
     parser.add_argument("--variant", type=str, default="auto",
                         choices=["auto"] + list(VARIANTS),
-                        help="Model variant. auto = what train_500k.py trains: "
-                             "LocTexMinu with --minutiae_dir, LocTex without")
+                        help="Model variant; use the one of the planned training. "
+                             "Loc = with localization network (train_500k.py "
+                             "--localization on), Minu = with minutiae. auto = what "
+                             "train_500k.py trains by default, with the minutia branch "
+                             "if --minutiae_dir is given")
+    parser.add_argument("--localization_lr_factor", type=float, default=None,
+                        help="The localization network of the Loc variants uses the "
+                             "learning rate times this factor; use the value of the planned "
+                             "training (default: LOCALIZATION_LEARNING_RATE_FACTOR in "
+                             "flx/setup/config.py)")
     parser.add_argument("--batch_size", type=int, default=64,
                         help="Batch size; use the one of the planned training (default: 64)")
     parser.add_argument("--min_lr", type=float, default=1e-7,
@@ -156,7 +164,10 @@ def main():
 
     variant = args.variant
     if variant == "auto":
-        variant = "LocTexMinu" if args.minutiae_dir else "LocTex"
+        # The variant that train_500k.py trains by default
+        variant = train_500k.variant_name(
+            train_500k.DEFAULT_LOCALIZATION == "on", args.minutiae_dir is not None
+        )
     with_minutiae = VARIANTS[variant][1]
     if with_minutiae and args.minutiae_dir is None:
         parser.error(f"--variant {variant} needs --minutiae_dir")
@@ -192,6 +203,7 @@ def main():
         smoothing=args.smoothing,
         num_workers=args.num_workers,
         seed=args.seed,
+        localization_factor=args.localization_lr_factor,
     )
 
     csv_path = os.path.join(args.output_dir, "lr_range_test.csv")

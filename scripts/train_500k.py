@@ -1,6 +1,6 @@
 """
 Training script for large-scale fingerprint dataset (500K images)
-Uses DeepPrint with learned alignment (LocalizationNetwork)
+Uses DeepPrint with or without learned alignment (LocalizationNetwork)
 
 Single GPU usage:
     python scripts/train_500k.py \
@@ -17,6 +17,27 @@ With FingerFlow-extracted minutiae:
         --dataset_dir /path/to/fingerprints \
         --minutiae_dir /path/to/minutiae \
         --output_dir /path/to/model
+
+Learned alignment (see "Learned alignment" in TRAINING_PIPELINE_GUIDE.md):
+    The localization network is a small network in front of the model. It
+    proposes a rotation and a shift for every image, and the image is
+    resampled with them before the model sees it, so that the model sees every
+    print in a similar pose. It is trained together with the model.
+
+    --localization on               train with the localization network
+                                    (DeepPrint_LocTexMinu with --minutiae_dir,
+                                    DeepPrint_LocTex without); the default
+    --localization off              train without it (DeepPrint_TexMinu or
+                                    DeepPrint_Tex); everything else is the same
+    --localization_lr_factor 0.035  the localization network uses the learning
+                                    rate times this factor (default:
+                                    LOCALIZATION_LEARNING_RATE_FACTOR in
+                                    flx/setup/config.py)
+
+    Whether the localization network makes matching more accurate on your
+    data is not known: train both ways with the same settings and compare the
+    validation equal error rates (the guide has the recipe). A model must be
+    loaded with the variant it was trained with.
 
 Validation (on by default):
     A share of the SUBJECTS (not of the images) is held out of the training set
@@ -90,7 +111,12 @@ from flx.data.transformed_image_loader import TransformedImageLoader
 from flx.data.fingerflow_minutia_loader import FingerFlowMinutiaMapLoader
 from flx.data.minutia_map_loader import PoseTransformedMinutiaMapLoader
 from flx.data.dataset import ConstantDataLoader
-from flx.extractor.fixed_length_extractor import get_DeepPrint_LocTexMinu, get_DeepPrint_LocTex
+from flx.extractor.fixed_length_extractor import (
+    get_DeepPrint_LocTexMinu,
+    get_DeepPrint_LocTex,
+    get_DeepPrint_TexMinu,
+    get_DeepPrint_Tex,
+)
 from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
 from flx.image_processing.binarization import LazilyAllocatedBinarizer
 from flx.models.learning_rate import SCHEDULES, LearningRateConfig
@@ -109,6 +135,9 @@ NUM_IMPRESSIONS = 10          # Impressions per subject (50000 * 10 = 500K)
 # Training hyperparameters
 NUM_EPOCHS = 10               # Fewer epochs needed with large dataset
 EMBEDDING_DIM = 256           # Dimension of the fixed-length representation
+
+# Learned alignment: "on" trains with the localization network, "off" without
+DEFAULT_LOCALIZATION = "on"
 
 # Image preprocessing
 BINARIZATION_THRESHOLD = 5.0  # Adjust based on your image quality
@@ -238,6 +267,43 @@ def split_subjects(
     val_subjects = sorted(all_subjects[:num_val_subjects])
     train_subjects = sorted(all_subjects[num_val_subjects:])
     return train_subjects, val_subjects
+
+
+def variant_name(localization: bool, with_minutiae: bool) -> str:
+    """
+    Name of the DeepPrint variant that is trained: "Loc" if the localization
+    network (learned alignment) is used, then "Tex" for the texture branch,
+    then "Minu" if minutiae are given. The model class is DeepPrint_<name>
+    and its constructor get_DeepPrint_<name> in
+    flx/extractor/fixed_length_extractor.py.
+    """
+    return ("Loc" if localization else "") + "Tex" + ("Minu" if with_minutiae else "")
+
+
+def create_extractor(
+    localization: bool,
+    with_minutiae: bool,
+    num_training_subjects: int,
+    embedding_dim: int,
+    loss_weights: LossWeights | None = None,
+):
+    """
+    The model and its loss for the chosen variant. The variants with and
+    without localization network differ in nothing else.
+    """
+    # Looked up at call time, so that the names of this module can be replaced
+    constructor = globals()["get_DeepPrint_" + variant_name(localization, with_minutiae)]
+    if with_minutiae:
+        return constructor(
+            num_training_subjects=num_training_subjects,
+            num_dims=embedding_dim,
+            loss_weights=loss_weights,
+        )
+    return constructor(
+        num_training_subjects=num_training_subjects,
+        num_texture_dims=embedding_dim,
+        loss_weights=loss_weights,
+    )
 
 
 def create_training_and_validation_ids(
@@ -391,6 +457,15 @@ def main():
                         help=f"Embedding dimension (default: {EMBEDDING_DIM})")
     parser.add_argument("--minutiae_dir", type=str, default=None,
                         help="Path to extracted minutiae (.mnt files from extract_minutiae.py)")
+    parser.add_argument("--localization", type=str, default=DEFAULT_LOCALIZATION,
+                        choices=["on", "off"],
+                        help="Train with (on) or without (off) the localization network, "
+                             "the learned alignment of the image; everything else stays "
+                             f"the same (default: {DEFAULT_LOCALIZATION})")
+    parser.add_argument("--localization_lr_factor", type=float, default=None,
+                        help="The localization network uses the learning rate times this "
+                             "factor (default: LOCALIZATION_LEARNING_RATE_FACTOR in "
+                             "flx/setup/config.py). Only used with --localization on")
     parser.add_argument("--validation_split", type=float, default=0.1,
                         help="Share of the subjects (not images) that is held out of the "
                              "training set for validation (default: 0.1, 0=no validation)")
@@ -436,12 +511,19 @@ def main():
         )
     except ValueError as error:
         parser.error(str(error))
-    learning_rate = LearningRateConfig(
-        learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_steps,
-        schedule=args.lr_schedule,
-        gradient_clip_norm=args.gradient_clip_norm,
-    )
+    try:
+        learning_rate = LearningRateConfig(
+            learning_rate=args.learning_rate,
+            warmup_steps=args.warmup_steps,
+            schedule=args.lr_schedule,
+            gradient_clip_norm=args.gradient_clip_norm,
+            localization_factor=args.localization_lr_factor,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    localization = args.localization == "on"
+    with_minutiae = args.minutiae_dir is not None
+    model_type = variant_name(localization, with_minutiae)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -458,9 +540,10 @@ def main():
     num_train_subjects = training_ids.num_subjects
     num_val_subjects = validation_ids.num_subjects if validation_ids else 0
 
-    model_name = "LocTexMinu (texture + minutiae)" if args.minutiae_dir else "LocTex (texture-only)"
+    model_name = model_type + (" (texture + minutiae)" if with_minutiae else " (texture-only)")
     print(f"=" * 60)
-    print(f"Training DeepPrint with Learned Alignment ({model_name})")
+    print(f"Training DeepPrint {'with' if localization else 'without'} "
+          f"Learned Alignment ({model_name})")
     print(f"=" * 60)
     print(f"Dataset:      {args.dataset_dir}")
     print(f"Minutiae:     {args.minutiae_dir or 'None'}")
@@ -478,6 +561,11 @@ def main():
         print(f"Best model:   lowest training loss (no validation set)")
     print(f"Embedding:    {args.embedding_dim} dims")
     print(f"Optimizer:    Adam, {learning_rate.describe()}")
+    if localization:
+        print(f"Alignment:    learned (--localization on), learning rate of the "
+              f"localization network times {learning_rate.localization_factor:g}")
+    else:
+        print(f"Alignment:    none (--localization off)")
     print(f"Loss weights: cross entropy {loss_weights.cross_entropy:g}, "
           f"center {loss_weights.center:g}"
           + (f", minutia map {loss_weights.minutia_map:g}" if args.minutiae_dir else ""))
@@ -498,22 +586,16 @@ def main():
     if validation_ids:
         print(f"Created {len(validation_ids):,} validation identifiers")
 
-    # Initialize model with learned alignment (LocalizationNetwork)
-    # Use LocTexMinu when minutiae are available, LocTex otherwise
-    if args.minutiae_dir is not None:
-        print(f"\nInitializing DeepPrint_LocTexMinu model (texture + minutiae)...")
-        extractor = get_DeepPrint_LocTexMinu(
-            num_training_subjects=num_train_subjects,
-            num_dims=args.embedding_dim,
-            loss_weights=loss_weights,
-        )
-    else:
-        print(f"\nInitializing DeepPrint_LocTex model (texture-only)...")
-        extractor = get_DeepPrint_LocTex(
-            num_training_subjects=num_train_subjects,
-            num_texture_dims=args.embedding_dim,
-            loss_weights=loss_weights,
-        )
+    # Initialize the model: with or without learned alignment
+    # (LocalizationNetwork), with the minutia branch when minutiae are available
+    print(f"\nInitializing DeepPrint_{model_type} model...")
+    extractor = create_extractor(
+        localization,
+        with_minutiae,
+        num_training_subjects=num_train_subjects,
+        embedding_dim=args.embedding_dim,
+        loss_weights=loss_weights,
+    )
 
     # Create training datasets
     print(f"Loading training image dataset from {args.dataset_dir}...")
@@ -567,7 +649,6 @@ def main():
         learning_rate=learning_rate,
     )
 
-    model_type = "LocTexMinu" if args.minutiae_dir else "LocTex"
     print(f"\n{'=' * 60}")
     print(f"Training complete!")
     print(f"Model type: DeepPrint_{model_type}")
