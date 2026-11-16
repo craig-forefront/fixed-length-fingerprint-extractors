@@ -93,6 +93,11 @@ def _run(train_500k, tmp_path, monkeypatch, *options, output="model", fake=None)
     return fake
 
 
+def _stored_settings(tmp_path, output="model") -> dict:
+    with open(tmp_path / output / "training_settings.json") as file:
+        return json.load(file)
+
+
 def _stops(train_500k, tmp_path, monkeypatch, capsys, *options, **kwargs) -> str:
     """Runs main(), which must stop with exit status 2. Returns its message."""
     capsys.readouterr()
@@ -119,7 +124,8 @@ def test_missing_files_are_named_with_the_options_that_ask_for_them(
     assert "--num_subjects 5 and --num_impressions 3" in message
     assert "8 .png files of 4 subjects were found" in message
     assert "impression numbers 1 to 2" in message
-    assert not exists(tmp_path / "model" / "model.pyt")
+    # A start that was refused leaves nothing that looks like a training
+    assert not exists(tmp_path / "model")
 
 
 def test_subject_with_fewer_impressions_is_named(
@@ -234,14 +240,60 @@ def test_same_command_continues_and_a_finished_training_says_so(
     assert "Training complete" not in output
     assert "learning_rate 0.0001 -> 3e-05" in output
     assert "use a new --output_dir" in output
+    # The stored settings stay those that the model was trained with
+    assert _stored_settings(tmp_path)["learning_rate"] == 0.0001
 
-    # More epochs continue the stored training
+    # More epochs continue the stored training. The learning rate is still
+    # reported as changed: no epoch was trained with the new one so far.
     _run(train_500k, tmp_path, monkeypatch, "--learning_rate", 0.00003, "--num_epochs", 3)
     output = capsys.readouterr().out
     assert "Training complete! 1 epoch(s) trained in this run, 3 in the log." in output
     assert "num_epochs 2 -> 3" in output
-    assert "learning_rate" not in [l.split(":")[1].split()[0] for l in output.splitlines()
-                                   if l.startswith("Note: Changed since")]
+    assert "learning_rate 0.0001 -> 3e-05" in output
+    stored = _stored_settings(tmp_path)
+    assert (stored["learning_rate"], stored["num_epochs"]) == (0.00003, 3)
+
+    # Once an epoch was trained with it, it is not a change any more
+    _run(train_500k, tmp_path, monkeypatch, "--learning_rate", 0.00003, "--num_epochs", 4)
+    output = capsys.readouterr().out
+    assert "num_epochs 3 -> 4" in output and "learning_rate" not in output
+
+
+def test_start_that_stops_at_the_file_check_does_not_store_its_settings(
+    train_500k, tmp_path, monkeypatch, capsys
+):
+    _write_images(tmp_path / "images")
+    _run(train_500k, tmp_path, monkeypatch)
+    # A continuing start with another learning rate stops at the file check
+    (tmp_path / "images" / "3_2.png").rename(tmp_path / "3_2.png")
+    changed = ["--learning_rate", 0.01, "--num_epochs", 3]
+    _stops(train_500k, tmp_path, monkeypatch, capsys, *changed)
+    assert _stored_settings(tmp_path)["learning_rate"] == 0.0001
+    # The start that really continues must still list what changed
+    (tmp_path / "3_2.png").rename(tmp_path / "images" / "3_2.png")
+    _run(train_500k, tmp_path, monkeypatch, *changed)
+    output = capsys.readouterr().out
+    assert "learning_rate 0.0001 -> 0.01" in output
+    assert "num_epochs 2 -> 3" in output
+    assert _stored_settings(tmp_path)["learning_rate"] == 0.01
+
+
+def test_settings_of_a_run_that_was_stopped_after_an_epoch_are_stored(
+    train_500k, tmp_path, monkeypatch
+):
+    class StoppedAfterOneEpoch(_FakeExtractor):
+        def fit(self, out_dir, num_epochs, **kwargs):
+            super().fit(out_dir, len(TrainingLog(join(out_dir, "log.json"))) + 1)
+            raise KeyboardInterrupt()
+
+    _write_images(tmp_path / "images")
+    _run(train_500k, tmp_path, monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        _run(
+            train_500k, tmp_path, monkeypatch, "--learning_rate", 0.01,
+            "--num_epochs", 5, fake=StoppedAfterOneEpoch(),
+        )
+    assert _stored_settings(tmp_path)["learning_rate"] == 0.01
 
 
 @pytest.mark.parametrize(
@@ -299,6 +351,9 @@ def test_training_of_an_earlier_version_is_compared_by_its_preparation(
     # data_preparation.json is still there: another preparation is refused
     message = _stops(train_500k, tmp_path, monkeypatch, capsys, "--ridges", "light")
     assert "  preparation: stored " in message
+    # The message names the file that is there, not the one that is missing
+    assert "data_preparation.json)" in message
+    assert "training_settings.json)" not in message
     _run(train_500k, tmp_path, monkeypatch, "--num_epochs", 3)
     output = capsys.readouterr().out
     assert "was started before training_settings.json existed" in output
@@ -309,13 +364,18 @@ def test_cosine_schedule_with_more_epochs_is_pointed_out(train_500k, tmp_path):
     def settings(**changes):
         base = {key: 1 for key in train_500k.FIXED_SETTINGS}
         base.update({key: 1 for key in train_500k.CHANGEABLE_SETTINGS})
-        base.update(lr_schedule="cosine", **changes)
+        base.update(lr_schedule="cosine", preparation={}, ppi_manifest=None)
+        base.update(changes)
         return base
 
     assert train_500k.check_training_settings(str(tmp_path), settings()) == []
+    # The comparison itself writes nothing
+    assert list(tmp_path.iterdir()) == []
+    train_500k.store_training_settings(str(tmp_path), settings())
     (tmp_path / "model.pyt").write_text("")
     assert train_500k.check_training_settings(str(tmp_path), settings()) == []
     notes = train_500k.check_training_settings(str(tmp_path), settings(num_epochs=5))
+    assert train_500k.check_training_settings(str(tmp_path), settings(num_epochs=5)) == notes
     assert len(notes) == 2
     assert "num_epochs 1 -> 5" in notes[0]
     assert "does not continue where the last one ended" in notes[1]
@@ -368,6 +428,23 @@ def test_validation_subjects_are_limited_by_default(
     )
     output = capsys.readouterr().out
     assert "would hold out 20 subjects; --max_validation_subjects limits this to 3" in output
+    assert "WARNING" not in output
+
+
+def test_more_validation_subjects_than_the_default_limit_get_a_warning(
+    train_500k, tmp_path, monkeypatch, capsys
+):
+    # The warning comes before the files are checked, so no files are needed:
+    # the run stops there
+    (tmp_path / "images").mkdir()
+    options = ["--num_subjects", 60_000, "--validation_split", 0.1]
+    _stops(train_500k, tmp_path, monkeypatch, capsys, *options)
+    assert "validation subjects." not in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        _run(train_500k, tmp_path, monkeypatch, *options, "--max_validation_subjects", 0)
+    output = capsys.readouterr().out
+    assert "WARNING: 6,000 validation subjects." in output
+    assert "--max_validation_subjects 5000 is the default" in output
 
 
 # --- Using the trained model ---------------------------------------------------
@@ -378,6 +455,10 @@ def test_trained_model_is_loaded_with_the_settings_of_its_training(
 ):
     _write_images(tmp_path / "images", subjects=range(1, 21), size=200)
     _write_minutiae(tmp_path / "minutiae", subjects=range(1, 21))
+    # One image with something in it, so that the canvas can be seen
+    pattern = np.zeros((200, 200), dtype=np.uint8)
+    pattern[40:160:8, :] = 255
+    cv2.imwrite(str(tmp_path / "images" / "1_1.png"), pattern)
     manifest = tmp_path / "resolutions.csv"
     manifest.write_text("path,ppi,ridges\n.,1000,light\n")
     _run(
@@ -416,6 +497,19 @@ def test_trained_model_is_loaded_with_the_settings_of_its_training(
         root_dir=str(tmp_path / "images"), manifest=str(manifest), assume_ppi=500
     ).settings()
     assert normalizer.settings() == expected
+    # The canvas of the training, not another one: with canvas 512 the print
+    # of 100 pixels fills a fifth of the frame, without a canvas all of it
+    with_canvas, without_canvas = [
+        Dataset(
+            train_500k.create_validation_image_loader(
+                str(tmp_path / "images"), normalizer, canvas
+            ),
+            IdentifierSet([Identifier(0, 0)]),
+        )[0]
+        for canvas in (512, 0)
+    ]
+    assert not np.array_equal(with_canvas.numpy(), without_canvas.numpy())
+    assert np.array_equal(dataset[0].numpy(), with_canvas.numpy())
 
     with pytest.raises(FileNotFoundError, match="training_settings.json"):
         train_500k.load_trained_model(str(tmp_path / "nothing"), str(tmp_path / "images"))

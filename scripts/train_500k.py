@@ -59,6 +59,10 @@ Continuing and starting again:
     the training ended by early stopping, nothing is trained and the script
     says so: a changed learning rate has no effect on a finished training.
 
+    training_settings.json holds the settings of the last run that trained
+    an epoch. A start that is refused (settings, missing files) or that
+    trains nothing does not write it.
+
     --batch_size 64                 images per step on each GPU (default 64)
     --allow_changed_settings        continue although settings that must stay
                                     the same differ (at your own risk)
@@ -379,6 +383,14 @@ CHANGEABLE_SETTINGS = (
 )
 
 
+def _has_training(output_dir: str) -> bool:
+    """
+    True if output_dir holds model.pyt, that is a training to continue.
+    (get_newest_model_file is not used here: it creates the directory.)
+    """
+    return os.path.exists(os.path.join(output_dir, "model.pyt"))
+
+
 class SettingsChangedError(RuntimeError):
     """The output directory holds a training with other settings."""
 
@@ -389,7 +401,8 @@ def _is_first_process() -> bool:
 
 
 def _write_json(path: str, obj: dict) -> None:
-    temporary = f"{path}.tmp{os.getpid()}"
+    # Only the first process of a training writes, so one name is enough
+    temporary = f"{path}.tmp"
     with open(temporary, "w") as file:
         json.dump(obj, file, indent=2, sort_keys=True)
         file.write("\n")
@@ -400,24 +413,25 @@ def check_training_settings(
     output_dir: str, settings: dict, allow_change: bool = False
 ) -> list[str]:
     """
-    Stores the settings of a new training in output_dir, or compares them
-    with those of the training that is already there (model.pyt exists).
+    Compares the settings of this command with those of the training that
+    is already in output_dir (model.pyt exists). Writes nothing, see
+    store_training_settings.
 
     - A difference in one of FIXED_SETTINGS raises SettingsChangedError,
       unless allow_change is set.
-    - Differences in CHANGEABLE_SETTINGS are returned as lines of text; the
-      new values are stored.
+    - Differences in CHANGEABLE_SETTINGS are returned as lines of text.
     - A directory with model.pyt but without the settings file was written
       by an earlier version of the script: only the image preparation can be
       compared (with data_preparation.json), and a line says so.
 
-    Returns the lines to print. Only the first process of a multi-GPU
-    training writes files.
+    Returns the lines to print; none for a new training.
     """
     path = os.path.join(output_dir, SETTINGS_FILE)
+    # The file that holds the stored settings, for the message of a refusal
+    stored_in = path
     notes = []
     stored = None
-    if os.path.exists(get_newest_model_file(output_dir)):
+    if _has_training(output_dir):
         if os.path.exists(path):
             with open(path) as file:
                 stored = json.load(file)
@@ -433,6 +447,7 @@ def check_training_settings(
                 "the default then."
             )
             preparation_path = os.path.join(output_dir, "data_preparation.json")
+            stored_in = preparation_path
             if os.path.exists(preparation_path):
                 with open(preparation_path) as file:
                     old = json.load(file)
@@ -457,7 +472,7 @@ def check_training_settings(
                 + "\nThese settings cannot change in a running training. To "
                 "train with the new settings, use a new --output_dir. To "
                 "continue the stored training, use its settings (they are in "
-                f"{path}). --allow_changed_settings continues anyway."
+                f"{stored_in}). --allow_changed_settings continues anyway."
             )
         for key in changed:
             notes.append(
@@ -468,8 +483,8 @@ def check_training_settings(
         for key in CHANGEABLE_SETTINGS:
             if key in stored and stored[key] != settings[key]:
                 notes.append(
-                    f"Changed since the last start, used from the next epoch "
-                    f"on: {key} {json.dumps(stored[key], sort_keys=True)} -> "
+                    f"Changed since the last run that trained, used from the "
+                    f"next epoch on: {key} {json.dumps(stored[key], sort_keys=True)} -> "
                     f"{json.dumps(settings[key], sort_keys=True)}"
                 )
         if "cosine" in (stored.get("lr_schedule"), settings["lr_schedule"]) and any(
@@ -482,9 +497,36 @@ def check_training_settings(
                 "rate of the next epoch does not continue where the last one "
                 "ended."
             )
-    if _is_first_process():
-        _write_json(path, settings)
     return notes
+
+
+def store_training_settings(output_dir: str, settings: dict) -> None:
+    """
+    Writes the settings to training_settings.json in output_dir, and how the
+    images are prepared to data_preparation.json (the same values; the file
+    that earlier versions of the script wrote).
+
+    main() calls this when a new training starts, after the file layout was
+    checked, and after a run that trained at least one epoch. A start that
+    is refused or that trains nothing therefore leaves the files as they
+    are: they hold the settings of the last run that trained. (A process
+    that is killed outright after it trained an epoch cannot write them; the
+    files then still hold the settings of the run before.)
+
+    Only the first process of a multi-GPU training writes.
+    """
+    if not _is_first_process():
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    _write_json(os.path.join(output_dir, SETTINGS_FILE), settings)
+    _write_json(
+        os.path.join(output_dir, "data_preparation.json"),
+        dict(
+            settings["preparation"],
+            canvas_size=settings["canvas_size"],
+            ppi_manifest=settings["ppi_manifest"],
+        ),
+    )
 
 
 def describe_layout_problem(
@@ -1095,8 +1137,6 @@ def main():
     num_train_subjects = training_ids.num_subjects
     num_val_subjects = validation_ids.num_subjects if validation_ids else 0
 
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
     # The settings of the training. A training that is already in the output
     # directory is continued, so its settings must fit this command.
     preparation = normalizer.settings()
@@ -1138,12 +1178,6 @@ def main():
     if first_process:
         for note in notes:
             print(f"Note: {note}")
-        # How the images are prepared; needed again when the model is used
-        # (the same values are part of training_settings.json)
-        _write_json(
-            os.path.join(args.output_dir, "data_preparation.json"),
-            dict(preparation, canvas_size=args.canvas_size, ppi_manifest=args.ppi_manifest),
-        )
     log_path = os.path.join(args.output_dir, "log.json")
     epochs_before = len(TrainingLog(log_path)) if os.path.exists(log_path) else 0
 
@@ -1294,33 +1328,51 @@ def main():
         )
         print(f"  Validation benchmark created successfully")
 
+    # The settings are stored only now, after all checks: a start that was
+    # refused leaves nothing behind that looks like a training. Those of a
+    # training that is continued are replaced when this run trained an epoch.
+    os.makedirs(args.output_dir, exist_ok=True)
+    if not _has_training(args.output_dir):
+        store_training_settings(args.output_dir, settings)
+
     # Train the model
     print(f"\nStarting training for up to {args.num_epochs} epochs...")
     if torch.cuda.device_count() > 1:
         print(f"For multi-GPU, launch with: torchrun --nproc_per_node={torch.cuda.device_count()} scripts/train_500k.py ...")
     print()
 
-    extractor.fit(
-        fingerprints=image_dataset,
-        minutia_maps=minutia_dataset,
-        labels=label_dataset,
-        validation_fingerprints=validation_fingerprints,
-        validation_benchmark=validation_benchmark,
-        num_epochs=args.num_epochs,
-        out_dir=args.output_dir,
-        patience=args.patience,
-        learning_rate=learning_rate,
-    )
+    def epochs_trained() -> int:
+        if not os.path.exists(log_path):
+            return 0
+        return len(TrainingLog(log_path)) - epochs_before
+
+    try:
+        extractor.fit(
+            fingerprints=image_dataset,
+            minutia_maps=minutia_dataset,
+            labels=label_dataset,
+            validation_fingerprints=validation_fingerprints,
+            validation_benchmark=validation_benchmark,
+            num_epochs=args.num_epochs,
+            out_dir=args.output_dir,
+            patience=args.patience,
+            learning_rate=learning_rate,
+        )
+    finally:
+        # Also when the run is stopped or fails after it trained an epoch
+        if first_process and epochs_trained() > 0:
+            store_training_settings(args.output_dir, settings)
 
     if not first_process:
         return
     log = TrainingLog(log_path)
-    trained = len(log) - epochs_before
+    trained = epochs_trained()
     print(f"\n{'=' * 60}")
     if trained == 0:
         print("Nothing was trained in this run: the training in the output directory")
         print(f"was already finished ({len(log)} epochs in its log, see the message above).")
-        print("Options of this command that differ from that training had no effect.")
+        print("Options of this command that differ from that training had no effect")
+        print(f"and were not stored in {SETTINGS_FILE}.")
         print("To train again with other settings, use a new --output_dir.")
     else:
         print(f"Training complete! {trained} epoch(s) trained in this run, "
