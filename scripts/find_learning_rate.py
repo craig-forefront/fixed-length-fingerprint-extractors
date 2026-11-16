@@ -46,6 +46,7 @@ from flx.extractor.fixed_length_extractor import (  # noqa: E402
     get_DeepPrint_Tex,
     get_DeepPrint_TexMinu,
 )
+from flx.models.deep_print_loss import LossWeights  # noqa: E402
 from flx.models.learning_rate_finder import (  # noqa: E402
     run_range_test,
     save_range_test_csv,
@@ -73,9 +74,14 @@ def choose_subjects(num_subjects: int, max_subjects: int, seed: int) -> list[int
     return subjects
 
 
-def build_extractor(variant: str, num_subjects: int, embedding_dim: int):
+def build_extractor(
+    variant: str,
+    num_subjects: int,
+    embedding_dim: int,
+    loss_weights: LossWeights | None = None,
+):
     constructor, _ = VARIANTS[variant]
-    return constructor(num_subjects, embedding_dim)
+    return constructor(num_subjects, embedding_dim, loss_weights=loss_weights)
 
 
 def build_training_set(
@@ -126,6 +132,12 @@ def main():
     parser.add_argument("--gradient_clip_norm", type=float, default=0.0,
                         help="Limit for the gradient norm, as in the planned "
                              "training (default: 0 = no limit)")
+    parser.add_argument("--loss_weight_cross_entropy", type=float, default=None,
+                        help="Loss weights as in the planned training; see the "
+                             "options of the same name of train_500k.py "
+                             "(default: the values in flx/setup/config.py)")
+    parser.add_argument("--loss_weight_center", type=float, default=None)
+    parser.add_argument("--loss_weight_minutia_map", type=float, default=None)
     parser.add_argument("--smoothing", type=float, default=0.9,
                         help="Weight of the past in the moving average of the loss (default: 0.9)")
     parser.add_argument("--num_workers", type=int, default=4,
@@ -133,6 +145,14 @@ def main():
     parser.add_argument("--seed", type=int, default=0,
                         help="Seed of the subject choice, the model and the batch order")
     args = parser.parse_args()
+    try:
+        loss_weights = LossWeights(
+            cross_entropy=args.loss_weight_cross_entropy,
+            center=args.loss_weight_center,
+            minutia_map=args.loss_weight_minutia_map,
+        )
+    except ValueError as error:
+        parser.error(str(error))
 
     variant = args.variant
     if variant == "auto":
@@ -154,7 +174,9 @@ def main():
         print(f"Note: the test needs {args.num_steps * args.batch_size:,} images and "
               f"sees each of the {len(ids):,} images more than once.")
 
-    extractor = build_extractor(variant, len(subjects), args.embedding_dim)
+    extractor = build_extractor(
+        variant, len(subjects), args.embedding_dim, loss_weights
+    )
     train_set = build_training_set(
         args.dataset_dir, args.minutiae_dir, ids, with_minutiae
     )

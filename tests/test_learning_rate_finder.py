@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from flx.data.dataset import ConstantDataLoader, Dataset, Identifier, IdentifierSet
+from flx.models.deep_print_loss import LossWeights
 from flx.models.deep_print_arch import DeepPrintTrainingOutput
 from flx.models.learning_rate_finder import (
     CSV_COLUMNS,
@@ -273,8 +274,9 @@ def test_script_runs_on_the_dataset_layout_of_train_500k(
             seen["labels"] = seen.get("labels", set()) | set(labels.tolist())
             return super().forward(output, labels, minutia_maps, minutia_map_weights)
 
-    def build(variant, num_subjects, embedding_dim):
+    def build(variant, num_subjects, embedding_dim, loss_weights=None):
         seen["variant"] = variant
+        seen["loss_weights"] = loss_weights
         extractor = _TinyExtractor(num_subjects)
         extractor.model = _OnePixelModel(num_subjects)
         extractor.loss = _Loss()
@@ -304,6 +306,7 @@ def test_script_runs_on_the_dataset_layout_of_train_500k(
     assert seen["image_shape"] == (4, 1, 299, 299)
     assert seen["map_shape"] == ((4, 6, 128, 128) if with_minutiae else (4, 0))
     assert seen["labels"] == {0, 1, 2, 3}  # 4 chosen subjects, one class each
+    assert seen["loss_weights"] == LossWeights()
     assert exists(out_dir / "lr_range_test.csv")
     assert exists(out_dir / "lr_range_test.png")
     assert "Suggested: --learning_rate" in capsys.readouterr().out
