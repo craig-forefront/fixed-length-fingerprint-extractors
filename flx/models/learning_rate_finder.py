@@ -45,7 +45,8 @@ class RangeTestSuggestion:
     steepest_learning_rate: float | None
     # Rate at which the smoothed loss was lowest
     lowest_loss_learning_rate: float
-    # Rate to try first in a real training; None if the loss never fell
+    # Rate to try first in a real training: a tenth of the rate with the
+    # lowest loss; None if the loss never fell
     suggested_learning_rate: float | None
     explanation: str
 
@@ -91,31 +92,35 @@ def suggest_learning_rate(
     smoothing: float = 0.9,
     safety_divisor: float = 10.0,
     skip_first: int = 5,
-    max_factor_below_lowest: float = 100.0,
 ) -> RangeTestSuggestion:
     """
     Reads a starting learning rate off the result of a range test.
 
-    The smoothed loss is followed up to its lowest point; everything after it
-    is the divergence. Before that point, the rate at which the smoothed loss
-    falls fastest per factor of the learning rate is the "steepest" rate (the
-    fall is measured across a window of a tenth of the steps). The
-    suggestion is the steepest rate divided by safety_divisor: at the steepest
-    rate the test is already close to the rates that diverge, and a real
-    training runs far longer than the test.
+    The suggestion is the rate at which the smoothed loss was lowest, divided
+    by safety_divisor. Above the rate with the lowest loss the training
+    diverges; a tenth of it is in the falling part of the curve, and the
+    margin is there because a real training runs far longer than the test.
 
-    A part of the loss can fall from the first step at any learning rate. The
-    minutia map loss does: an untrained model draws a map that is far from
-    empty, and tiny changes correct that. The steepest fall is then found at
-    the very low rates at the start of the test and says nothing about the
-    learning rate. Therefore, if the steepest rate is more than
-    max_factor_below_lowest times below the rate with the lowest loss, the
-    suggestion is the rate with the lowest loss divided by safety_divisor.
+    The rate at which the smoothed loss fell fastest (the "steepest" rate) is
+    also reported, measured across a window of a tenth of the steps before
+    the lowest point. It is NOT used for the suggestion. A part of the loss
+    can fall from the first step at any learning rate (the minutia map loss
+    does: an untrained model draws a map that is far from empty, and tiny
+    changes correct that), and the place of the steepest fall then depends on
+    the random start. Measured on six stored range tests of minutiae variants
+    (23 to 79 steps of 4 or 8 images, see TRAINING_PIPELINE_GUIDE.md): the
+    former rule, which followed the steepest fall unless it was more than 100
+    times below the rate with the lowest loss, suggested rates between
+    0.0000016 and 0.00027, a factor of 170 apart; a tenth of the rate with
+    the lowest loss is between 0.000095 and 0.00027, a factor of 2.8 apart.
+
+    No rate is suggested if the smoothed loss never fell before its lowest
+    point.
 
     Args:
-        skip_first: Number of steps at the start that are not considered,
-            because the average of very few losses is still noisy.
-        max_factor_below_lowest: See above.
+        skip_first: Number of steps at the start that are not considered for
+            the steepest fall, because the average of very few losses is
+            still noisy.
     """
     if len(learning_rates) != len(losses):
         raise ValueError("learning_rates and losses must have the same length")
@@ -155,32 +160,28 @@ def suggest_learning_rate(
             "suggested. Start the test at a lower learning rate (--min_lr), "
             "or use more steps.",
         )
-    if steepest_lr * max_factor_below_lowest < lowest_lr:
-        suggested = lowest_lr / safety_divisor
-        return RangeTestSuggestion(
-            steepest_lr,
-            lowest_lr,
-            suggested,
-            f"The smoothed loss fell fastest at learning rate {steepest_lr:.3g}, "
-            f"more than {max_factor_below_lowest:g} times below the rate "
-            f"where it was lowest ({lowest_lr:.3g}). A fall that early comes "
-            "from a part of the loss that falls at any rate (for example the "
-            "minutia map loss in the first steps), not from the learning "
-            f"rate. Suggested starting value: {suggested:.3g} (the rate with "
-            f"the lowest loss divided by {safety_divisor:g}). Check it with a "
-            "real training run and watch the loss in the first thousand steps.",
+    suggested = lowest_lr / safety_divisor
+    explanation = (
+        f"The smoothed loss was lowest at learning rate {lowest_lr:.3g}"
+        + (
+            "; above that it rose. "
+            if i_min < int(np.nonzero(finite)[0][-1])
+            else ", which is the last step of the test: the loss never rose, "
+            "so the rate with the lowest loss is not known. Repeat the test "
+            "with a higher --max_lr or more steps. "
         )
-    suggested = steepest_lr / safety_divisor
-    return RangeTestSuggestion(
-        steepest_lr,
-        lowest_lr,
-        suggested,
-        f"The smoothed loss fell fastest at learning rate {steepest_lr:.3g} and "
-        f"was lowest at {lowest_lr:.3g}; above that it rose. Suggested "
-        f"starting value: {suggested:.3g} (the steepest rate divided by "
-        f"{safety_divisor:g}). Check it with a real training run and watch "
-        "the loss in the first thousand steps.",
+        + f"Suggested starting value: {suggested:.3g} (the rate with the "
+        f"lowest loss divided by {safety_divisor:g}). For information: the "
+        f"smoothed loss fell fastest at {steepest_lr:.3g}; that rate is not "
+        "used, because for variants with minutiae it changed by more than a "
+        "factor of 10 from one seed to the next.\n"
+        "How far to trust this: in the few short tests that were measured, "
+        "the suggestion itself changed by up to a factor of 3 between seeds. "
+        "Run the test with two or three values of --seed, look at the plots, "
+        "and take the lowest suggestion. Then check it with a real training "
+        "run and watch the loss in the first thousand steps."
     )
+    return RangeTestSuggestion(steepest_lr, lowest_lr, suggested, explanation)
 
 
 def run_range_test(

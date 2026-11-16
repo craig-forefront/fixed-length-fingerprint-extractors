@@ -64,17 +64,20 @@ def _typical_curve():
     return rates, losses
 
 
-def test_suggestion_is_a_tenth_of_the_rate_with_the_steepest_fall():
+def test_suggestion_is_a_tenth_of_the_rate_with_the_lowest_loss():
     rates, losses = _typical_curve()
     suggestion = suggest_learning_rate(rates, losses, smoothing=0.0)
     assert suggestion.steepest_learning_rate == pytest.approx(1e-3, rel=0.2)
     assert suggestion.lowest_loss_learning_rate == pytest.approx(1e-2, rel=0.5)
     assert suggestion.suggested_learning_rate == pytest.approx(
-        suggestion.steepest_learning_rate / 10
+        suggestion.lowest_loss_learning_rate / 10
     )
+    assert "lowest loss divided by 10" in suggestion.explanation
+    assert "--seed" in suggestion.explanation
     # Smoothing delays the curve a little but must not move the result far
     smoothed = suggest_learning_rate(rates, losses, smoothing=0.9)
     assert 3e-4 < smoothed.steepest_learning_rate < 1e-2
+    assert 3e-4 < smoothed.suggested_learning_rate < 1e-2
 
 
 def test_suggestion_ignores_the_explosion_and_values_that_are_not_finite():
@@ -97,19 +100,32 @@ def test_one_lucky_batch_at_the_lowest_point_is_not_the_steepest_fall():
     assert suggestion.steepest_learning_rate == pytest.approx(1e-3, rel=0.2)
 
 
-def test_a_fall_from_the_first_step_does_not_lead_to_a_tiny_suggestion():
+@pytest.mark.parametrize("early_fall", [0.0, 3.0, 30.0, 100.0])
+def test_a_fall_from_the_first_step_does_not_move_the_suggestion(early_fall):
     # A part of the loss falls from the first step, whatever the learning
-    # rate (the minutia map loss does this). The steepest fall is then at the
-    # start of the test, at rates that are far too low.
+    # rate (the minutia map loss does this). How strong it is decides whether
+    # the steepest fall is found at the start of the test, at rates that are
+    # far too low, or near the lowest point. The suggestion must not depend
+    # on that: it was 1.6e-06 in one real test and 2.7e-04 in the next when
+    # it followed the steepest fall up to a factor of 100.
     rates, losses = _typical_curve()
-    losses = [loss + 100 * math.exp(-step / 12) for step, loss in enumerate(losses)]
+    losses = [
+        loss + early_fall * math.exp(-step / 12) for step, loss in enumerate(losses)
+    ]
     suggestion = suggest_learning_rate(rates, losses, smoothing=0.0)
-    assert suggestion.steepest_learning_rate < 1e-5
-    assert suggestion.lowest_loss_learning_rate == pytest.approx(1e-2, rel=0.5)
-    assert suggestion.suggested_learning_rate == pytest.approx(
-        suggestion.lowest_loss_learning_rate / 10
-    )
-    assert "falls at any rate" in suggestion.explanation
+    if early_fall >= 30:
+        assert suggestion.steepest_learning_rate < 1e-5
+    else:
+        assert suggestion.steepest_learning_rate > 1e-4
+    assert suggestion.suggested_learning_rate == pytest.approx(1e-3, rel=0.5)
+
+
+def test_loss_that_never_rises_asks_for_a_higher_end_of_the_range():
+    rates = range_test_learning_rates(1e-7, 1e-4, 50)
+    losses = [10.0 - 0.1 * i for i in range(50)]
+    suggestion = suggest_learning_rate(rates, losses, smoothing=0.0)
+    assert suggestion.lowest_loss_learning_rate == rates[-1]
+    assert "--max_lr" in suggestion.explanation
 
 
 def test_no_suggestion_when_the_loss_never_falls():

@@ -1049,8 +1049,8 @@ python scripts/find_learning_rate.py \
   (`Loc` variants only).
 - `--gradient_clip_norm` must be the value of the planned training.
 - `--seed` changes the subset, the starting model and the order of the
-  images. Run the test with two or three seeds; if the suggestions differ by
-  more than a factor of 3, take the lowest.
+  images. Run the test with two or three seeds, look at the plots and take
+  the lowest suggestion (see "How far to trust the suggestion" below).
 
 The script writes `lr_range_test.csv` (learning rate and loss of every step),
 draws `lr_range_test.png` and prints a suggested rate.
@@ -1078,10 +1078,13 @@ average. Read it from left to right:
 A good learning rate lies in the falling part, clearly left of the lowest
 point. The lowest point itself is not a good choice: the loss is low there
 because of all the steps before it, and the next steps diverge. The script
-marks the rate where the loss fell fastest (orange, dashed) and suggests one
-tenth of it (green). The factor of ten is a safety margin, because a real
-training runs thousands of times longer than the test and an instability can
-take longer than the test to show.
+suggests one tenth of the rate with the lowest smoothed loss (green line).
+The factor of ten is a safety margin, because a real training runs thousands
+of times longer than the test and an instability can take longer than the
+test to show. The script also marks the rate where the loss fell fastest
+(orange, dashed) for information; it does not use it (see below). The example
+picture above was drawn with an earlier rule, so its green line is at a tenth
+of the orange one.
 
 If the plot has no flat part on the left, start lower (`--min_lr`). If the
 loss never falls, no rate is suggested: look for a problem in the data or the
@@ -1092,11 +1095,38 @@ map loss (see [Loss weights](#loss-weights)), which falls from the first step
 at any learning rate: a model that has not learned anything draws a map that
 is far from empty, and tiny changes correct that. The curve then has no flat
 part and falls evenly from the left edge to the lowest point, and the place
-of the steepest fall says nothing about the learning rate. The script
-notices this (the steepest fall is more than 100 times below the rate with
-the lowest loss) and then suggests one tenth of the rate with the lowest
-loss instead; the printed explanation says which rule was used. Starting
-lower does not help in this case.
+of the steepest fall says nothing about the learning rate. Starting lower
+does not help in this case. This is why the suggestion is taken from the
+rate with the lowest loss and not from the steepest fall.
+
+### How far to trust the suggestion
+
+The suggestion is a starting point, not a measurement of the best rate. All
+range tests of minutiae variants that were stored while this was written are
+in the table. They are short (at most 100 planned steps), use 4 or 8 images
+per step and differ in more than the seed, so the spread is an upper
+estimate for one setting; no test was run at the script defaults (300 steps
+of 64 images), which should be less noisy.
+
+| Test (one run each) | Steps done | Lowest smoothed loss at | Steepest fall at | Suggestion (lowest / 10) | An earlier rule based on the steepest fall gave |
+|---|---|---|---|---|---|
+| `LocTexMinu`, 220 fingers, batch 4, seed 1 | 67 | 0.00095 | 0.000105 | 0.000095 | 0.0000105 |
+| `LocTexMinu`, 220 fingers, batch 4, seed 2 | 73 | 0.0027 | 0.0000102 | 0.00027 | 0.00027 |
+| `LocTexMinu`, 60 fingers, batch 4, 30 steps planned | 23 | 0.0013 | 0.0000161 | 0.00013 | 0.0000016 |
+| `TexMinu`, 220 fingers, batch 8, current loss weights | 69 | 0.0015 | 0.0000115 | 0.00015 | 0.00015 |
+| `TexMinu`, 220 fingers, batch 8, former loss weights | 77 | 0.0015 | 0.0011 | 0.00015 | 0.00011 |
+| `LocTexMinu`, 220 fingers, batch 8, former loss weights | 79 | 0.0022 | 0.00067 | 0.00022 | 0.000067 |
+
+- The suggestions are between 0.000095 and 0.00027, a factor of 2.8 apart.
+  The first two rows differ only in the seed and are a factor of 2.8 apart.
+- The rule that followed the steepest fall gave 0.0000016 to 0.00027 for the
+  same six tests, a factor of 170 apart, and a factor of 26 between the two
+  seeds. That rule was replaced.
+- So: expect the suggestion to move by a factor of about 3 from one seed to
+  the next. Run two or three seeds, take the lowest suggestion, and let the
+  plot and the first thousand steps of a real training decide. A rate that
+  is 3 times too low costs training time; one that is too high can end the
+  training.
 
 ### What was measured here, and what was not
 
@@ -1109,8 +1139,8 @@ step. Each line is one run.
 | Run | `DeepPrint_TexMinu` | `DeepPrint_LocTexMinu` |
 |-----|--------------------|------------------------|
 | Range test, 100 steps from 0.000001 to 0.1: smoothed loss above 15 (start: 14.8) from | 0.0031 | 0.0043 |
-| Range test: steepest fall at | 0.00067 | 0.00067 |
-| Range test: suggested rate | 0.000067 | 0.000067 |
+| Range test: lowest smoothed loss at | 0.0015 | 0.0022 |
+| Range test: suggested rate (a tenth of that) | 0.00015 | 0.00022 |
 | Training with the former default 0.025, no warm-up | stopped in step 2 (loss 14.7, then 5,119) | stopped in step 2 (loss 14.9, then 5,717) |
 | Training with 0.01, no warm-up | not run | stopped in step 3 (loss 14.9, 43.8, 690) |
 | Training with the new defaults (0.0001, warm-up, constant), 110 steps | no divergence; highest batch loss 14.9; epoch loss 14.70, then 14.44 | no divergence; highest batch loss 14.9; epoch loss 14.70, then 14.41 |
@@ -1134,15 +1164,16 @@ loss (one run, same settings as in the table). The smoothed loss started at
 was lowest (64) at 0.00135, rose from 0.0017 and the test ended after 69
 steps at 0.0027. The steepest fall was found at 0.0000036, which is the
 effect described under "Variants with minutiae look different" above; the
-suggestion by the rule for that case is 0.000135. The default 0.0001 is 13
-times below the rate with the lowest loss. The range test of
+suggestion (a tenth of the rate with the lowest loss) is 0.000135. The
+default 0.0001 is 13 times below the rate with the lowest loss. The range test of
 `DeepPrint_LocTexMinu` was not repeated, so its line in the table belongs to
 the former loss.
 
 What these runs show: 0.0001 does not diverge in the first 110 steps for
 either variant, and it is 30 to 43 times below the rate at which the
-loss of the range test started to rise. The default is the suggestion of the range
-test rounded up to a round number.
+loss of the range test started to rise. The default is a round number at the
+low end of the suggestions in the table under "How far to trust the
+suggestion" (0.000095 to 0.00027).
 
 What they do not show:
 
@@ -1696,7 +1727,8 @@ seen. This is called an A/B run. The recipe:
    python scripts/find_learning_rate.py --variant TexMinu    --output_dir lr_without ...
    ```
 
-   If the two suggestions differ by less than a factor of 2, use the lower
+   If the two suggestions differ by less than a factor of 3 (the suggestion
+   moves that much from one seed to the next), use the lower
    one for both runs. Otherwise give each variant its own rate, and write
    down that you did.
 3. **Run both trainings with the same options.** Only `--localization` and
