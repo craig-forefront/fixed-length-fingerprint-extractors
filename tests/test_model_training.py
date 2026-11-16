@@ -249,6 +249,78 @@ def test_run_stopped_during_validation_resumes_with_the_next_epoch(
     assert [e["validation_equal_error_rate"] for e in entries] == [0.30, 0.10, 0.20]
 
 
+def test_run_stopped_while_the_best_model_is_copied_gets_it_on_resume(
+    monkeypatch, tmp_path, capsys
+):
+    # The log holds the error rate of epoch 2, the best one, before
+    # best_model.pyt is written. A run stopped during that copy left
+    # best_model.pyt at epoch 1, and the next run saw nothing pending.
+    epochs = [(5.0, 0.1, 0.30), (4.0, 0.5, 0.10), (3.0, 0.9, 0.20)]
+    real_copy = model_training.shutil.copyfile
+    copies = []
+
+    def stopped_at_second_copy(source, target):
+        copies.append(target)
+        if len(copies) == 2:
+            # Half a file under the temporary name, as a killed process leaves it
+            with open(target, "w") as file:
+                file.write("half")
+            raise KeyboardInterrupt()
+        return real_copy(source, target)
+
+    monkeypatch.setattr(model_training.shutil, "copyfile", stopped_at_second_copy)
+    with pytest.raises(KeyboardInterrupt):
+        _run_scripted_training(monkeypatch, tmp_path, epochs[:2], True)
+    with open(join(tmp_path, "best_model.pyt")) as file:
+        assert file.read() == "1"
+    assert TrainingLog(join(tmp_path, "log.json")).best_entry.epoch == 2
+
+    monkeypatch.setattr(model_training.shutil, "copyfile", real_copy)
+    capsys.readouterr()
+    trained, best = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, True, already_trained=2
+    )
+    assert trained == [3]
+    assert best == 2
+    assert "best_model.pyt: epoch 2" in capsys.readouterr().out
+    # Nothing is left of the interrupted copy
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "best_model.pyt", "log.json", "model.pyt"
+    ]
+
+
+def test_missing_best_model_of_an_earlier_epoch_is_reported(
+    monkeypatch, tmp_path, capsys
+):
+    epochs = [(5.0, 0.1, 0.10), (4.0, 0.5, 0.20), (3.0, 0.9, 0.30)]
+    _run_scripted_training(monkeypatch, tmp_path, epochs[:2], True)
+    (tmp_path / "best_model.pyt").unlink()
+    capsys.readouterr()
+    # Epoch 1 is the best one, and model.pyt holds epoch 2: nothing to copy
+    with pytest.raises(FileNotFoundError):
+        _run_scripted_training(monkeypatch, tmp_path, epochs, True, already_trained=2)
+    output = capsys.readouterr().out
+    assert "best_model.pyt is missing" in output
+    assert "The best epoch in the log is 1" in output
+
+
+def test_continuing_a_validated_training_without_validation_says_what_follows(
+    monkeypatch, tmp_path, capsys
+):
+    # Epochs without an error rate never replace validated ones, so the
+    # message about the lowest training loss would be wrong here
+    epochs = [(5.0, 0.1, 0.30), (4.0, 0.5, 0.40), (3.0, 0.9, None)]
+    _run_scripted_training(monkeypatch, tmp_path, epochs[:2], True)
+    capsys.readouterr()
+    trained, best = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, False, already_trained=2
+    )
+    assert (trained, best) == ([3], 1)
+    output = capsys.readouterr().out
+    assert "best_model.pyt stays epoch 1" in output
+    assert "lowest training loss" not in output
+
+
 def test_training_without_validation_keeps_the_epoch_with_the_lowest_loss(
     monkeypatch, tmp_path
 ):
@@ -490,6 +562,13 @@ def test_interrupted_save_keeps_the_former_model_file(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         torch_helpers.save_model_parameters(path, model, _NoLoss(), optimizer)
     assert open(path, "rb").read() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["model.pyt"]
+
+    # A process that is killed cannot remove its temporary file. The next
+    # save uses the same name, so the directory does not fill with them.
+    monkeypatch.setattr(torch, "save", real_save)
+    (tmp_path / "model.pyt.tmp").write_bytes(b"left by a killed process")
+    torch_helpers.save_model_parameters(path, model, _NoLoss(), optimizer)
     assert [p.name for p in tmp_path.iterdir()] == ["model.pyt"]
 
     # Interrupted with Ctrl-C: the save is repeated, then the interrupt goes on

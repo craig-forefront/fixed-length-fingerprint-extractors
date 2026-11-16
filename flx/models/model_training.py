@@ -334,6 +334,18 @@ def _validate(
     return result.get_equal_error_rate()
 
 
+def _copy_to_best_model(model_path: str, best_model_path: str) -> None:
+    """
+    Copies model.pyt to best_model.pyt. Under a temporary name first: a crash
+    during the copy must not leave half a best_model.pyt. The temporary name
+    is the same in every run, so a killed process leaves at most one such
+    file, and the next copy overwrites it.
+    """
+    temporary = f"{best_model_path}.tmp"
+    shutil.copyfile(model_path, temporary)
+    os.replace(temporary, best_model_path)
+
+
 def _record_validation(
     log: TrainingLog,
     entry: TrainingLogEntry,
@@ -349,11 +361,7 @@ def _record_validation(
     if validation_eer is not None:
         log.set_validation_result(entry, validation_eer)
     if log.best_entry is entry:
-        # Under a temporary name first: a crash during the copy must not
-        # leave half a best_model.pyt
-        temporary = f"{best_model_path}.tmp{os.getpid()}"
-        shutil.copyfile(model_path, temporary)
-        os.replace(temporary, best_model_path)
+        _copy_to_best_model(model_path, best_model_path)
         print(
             f"Saved epoch {entry.epoch} as best model "
             f"(lowest {log.selection_metric} so far)"
@@ -490,6 +498,24 @@ def train_model(
             model_path,
             best_model_path,
         )
+    elif is_main_process() and exists(model_path) and log.best_entry is not None:
+        # The log gets the result of an epoch before best_model.pyt is
+        # written. A run that was stopped in between (the copy takes as long
+        # as the model file is large) left an older best_model.pyt, or none.
+        if log.best_entry is log.last_entry:
+            # model.pyt holds the newest epoch, which is the best one
+            _copy_to_best_model(model_path, best_model_path)
+            print(
+                f"best_model.pyt: epoch {log.best_entry.epoch}, the newest one "
+                "(copied again from model.pyt)"
+            )
+        elif not exists(best_model_path):
+            print(
+                f"WARNING: {best_model_path} is missing. The best epoch in the "
+                f"log is {log.best_entry.epoch}, and its parameters are not "
+                "stored any more. best_model.pyt is written again only when "
+                "a later epoch is better than that one."
+            )
 
     # Wrap model with DDP for distributed training
     model = wrap_model_ddp(model)
@@ -571,10 +597,22 @@ def train_model(
             )
 
     if validation_fingerprints is None and is_main_process():
-        print(
-            "No validation set: best_model.pyt will be the epoch with the "
-            "lowest training loss, and early stopping is off."
-        )
+        if log.selection_metric == "validation_equal_error_rate":
+            # Only possible when a training with validation is continued
+            # without it; scripts/train_500k.py refuses that
+            print(
+                "WARNING: no validation set in this run, but the log holds "
+                "validated epochs. Epochs without an error rate never replace "
+                f"them: best_model.pyt stays epoch {log.best_entry.epoch}, "
+                "whatever this run trains, and early stopping is off. Continue "
+                "with the validation set of the first run to have the new "
+                "epochs compared."
+            )
+        else:
+            print(
+                "No validation set: best_model.pyt will be the epoch with the "
+                "lowest training loss, and early stopping is off."
+            )
 
     try:
         for epoch in range(start_epoch, num_epochs + 1):
@@ -626,9 +664,10 @@ def train_model(
                 )
 
                 # The log entry is written together with model.pyt, before
-                # the validation, so that the two always describe the same
-                # epoch. A run that is stopped during a long validation then
-                # resumes with the next epoch, not with this one again.
+                # the validation, so that the two describe the same epoch
+                # (but for the moment between the two writes). A run that is
+                # stopped during a long validation then resumes with the next
+                # epoch, not with this one again.
                 entry = TrainingLogEntry(
                     epoch,
                     train_loss,

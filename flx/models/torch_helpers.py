@@ -206,9 +206,11 @@ def save_model_parameters(
 
     The file is written under a temporary name and renamed when it is
     complete, so a crash or an interruption during the save leaves the
-    former file in place and never half a file.
+    former file in place and never half a file. The temporary name is the
+    same in every run (only the main process of a training saves), so what a
+    killed process left behind is overwritten by the next save.
     """
-    temporary = f"{full_param_path}.tmp{os.getpid()}"
+    temporary = f"{full_param_path}.tmp"
 
     def save() -> None:
         torch.save(
