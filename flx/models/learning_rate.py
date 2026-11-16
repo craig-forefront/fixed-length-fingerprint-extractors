@@ -56,6 +56,11 @@ class LearningRateConfig:
             run, or the highest epoch loss in the log of a resumed training if
             that is higher). 0 switches this check off. A loss that is not a
             finite number always stops the training.
+        localization_factor: The parameters of the localization network (the
+            learned alignment of the Loc* variants) use the learning rate of
+            the other parameters times this factor, in every step, also
+            during the warm-up. Variants without localization network ignore
+            it. See LOCALIZATION_LEARNING_RATE_FACTOR in the config.
     """
 
     learning_rate: float = None
@@ -64,6 +69,7 @@ class LearningRateConfig:
     final_factor: float = None
     gradient_clip_norm: float | None = None
     loss_explosion_factor: float = None
+    localization_factor: float = None
 
     def __post_init__(self):
         # The defaults are read here, not in the class body, so that a value
@@ -74,6 +80,7 @@ class LearningRateConfig:
             "schedule": config.LEARNING_RATE_SCHEDULE,
             "final_factor": config.LEARNING_RATE_FINAL_FACTOR,
             "loss_explosion_factor": config.LOSS_EXPLOSION_FACTOR,
+            "localization_factor": config.LOCALIZATION_LEARNING_RATE_FACTOR,
         }
         for name, value in defaults.items():
             if getattr(self, name) is None:
@@ -98,6 +105,14 @@ class LearningRateConfig:
         if self.loss_explosion_factor != 0 and self.loss_explosion_factor <= 1:
             raise ValueError(
                 "loss_explosion_factor must be above 1, or 0 to switch the check off"
+            )
+
+        if not (
+            self.localization_factor > 0 and math.isfinite(self.localization_factor)
+        ):
+            raise ValueError(
+                "localization_factor must be above 0, got "
+                f"{self.localization_factor}"
             )
 
     def effective_warmup_steps(self, total_steps: int) -> int:
@@ -169,9 +184,59 @@ class LearningRateConfig:
         return text
 
 
-def set_learning_rate(optimizer: torch.optim.Optimizer, learning_rate: float) -> None:
+# Name of the localization network inside the Loc* variants
+# (flx/models/deep_print_arch.py) and of the entry of a parameter group that
+# holds the factor of its learning rate
+LOCALIZATION_MODULE = "localization"
+LR_FACTOR_KEY = "lr_factor"
+
+
+def parameter_groups(model: torch.nn.Module, localization_factor: float) -> list[dict]:
+    """
+    The parameters of the model as groups for the optimizer.
+
+    A model without localization network gives one group, as before this
+    function existed. A Loc* variant gives two: first all other parameters,
+    then those of the localization network with the entry
+    lr_factor = localization_factor, which set_learning_rate multiplies into
+    the learning rate of that group.
+    """
+    localization = []
+    others = []
+    for name, parameter in model.named_parameters():
+        # With several GPUs the model is wrapped and the names start with "module."
+        if name.startswith("module."):
+            name = name[len("module.") :]
+        if name.startswith(LOCALIZATION_MODULE + "."):
+            localization.append(parameter)
+        else:
+            others.append(parameter)
+    if len(localization) == 0:
+        return [{"params": others}]
+    return [
+        {"params": others},
+        {"params": localization, LR_FACTOR_KEY: float(localization_factor)},
+    ]
+
+
+def localization_learning_rate(optimizer: torch.optim.Optimizer) -> float | None:
+    """
+    Learning rate that the localization network has at the moment; None if
+    the optimizer has no group for it.
+    """
     for group in optimizer.param_groups:
-        group["lr"] = learning_rate
+        if LR_FACTOR_KEY in group:
+            return group["lr"]
+    return None
+
+
+def set_learning_rate(optimizer: torch.optim.Optimizer, learning_rate: float) -> None:
+    """
+    Sets the learning rate of all parameters. A group with the entry
+    lr_factor (see parameter_groups) gets learning_rate times that factor.
+    """
+    for group in optimizer.param_groups:
+        group["lr"] = learning_rate * group.get(LR_FACTOR_KEY, 1.0)
 
 
 def gradient_norm(parameters) -> float:

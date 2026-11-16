@@ -20,6 +20,8 @@ from flx.models.deep_print_arch import DeepPrintTrainingOutput
 from flx.models.learning_rate import (
     DivergenceGuard,
     LearningRateConfig,
+    localization_learning_rate,
+    parameter_groups,
     set_learning_rate,
 )
 from flx.models.torch_helpers import (
@@ -363,9 +365,13 @@ def train_model(
     log = TrainingLog(join(out_dir, "log.json")) if is_main_process() else None
 
     model = model.to(device=get_device())
+    # The localization network of the Loc* variants gets its own, smaller
+    # learning rate (a second parameter group)
     optimizer = torch.optim.Adam(
-        params=model.parameters(), lr=learning_rate.learning_rate
+        params=parameter_groups(model, learning_rate.localization_factor),
+        lr=learning_rate.learning_rate,
     )
+    set_learning_rate(optimizer, learning_rate.learning_rate)
     loss = loss.to(device=get_device())
     if exists(model_path):
         if is_main_process():
@@ -420,6 +426,13 @@ def train_model(
             "Optimizer: Adam, "
             + learning_rate.describe(total_steps=steps_per_epoch * num_epochs)
         )
+        if localization_learning_rate(optimizer) is not None:
+            print(
+                "Localization network: learning rate times "
+                f"{learning_rate.localization_factor:g} in every step "
+                f"({learning_rate.learning_rate * learning_rate.localization_factor:g} "
+                "after the warm-up)"
+            )
 
     if (validation_fingerprints is None) != (validation_benchmark is None):
         raise ValueError(

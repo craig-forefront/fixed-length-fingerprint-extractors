@@ -18,8 +18,13 @@ import torch
 import tqdm
 
 from flx.data.dataset import Dataset
-from flx.models.learning_rate import gradient_norm, set_learning_rate
+from flx.models.learning_rate import (
+    gradient_norm,
+    parameter_groups,
+    set_learning_rate,
+)
 from flx.models.torch_helpers import get_device
+from flx.setup import config
 
 # Columns of the CSV file
 CSV_COLUMNS = ("step", "learning_rate", "loss", "smoothed_loss", "gradient_norm")
@@ -192,6 +197,7 @@ def run_range_test(
     num_workers: int = 0,
     use_amp: bool = True,
     seed: int = 0,
+    localization_factor: float | None = None,
 ) -> RangeTestResult:
     """
     Trains `model` on batches of `train_set` (as zipped by train_model: image,
@@ -206,12 +212,20 @@ def run_range_test(
         gradient_clip_norm: Same meaning as in LearningRateConfig. Use the
             value of the planned training, because it changes the result.
         use_amp: Use mixed precision on a GPU, as train_model does by default.
+        localization_factor: Factor of the learning rate of the localization
+            network (Loc* variants), as in LearningRateConfig. The rates of
+            the result are those of the other parameters. None uses
+            LOCALIZATION_LEARNING_RATE_FACTOR from the config.
     """
+    if localization_factor is None:
+        localization_factor = config.LOCALIZATION_LEARNING_RATE_FACTOR
     rates = range_test_learning_rates(min_lr, max_lr, num_steps)
     device = get_device()
     model = model.to(device)
     loss_fun = loss_fun.to(device)
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=min_lr)
+    optimizer = torch.optim.Adam(
+        params=parameter_groups(model, localization_factor), lr=min_lr
+    )
     scaler = (
         torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
     )

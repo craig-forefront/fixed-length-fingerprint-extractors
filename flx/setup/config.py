@@ -105,5 +105,12 @@ LOCALIZATION_MAX_SHIFT = 0.5
 # other way round. No training was run with a value above 1.0.
 LOCALIZATION_MAX_SCALE_FACTOR = 1.0
 
+# The parameters of the localization network use the learning rate of the
+# other parameters times this factor. 0.035 is the value of the DeepPrint
+# paper, which states that the network did not converge properly without it.
+# The alignment decides what the whole model sees, so it should change more
+# slowly than the model that learns from it.
+LOCALIZATION_LEARNING_RATE_FACTOR = 0.035
+
 # Change this when switching models DeepPrint has 299 while ViT has 224
 INPUT_SIZE = 299

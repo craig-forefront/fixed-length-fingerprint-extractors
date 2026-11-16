@@ -219,4 +219,17 @@ def load_model_parameters(
     if loss is not None:
         loss.load_state_dict(checkpoint["loss_state_dict"])
     if optim is not None:
-        optim.load_state_dict(checkpoint["optimizer_state_dict"])
+        state = checkpoint["optimizer_state_dict"]
+        if len(state["param_groups"]) != len(optim.param_groups):
+            # A file of a Loc* variant that was written before the
+            # localization network got its own learning rate (one parameter
+            # group instead of two). The running averages of the optimizer
+            # cannot be assigned to the groups; model and loss are loaded.
+            print(
+                f"Note: the optimizer state in {full_param_path} has "
+                f"{len(state['param_groups'])} parameter group(s), the optimizer "
+                f"now has {len(optim.param_groups)}. The optimizer starts "
+                "without its stored state; the model parameters were loaded."
+            )
+        else:
+            optim.load_state_dict(state)
