@@ -8,8 +8,9 @@ your own data in an air-gapped environment. The route it describes uses three sc
 2. `scripts/find_learning_rate.py` suggests a learning rate,
 3. `scripts/train_500k.py` trains the model.
 
-Every command in this guide was run at least once on a small set of real prints on a CPU (12 and 32 images from
-three or four kinds of image files; see [What was run for this guide](#what-was-run-for-this-guide)). Nothing in it
+Every command in this guide except the `torchrun` ones (several GPUs) was run at least once on a small set of
+real prints on a CPU (12 and 32 images from three or four kinds of image files; the table
+[What was run for this guide](#what-was-run-for-this-guide) lists each one and with which options). Nothing in it
 was run on a GPU or on a large dataset. For large datasets read
 [Above about one million subjects](#above-about-one-million-subjects) before you plan anything, and
 [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
@@ -301,8 +302,10 @@ interrupted and is continued.
 1. **Make the file list once**, so that every process works on the same list in the same order:
 
    ```bash
-   cd data/fingerprints/my-dataset && find . -name '*.png' | sort > ../my-dataset-files.txt
+   (cd data/fingerprints/my-dataset && find . -name '*.png' | sort > ../my-dataset-files.txt)
    ```
+
+   The parentheses keep your shell in the repository root, where the next commands must be started.
 
    Without `--file_list` the script walks the image directory in sorted order itself, which gives the same list as
    long as no file is added or removed.
@@ -467,7 +470,7 @@ took a resolution "from metadata of the file" which you did not expect, see
 | `model.pyt` | The model, the loss and the optimizer after the newest epoch. The training continues from it |
 | `best_model.pyt` | A copy of `model.pyt` of the best epoch so far |
 | `log.json` | One entry per epoch, see [Step 8](#step-8-monitor-training-progress) |
-| `training_settings.json` | The settings of the training. Needed to continue it and to load the model later |
+| `training_settings.json` | The settings of the training, as of the last run that trained an epoch. Needed to continue it and to load the model later |
 | `data_preparation.json` | The image preparation settings alone (also part of `training_settings.json`) |
 
 ### Step 7: Continue a training, or start again
@@ -494,12 +497,26 @@ that overwrites a training.
   continued training uses the factor of the new command.
 - **If nothing is left to train**, the script says "Nothing was trained in this run". That is the case when the
   log already has `--num_epochs` epochs, or when the training ended by early stopping. A changed learning rate
-  has no effect on a finished training: raise `--num_epochs` to train further epochs with it, or use a new
-  `--output_dir` to train again from the start.
+  has no effect on a finished training. What trains further epochs depends on how it ended, and the script's
+  message says which case it is:
+  - the log has `--num_epochs` epochs: raise `--num_epochs`;
+  - it ended by early stopping (`--patience` epochs without a lower error rate): raise `--patience` (or pass
+    `--patience 0`); a larger `--num_epochs` alone trains nothing;
+  - or use a new `--output_dir` to train again from the start.
 
 So "divide the learning rate by 3 and start again", as the sections below sometimes advise, means: a new
 `--output_dir` if you want a new training, the same one if you want to continue from the last saved epoch with
 the lower rate.
+
+The settings files are written when a new training starts, after the file check, and again after every run that
+trained an epoch. A start that is refused, or that trains nothing, does not change them, and a refused first start
+leaves the output directory empty. The changes that the script lists are therefore changes against the last run
+that trained.
+
+If a run was stopped while `best_model.pyt` was being written, the next start writes it again from `model.pyt`
+(it prints "best_model.pyt: epoch N ... copied again"). While `model.pyt` or `best_model.pyt` is written, a file
+`model.pyt.tmp` or `best_model.pyt.tmp` of the same size exists; a process that is killed outright can leave it
+behind, and the next save overwrites it.
 
 A directory that was written before `training_settings.json` existed is continued with a note; only its image
 preparation can be compared.
@@ -1766,7 +1783,7 @@ the start, the polarity warnings of the extraction, and whether the training acc
 
 ```bash
 # File list for the extraction
-cd data/fingerprints/my-dataset && find . -name '*.png' | sort > ../my-dataset-files.txt && cd -
+(cd data/fingerprints/my-dataset && find . -name '*.png' | sort > ../my-dataset-files.txt)
 
 # Extract minutiae (in the environment of the minutiae extractor)
 python scripts/extract_minutiae.py --input_dir data/fingerprints/my-dataset --output_dir data/poses/my-dataset --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --skip_existing
@@ -1806,10 +1823,12 @@ All on one machine with 4 CPU cores and no GPU.
 | Step 7 on a second set: the same command with another learning rate; with `--localization off`; with `--num_epochs 3` and another learning rate | 32 prints of 8 fingers as 500, 1000 and 385 ppi files and 1000 ppi negatives | nothing trained; refused with exit status 2; one more epoch |
 | The log snippets of Step 8 | the model of the 12 prints | ran |
 | Steps 9 and 10 and the snippet under "What to watch" in the alignment section | the same model, embedding its own 12 training and validation prints | 12 embeddings of 512 values, saved and loaded again; the error rates of a model after 4 training steps mean nothing |
-| `python -m pytest -q` | | 352 passed |
+| `python -m pytest -q` | | 358 passed |
 | The offline `pip install ... -e .` of AIRGAP_INSTALLATION.md | a fresh environment with only setuptools and wheel from a local directory | installs with `--no-deps`; without it, it names the first missing dependency, as that guide says |
 
-The commands were started from another directory than the repository root, with the script paths adjusted.
+These commands were started from another directory than the repository root, with the script paths adjusted. A
+later review of this guide reports that the commands without `torchrun` also ran from the repository root as
+written, on 12 prints.
 
 Not run: anything on a GPU, `torchrun`, the `pip download` and the other install commands of
 AIRGAP_INSTALLATION.md, the notebooks, and any dataset larger than 440 images. The measurement

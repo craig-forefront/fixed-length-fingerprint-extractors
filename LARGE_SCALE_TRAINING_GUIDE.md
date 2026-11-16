@@ -50,9 +50,12 @@ torchrun --nproc_per_node=4 scripts/train_500k.py \
 
 ## Before a long run
 
-1. **Run the whole route on a subset** of a few thousand subjects from all sensors: extraction, range test,
-   two epochs of training, embeddings. Every mistake in the layout, the resolutions or the polarity shows there
-   in minutes instead of days.
+1. **Run the whole route on a subset** with prints from all sensors: extraction, range test, two epochs of
+   training, embeddings. Mistakes in the layout, the resolutions or the polarity show there, before the long run.
+   Choose the size by the extraction, which is the slow part: it took 19 to 60 seconds per print in one CPU
+   process here (no GPU speed was measured), so a few hundred prints take hours in one process and a few thousand
+   subjects with 10 prints each take days unless the extraction runs in many shards. A few hundred prints from
+   every sensor are enough for the mistakes named above; they are not enough to judge the accuracy.
 2. **Read the first lines of the training output**: the variant, the number of training and validation subjects,
    and the block "Resolution of ... training images".
 3. **Find the learning rate for the batch size and number of GPUs of the real run**, see
