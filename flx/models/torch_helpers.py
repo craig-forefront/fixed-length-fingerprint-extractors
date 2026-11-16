@@ -1,5 +1,4 @@
 import os
-import time
 
 import torch
 import torch.distributed as dist
@@ -203,22 +202,35 @@ def save_model_parameters(
     optim: torch.optim.Optimizer,
 ) -> None:
     """
-    Tries to save the parameters of model and optimizer in the given path
+    Saves the parameters of model, loss and optimizer in the given path.
+
+    The file is written under a temporary name and renamed when it is
+    complete, so a crash or an interruption during the save leaves the
+    former file in place and never half a file.
     """
-    try:
+    temporary = f"{full_param_path}.tmp{os.getpid()}"
+
+    def save() -> None:
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
                 "loss_state_dict": loss.state_dict(),
                 "optimizer_state_dict": optim.state_dict(),
             },
-            full_param_path,
+            temporary,
         )
-    except KeyboardInterrupt:
-        print("\n>>>>>>>>> Model is being saved! Will exit when done <<<<<<<<<<\n")
-        save_model_parameters(full_param_path, model, optim)
-        time.sleep(10)
-        raise KeyboardInterrupt()
+        os.replace(temporary, full_param_path)
+
+    try:
+        try:
+            save()
+        except KeyboardInterrupt:
+            print("\n>>>>>>>>> Model is being saved! Will exit when done <<<<<<<<<<\n")
+            save()
+            raise
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def load_model_parameters(

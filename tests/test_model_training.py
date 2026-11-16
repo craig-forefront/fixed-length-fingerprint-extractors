@@ -466,3 +466,47 @@ def test_training_batch_size_can_be_set():
         assert torch_helpers.get_training_batch_size() == 24
     finally:
         torch_helpers.set_training_batch_size(torch_helpers.DEFAULT_TRAINING_BATCH_SIZE)
+
+
+def test_interrupted_save_keeps_the_former_model_file(tmp_path, monkeypatch):
+    # model.pyt is the only copy of the newest epoch. A save that fails half
+    # way must not destroy it.
+    from flx.models import torch_helpers
+
+    path = str(tmp_path / "model.pyt")
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.Adam(model.parameters())
+    torch_helpers.save_model_parameters(path, model, _NoLoss(), optimizer)
+    before = open(path, "rb").read()
+
+    real_save = torch.save
+
+    def failing_save(obj, file):
+        with open(file, "wb") as handle:
+            handle.write(b"half a file")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(torch, "save", failing_save)
+    with pytest.raises(OSError):
+        torch_helpers.save_model_parameters(path, model, _NoLoss(), optimizer)
+    assert open(path, "rb").read() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["model.pyt"]
+
+    # Interrupted with Ctrl-C: the save is repeated, then the interrupt goes on
+    calls = []
+
+    def interrupted_once(obj, file):
+        calls.append(file)
+        if len(calls) == 1:
+            raise KeyboardInterrupt()
+        real_save(obj, file)
+
+    monkeypatch.setattr(torch, "save", interrupted_once)
+    with torch.no_grad():
+        model.weight.fill_(7.0)
+    with pytest.raises(KeyboardInterrupt):
+        torch_helpers.save_model_parameters(path, model, _NoLoss(), optimizer)
+    assert len(calls) == 2
+    stored = torch.load(path, weights_only=False)["model_state_dict"]["weight"]
+    assert float(stored) == 7.0
+    assert [p.name for p in tmp_path.iterdir()] == ["model.pyt"]

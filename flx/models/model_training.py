@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import json
 import math
+import os
 from os.path import join, exists
 
 import tqdm
@@ -348,7 +349,11 @@ def _record_validation(
     if validation_eer is not None:
         log.set_validation_result(entry, validation_eer)
     if log.best_entry is entry:
-        shutil.copyfile(model_path, best_model_path)
+        # Under a temporary name first: a crash during the copy must not
+        # leave half a best_model.pyt
+        temporary = f"{best_model_path}.tmp{os.getpid()}"
+        shutil.copyfile(model_path, temporary)
+        os.replace(temporary, best_model_path)
         print(
             f"Saved epoch {entry.epoch} as best model "
             f"(lowest {log.selection_metric} so far)"
