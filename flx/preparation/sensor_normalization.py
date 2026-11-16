@@ -33,6 +33,7 @@ The "ridges" column is optional, and cells can be left empty.
 """
 
 import csv
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -311,9 +312,13 @@ class SensorNormalizer:
         self._assume_ppi = None if assume_ppi is None else float(assume_ppi)
         self._ridges = ridges
         self._target_ppi = float(target_ppi)
-        self._manifest_path = manifest if isinstance(manifest, str) else None
-        if isinstance(manifest, str):
-            manifest = read_manifest(manifest)
+        self._manifest_path = None
+        self._manifest_sha256 = None
+        if isinstance(manifest, (str, os.PathLike)):
+            self._manifest_path = str(manifest)
+            with open(manifest, "rb") as file:
+                self._manifest_sha256 = hashlib.sha256(file.read()).hexdigest()
+            manifest = read_manifest(self._manifest_path)
         self._manifest: dict[str, tuple[Optional[float], Optional[str]]] = manifest or {}
 
     @property
@@ -321,11 +326,15 @@ class SensorNormalizer:
         return self._target_ppi
 
     def settings(self) -> dict:
-        """The settings as a dictionary of plain values, to be stored with the results."""
+        """
+        The settings as a dictionary of plain values, to be stored with the
+        results. The manifest is named by the SHA-256 of its content, so that
+        the same manifest under another path counts as the same setting.
+        """
         return {
             "target_ppi": self._target_ppi,
             "ppi": self._ppi,
-            "ppi_manifest": self._manifest_path,
+            "ppi_manifest_sha256": self._manifest_sha256,
             "ppi_manifest_entries": len(self._manifest),
             "assume_ppi": self._assume_ppi,
             "ridges": self._ridges,

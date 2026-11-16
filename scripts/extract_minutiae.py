@@ -2,14 +2,16 @@
 Batch minutiae extraction script using the minutiae_extractor (FingerFlow).
 
 This script extracts minutiae from all fingerprint images and saves them
-as .mnt files for use in DeepPrint training.
+as .mnt files for use in DeepPrint training. It is made for prints from
+different sensors and for very large numbers of files.
 
 Prerequisites:
     The `fingerflow` package of the minutiae_extractor repository, e.g.
         pip install -e /path/to/minutiae_extractor
-    in a revision that has the direction refinement and the image_dpi option
-    used here (src/fingerflow/extractor/direction_sense.py; the `fingerflow`
-    release on PyPI does not have them). See AIRGAP_INSTALLATION.md.
+    in a revision whose Extractor has the image_dpi option and accepts None
+    for the ClassifyNet and CoreNet paths (the `fingerflow` release on PyPI
+    has neither). See AIRGAP_INSTALLATION.md. Pillow is needed to read the
+    resolution from the image files. torch is not needed.
 
 Usage:
     python scripts/extract_minutiae.py \
@@ -17,146 +19,183 @@ Usage:
         --output_dir /path/to/minutiae \
         --coarse_net /path/to/CoarseNet.h5 \
         --fine_net /path/to/FineNet.h5 \
-        --classify_net /path/to/ClassifyNet_6_classes.h5 \
-        --core_net /path/to/CoreNet.weights \
-        --image_dpi 500
+        --ppi_manifest /path/to/resolutions.csv
 
-Feed the images in their native resolution as 8-bit grayscale. --image_dpi is
-only used to find the direction of the minutiae and depends on the ridge
-period of the images: roughly 500 * period_px / 9.5 (500 for ordinary 500 ppi
-prints). Extract all .mnt files of a dataset with the same setting.
+Resolution (ppi = pixels per inch):
+    The minutiae extractor only works near 500 ppi and does not rescale. This
+    script therefore resamples every image to 500 ppi before the extraction.
+    The resolution of a file is taken from, in this order:
+        --ppi 1000           all files have this resolution
+        --ppi_manifest FILE  CSV with the columns path,ppi[,ridges]; a row is
+                             for one file or for a directory (all files below
+                             it); paths relative to --input_dir
+        the metadata of the image file, if the value is between 200 and 2100
+        --assume_ppi 500     for files without a usable value
+    A file whose resolution is not known this way fails (it is written to the
+    error log); the resolution is never guessed. Images that are at 500 ppi are
+    used unchanged.
 
-The exit status is 1 if the extraction failed for any image (see
-extraction_errors.txt in the output directory). The script stops with an
-exception if the extractor itself can not be set up.
+    The minutiae are written in the pixels of the 500 ppi image, and the header
+    of the .mnt file holds its size. scripts/train_500k.py loads the images in
+    the same way (same options), so the minutiae fit the training images.
+
+Ridge polarity:
+    The extractor expects dark ridges on a light background.
+        --ridges dark    the images are like that (default)
+        --ridges light   light ridges on a dark background: the images are
+                         inverted
+        --ridges auto    decided per image from its background; images
+                         without background are taken as dark
+    A "ridges" column in the manifest sets it per file or directory. Every
+    image is checked: one that looks different from what it was taken to be
+    is written to extraction_warnings.txt (and still extracted).
+
+Very large file lists:
+    --skip_existing              leave out images that already have a .mnt
+                                 file; this continues an interrupted run. A
+                                 .mnt file is only visible when it is complete.
+    --num_shards N --shard_index I
+                                 extract every N-th image, starting with image
+                                 I (0 .. N-1) of the list. Start one process
+                                 per shard, on as many machines as you like.
+    --file_list FILE             text file with one image path per line,
+                                 relative to --input_dir, instead of scanning
+                                 --input_dir. Make it once, so that all shards
+                                 use the same list.
+    --workers W                  worker processes of this shard
+
+    One bad file never stops the run. Failures are written to
+    extraction_errors.txt in the output directory as they happen (with
+    shards: extraction_errors.shard-00003-of-00016.txt), one line per file:
+    path, tab, reason. The exit status is 1 if the extraction failed for any
+    image of this run and 0 otherwise; 2 means that the run did not start.
+    The script stops with an exception if the extractor itself can not be
+    set up.
+
+    All .mnt files of one output directory must come from the same settings.
+    The first run stores them in extraction_settings.json; a run with other
+    settings refuses to start (see --allow_settings_change).
+
+Minutia class:
+    --classify_net is optional. Without it the minutiae are not classified
+    and the class index in the .mnt files is -1. DeepPrint does not use the
+    class, and leaving it out saves one network call per minutia. CoreNet is
+    never run, because the core points are not written (--core_net is accepted
+    and ignored).
+
+--image_dpi is only used to find the direction of the minutiae. The images
+are at 500 ppi after the resampling, so leave it at 500.
 
 Output format (.mnt files):
     Line 1: <num_minutiae>
-    Line 2: <image_width> <image_height>
+    Line 2: <image_width> <image_height>   (of the image at 500 ppi)
     Lines 3+: <x> <y> <angle_radians> <class_index> <direction_confidence>
+    Last line: # <how the image was prepared>
 
-    x is the column and y the row of the image (y pointing down). The angle is
-    the direction of the minutia, the direction vector is (cos(angle), sin(angle))
-    in these axes.
+    x is the column and y the row of the 500 ppi image (y pointing down). The
+    angle is the direction of the minutia, the direction vector is
+    (cos(angle), sin(angle)) in these axes.
 """
 
 import argparse
 import os
 import sys
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing
 
-import cv2
+# The flx package of this repository, also when it is not installed
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import tqdm
 
-
-def get_extractor(model_paths, image_dpi):
-    """The extractor of this process, the models are loaded once."""
-    # Import inside function for multiprocessing compatibility
-    from fingerflow.extractor import Extractor
-
-    if not hasattr(get_extractor, '_extractor'):
-        get_extractor._extractor = Extractor(
-            model_paths['coarse_net'],
-            model_paths['fine_net'],
-            model_paths['classify_net'],
-            model_paths['core_net'],
-            image_dpi=image_dpi,
-        )
-    return get_extractor._extractor
+from flx.preparation import minutiae_extraction, sensor_normalization
+from flx.preparation.minutiae_extraction import (
+    ExtractionConfig,
+    SettingsChangedError,
+    check_settings,
+    iter_file_list,
+    iter_image_paths,
+    run_extraction,
+    select_shard,
+    shard_suffix,
+)
 
 
-def extract_single_image(args_tuple):
+def extract_single_image(image_path, output_path, model_paths, normalizer, image_dpi=500):
     """
     Extract minutiae from a single image.
 
-    Args:
-        args_tuple: (image_path, output_path, model_paths, image_dpi)
-
     Returns:
-        (image_path, success, error_message)
+        (image_path, success, error_message, warning, num_minutiae)
 
     An extractor that can not be set up (missing package or model files,
-    version without the image_dpi option) is not an error of the image:
+    version without the options used here) is not an error of the image:
     that exception is raised.
     """
-    image_path, output_path, model_paths, image_dpi = args_tuple
-
-    extractor = get_extractor(model_paths, image_dpi)
-
-    try:
-        # Load image
-        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
-            return (image_path, False, "Could not load image")
-
-        height, width = image.shape[:2]
-
-        # Extract minutiae
-        results = extractor.extract_minutiae(image)
-        minutiae_df = results['minutiae']
-
-        # Create output directory if needed
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-        # Save in .mnt format
-        with open(output_path, 'w') as f:
-            f.write(f"{len(minutiae_df)}\n")
-            f.write(f"{width} {height}\n")
-            for _, row in minutiae_df.iterrows():
-                f.write(
-                    f"{row['x']} {row['y']} {row['angle']} "
-                    f"{int(row['class'])} {row['direction_confidence']}\n"
-                )
-
-        return (image_path, True, None)
-
-    except Exception as e:
-        return (image_path, False, str(e))
+    minutiae_extraction.init_worker(ExtractionConfig(model_paths, normalizer, image_dpi))
+    return minutiae_extraction.extract_one((str(image_path), str(output_path)))
 
 
-def find_images(input_dir: str, extensions: tuple = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')):
-    """Find all image files in directory recursively."""
-    input_path = Path(input_dir)
-    images = []
-    for ext in extensions:
-        images.extend(input_path.rglob(f"*{ext}"))
-        images.extend(input_path.rglob(f"*{ext.upper()}"))
-    return sorted(set(images))
+def find_images(input_dir: str, extensions: tuple = minutiae_extraction.IMAGE_EXTENSIONS):
+    """Find all image files in directory recursively, in a fixed order."""
+    return [Path(input_dir) / path for path in iter_image_paths(input_dir, extensions)]
 
 
 def get_output_path(image_path: Path, input_dir: Path, output_dir: Path) -> Path:
     """Convert image path to corresponding .mnt output path."""
-    relative = image_path.relative_to(input_dir)
-    return output_dir / relative.with_suffix('.mnt')
+    relative = Path(image_path).relative_to(input_dir)
+    return Path(output_dir) / relative.with_suffix('.mnt')
 
 
 def main() -> int:
     """Returns the exit status: 1 if the extraction failed for any image, else 0."""
     parser = argparse.ArgumentParser(
-        description="Extract minutiae from fingerprint images using FingerFlow"
+        description="Extract minutiae from fingerprint images using FingerFlow",
+        epilog="See the docstring at the top of this script and the section "
+               "'Dataset Preparation' of TRAINING_PIPELINE_GUIDE.md.",
     )
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Directory containing fingerprint images")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Directory to save .mnt files")
+    parser.add_argument("--file_list", type=str, default=None,
+                        help="Text file with one image path per line, relative to "
+                             "--input_dir (default: all images below --input_dir)")
     parser.add_argument("--coarse_net", type=str, required=True,
                         help="Path to CoarseNet model weights")
     parser.add_argument("--fine_net", type=str, required=True,
                         help="Path to FineNet model weights")
-    parser.add_argument("--classify_net", type=str, required=True,
-                        help="Path to ClassifyNet model weights")
-    parser.add_argument("--core_net", type=str, required=True,
-                        help="Path to CoreNet model weights")
+    parser.add_argument("--classify_net", type=str, default=None,
+                        help="Path to ClassifyNet model weights. Optional: without it the "
+                             "minutiae are not classified (class index -1), which DeepPrint "
+                             "does not need, and the extraction is faster")
+    parser.add_argument("--core_net", type=str, default=None,
+                        help="Not used: the core points are not written, so CoreNet is not run")
     parser.add_argument("--image_dpi", type=float, default=500,
-                        help="Resolution of the images, used to find the direction of the "
-                             "minutiae; roughly 500 * ridge_period_px / 9.5 (default: 500)")
+                        help="Used to find the direction of the minutiae only. The images are "
+                             "at 500 ppi after the resampling: leave it at 500 (default)")
+    sensor_normalization.add_arguments(parser)
     parser.add_argument("--workers", type=int, default=1,
-                        help="Number of parallel workers (default: 1, GPU memory limited)")
+                        help="Number of parallel worker processes (default: 1, GPU memory limited)")
     parser.add_argument("--skip_existing", action="store_true",
-                        help="Skip images that already have .mnt files")
+                        help="Skip images that already have .mnt files (continues a run)")
+    parser.add_argument("--num_shards", type=int, default=1,
+                        help="Split the image list into this many shards (default: 1)")
+    parser.add_argument("--shard_index", type=int, default=0,
+                        help="The shard that this process extracts, 0 .. num_shards-1 (default: 0)")
+    parser.add_argument("--allow_settings_change", action="store_true",
+                        help="Start although the output directory was written with other "
+                             "settings, and store the new ones. Only together with a full "
+                             "new extraction (no --skip_existing), else the directory "
+                             "holds files from two settings")
     args = parser.parse_args()
+
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        parser.error("--shard_index must be from 0 to --num_shards - 1")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+    if args.allow_settings_change and args.skip_existing:
+        parser.error("--allow_settings_change can not be combined with --skip_existing: "
+                     "the files that are skipped were extracted with the former settings")
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
@@ -165,88 +204,75 @@ def main() -> int:
         'coarse_net': args.coarse_net,
         'fine_net': args.fine_net,
         'classify_net': args.classify_net,
-        'core_net': args.core_net,
     }
+    try:
+        normalizer = sensor_normalization.from_arguments(args, str(input_dir))
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
 
-    # Find all images
-    print(f"Scanning {input_dir} for images...")
-    images = find_images(input_dir)
-    print(f"Found {len(images):,} images")
+    settings = dict(normalizer.settings())
+    settings["image_dpi"] = args.image_dpi
+    settings["classified"] = args.classify_net is not None
+    try:
+        check_settings(str(output_dir), settings, args.allow_settings_change)
+    except SettingsChangedError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
 
-    # Prepare work items
-    work_items = []
-    skipped = 0
-    for image_path in images:
-        output_path = get_output_path(image_path, input_dir, output_dir)
-        if args.skip_existing and output_path.exists():
-            skipped += 1
-            continue
-        work_items.append((image_path, str(output_path), model_paths, args.image_dpi))
-
-    if skipped > 0:
-        print(f"Skipping {skipped:,} images with existing .mnt files")
-
-    print(f"Processing {len(work_items):,} images...")
-
-    if len(work_items) == 0:
-        print("Nothing to process!")
-        return 0
-
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Process images
-    success_count = 0
-    error_count = 0
-    errors = []
-
-    if args.workers == 1:
-        # Single process (simpler, better for GPU)
-        for item in tqdm.tqdm(work_items, desc="Extracting minutiae"):
-            image_path, success, error = extract_single_image(item)
-            if success:
-                success_count += 1
-            else:
-                error_count += 1
-                errors.append((image_path, error))
+    if args.file_list is not None:
+        print(f"Reading the image list {args.file_list}")
+        relative_paths = iter_file_list(args.file_list)
     else:
-        # Multi-process (for CPU-based extraction)
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(extract_single_image, item): item for item in work_items}
-            try:
-                for future in tqdm.tqdm(as_completed(futures), total=len(work_items), desc="Extracting minutiae"):
-                    image_path, success, error = future.result()
-                    if success:
-                        success_count += 1
-                    else:
-                        error_count += 1
-                        errors.append((image_path, error))
-            except BaseException:
-                # The extractor could not be set up, do not try the other images
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
+        print(f"Scanning {input_dir} for images...")
+        relative_paths = iter_image_paths(str(input_dir))
+    relative_paths = select_shard(relative_paths, args.num_shards, args.shard_index)
+    jobs = (
+        (str(input_dir / path), str(get_output_path(input_dir / path, input_dir, output_dir)))
+        for path in relative_paths
+    )
+
+    suffix = shard_suffix(args.num_shards, args.shard_index)
+    error_log = output_dir / f"extraction_errors{suffix}.txt"
+    warning_log = output_dir / f"extraction_warnings{suffix}.txt"
+
+    print(f"Images:   {normalizer.describe()}")
+    print(f"Classes:  {'ClassifyNet' if args.classify_net else 'not classified (class index -1)'}")
+    if args.num_shards > 1:
+        print(f"Shard:    {args.shard_index} of {args.num_shards} (index 0 .. {args.num_shards - 1})")
+
+    with tqdm.tqdm(desc="Extracting minutiae", unit="img") as progress:
+        summary = run_extraction(
+            ExtractionConfig(model_paths, normalizer, args.image_dpi),
+            jobs,
+            str(error_log),
+            str(warning_log),
+            workers=args.workers,
+            skip_existing=args.skip_existing,
+            progress=progress,
+        )
 
     # Summary
     print(f"\n{'=' * 60}")
     print(f"Extraction complete!")
-    print(f"  Successful: {success_count:,}")
-    print(f"  Failed:     {error_count:,}")
+    print(f"  Successful: {summary.extracted:,}")
+    print(f"  Skipped:    {summary.skipped:,} (already had a .mnt file)")
+    print(f"  Failed:     {summary.failed:,}")
+    print(f"  Warnings:   {summary.warnings:,}")
+    print(f"  Extracted without any minutia: {summary.without_minutiae:,}")
     print(f"  Output dir: {output_dir}")
     print(f"{'=' * 60}")
 
-    if errors:
-        print(f"\nFirst 10 errors:")
-        for path, error in errors[:10]:
+    if summary.warnings:
+        print(f"\nWarnings (files that were extracted but look wrong): {warning_log}")
+    if summary.failed:
+        print(f"\nFirst {len(summary.first_failures)} errors:")
+        for path, error in summary.first_failures:
             print(f"  {path}: {error}")
-
-        # Save error log
-        error_log = output_dir / "extraction_errors.txt"
-        with open(error_log, 'w') as f:
-            for path, error in errors:
-                f.write(f"{path}\t{error}\n")
         print(f"\nFull error log saved to: {error_log}")
+        print("Files in the error log have no .mnt file. After the cause is removed, "
+              "run the same command with --skip_existing to extract only them.")
 
-    return 1 if error_count > 0 else 0
+    return 1 if summary.failed > 0 else 0
 
 
 if __name__ == "__main__":

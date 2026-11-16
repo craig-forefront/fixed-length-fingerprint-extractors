@@ -271,7 +271,7 @@ def test_the_preparation_does_not_need_torch():
     """The minutiae extraction runs in an environment without torch."""
     code = (
         "import sys; sys.modules['torch'] = None; sys.modules['torchvision'] = None\n"
-        "import flx.preparation.sensor_normalization\n"
+        "import flx.preparation.sensor_normalization, flx.preparation.minutiae_extraction\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
