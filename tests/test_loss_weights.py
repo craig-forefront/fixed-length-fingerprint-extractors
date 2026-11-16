@@ -234,3 +234,67 @@ def test_default_center_weight_keeps_the_former_loss_for_a_batch_of_64():
     mean_distance, _ = _embedding_loss(64, 1, LossWeights(cross_entropy=0, center=1))
     loss, _ = _embedding_loss(64, 1, only_center)
     assert loss == pytest.approx(0.125 * 64 * mean_distance, rel=1e-5)
+
+
+def _map_loss(loss_class, predicted, target, map_weights):
+    """Map part of the loss and its recorded value."""
+    torch.manual_seed(0)
+    weights = LossWeights(cross_entropy=0, center=0, minutia_map=1)
+    if loss_class is DeepPrintLoss_Minu:
+        loss_fun = DeepPrintLoss_Minu(6, 16, weights)
+    else:
+        loss_fun = DeepPrintLoss_TexMinu(6, 16, 16, weights)
+    batch_size = predicted.shape[0]
+    output = _output(batch_size)
+    output.minutia_maps = predicted
+    loss = loss_fun(output, torch.arange(batch_size) % 6, target, map_weights)
+    return float(loss), loss_fun.get_recorded_loss()["minutia_map_loss"], loss_fun
+
+
+@pytest.mark.parametrize("loss_class", [DeepPrintLoss_Minu, DeepPrintLoss_TexMinu])
+def test_map_loss_is_the_mean_over_the_samples_that_have_a_map(loss_class):
+    generator = torch.Generator().manual_seed(3)
+    predicted = torch.rand(5, 6, 8, 8, generator=generator)
+    target = torch.rand(5, 6, 8, 8, generator=generator)
+    with_map, recorded_with_map, _ = _map_loss(
+        loss_class, predicted, target, torch.ones(5)
+    )
+    assert with_map > 0
+    # Three more samples without a map (weight 0), as in a mixed batch
+    mixed, recorded_mixed, loss_fun = _map_loss(
+        loss_class,
+        torch.cat([predicted, torch.rand(3, 6, 8, 8, generator=generator)]),
+        torch.cat([target, torch.zeros(3, 6, 8, 8)]),
+        # The default collate function makes float64 weights
+        torch.tensor([1.0] * 5 + [0.0] * 3, dtype=torch.float64),
+    )
+    assert mixed == pytest.approx(with_map, rel=1e-5)
+    assert recorded_mixed == pytest.approx(with_map, rel=1e-5)
+    assert recorded_with_map == pytest.approx(with_map, rel=1e-5)
+    loss_fun.reset_recorded_loss()
+    assert loss_fun.get_recorded_loss()["minutia_map_loss"] == 0
+
+
+@pytest.mark.parametrize("loss_class", [DeepPrintLoss_Minu, DeepPrintLoss_TexMinu])
+def test_map_loss_of_a_batch_without_any_map_is_zero_and_has_no_gradient(loss_class):
+    predicted = torch.rand(4, 6, 8, 8, requires_grad=True)
+    torch.manual_seed(0)
+    loss, recorded, _ = _map_loss(
+        loss_class, predicted, torch.zeros(4, 6, 8, 8), torch.zeros(4)
+    )
+    assert loss == 0
+    assert recorded == 0
+    weights = LossWeights(cross_entropy=0, center=0, minutia_map=1)
+    loss_fun = DeepPrintLoss_TexMinu(6, 16, 16, weights)
+    output = _output()
+    output.minutia_maps = predicted
+    loss_fun(output, torch.arange(4), torch.zeros(4, 6, 8, 8), torch.zeros(4)).backward()
+    assert torch.isfinite(predicted.grad).all()
+    assert float(predicted.grad.abs().max()) == 0
+
+
+def test_map_loss_does_not_turn_the_loss_into_float64():
+    weights = torch.ones(4, dtype=torch.float64)
+    loss_fun = DeepPrintLoss_TexMinu(6, 16, 16)
+    loss = loss_fun(_output(), torch.arange(4), torch.zeros(4, 6, 8, 8), weights)
+    assert loss.dtype == torch.float32

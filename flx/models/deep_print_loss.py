@@ -48,10 +48,26 @@ def _compute_minutia_map_loss(
     x: torch.Tensor,
     minutia_maps: torch.Tensor,
     minutia_map_weights: torch.Tensor,
-) -> torch.Tensor:
-    mm_squared_diff = (x - minutia_maps) ** 2
-    mm_mse = mm_squared_diff.reshape(minutia_map_weights.shape[0], -1).mean(dim=1)
-    return (mm_mse * minutia_map_weights).mean()
+) -> tuple[torch.Tensor, float]:
+    """
+    Squared difference between the predicted maps x and the target maps, as
+    the mean over the cells of a map and the weighted mean over the samples.
+
+    The weight of a sample is 1 if it has a target map and 0 if it has none
+    (see MinutiaMapLoader.get). The loss is divided by the sum of the weights,
+    not by the batch size, so that the map loss counts the same whether or
+    not the batch also contains samples without a map. A batch without any
+    map has the loss 0.
+
+    @returns : The loss and the sum of the weights (the number of samples with a map)
+    """
+    weights = minutia_map_weights.to(dtype=x.dtype)
+    mm_squared_diff = (x - minutia_maps.to(dtype=x.dtype)) ** 2
+    mm_mse = mm_squared_diff.reshape(weights.shape[0], -1).mean(dim=1)
+    weight_sum = weights.sum()
+    # Without any map the sum is 0; dividing by 1 then keeps the loss at 0
+    loss = (mm_mse * weights).sum() / torch.clamp(weight_sum, min=1e-12)
+    return loss, float(weight_sum.detach().item())
 
 
 class _DeepPrint_Embedding_Loss(nn.Module):
@@ -180,6 +196,7 @@ class DeepPrintLoss_Minu(nn.Module):
             weights=self.weights,
         )
         self.minu_map_loss_sum: float = 0
+        self.n_minu_maps: float = 0
 
     def forward(
         self,
@@ -196,26 +213,29 @@ class DeepPrintLoss_Minu(nn.Module):
         minutia_loss = self.minu_loss_fun(
             output.minutia_embeddings, output.minutia_logits, labels
         )
-        mm_loss = _compute_minutia_map_loss(
+        mm_loss, n_with_map = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
-        # The map loss is the mean over the batch, so it counts once per sample
+        # The map loss is the mean over the samples that have a map
         self.minu_map_loss_sum += (
-            self.weights.minutia_map * mm_loss.detach().item() * labels.shape[0]
+            self.weights.minutia_map * mm_loss.detach().item() * n_with_map
         )
+        self.n_minu_maps += n_with_map
         return minutia_loss + self.weights.minutia_map * mm_loss
 
     def get_recorded_loss(self) -> dict:
         return {
             "minutia_loss": self.minu_loss_fun.get_recorded_loss(),
-            "minutia_map_loss": self.minu_map_loss_sum / self.minu_loss_fun.n_datapoints
-            if self.minu_loss_fun.n_datapoints > 0
+            # Mean over the samples that had a map (0 if none had one)
+            "minutia_map_loss": self.minu_map_loss_sum / self.n_minu_maps
+            if self.n_minu_maps > 0
             else 0,
         }
 
     def reset_recorded_loss(self) -> None:
         self.minu_loss_fun.reset_recorded_loss()
         self.minu_map_loss_sum = 0
+        self.n_minu_maps = 0
 
 
 class DeepPrintLoss_TexMinu(nn.Module):
@@ -247,6 +267,7 @@ class DeepPrintLoss_TexMinu(nn.Module):
             weights=self.weights,
         )
         self.minu_map_loss_sum: float = 0
+        self.n_minu_maps: float = 0
 
     def forward(
         self,
@@ -266,22 +287,23 @@ class DeepPrintLoss_TexMinu(nn.Module):
         texture_loss = self.texture_loss_fun(
             output.texture_embeddings, output.texture_logits, labels
         )
-        mm_loss = _compute_minutia_map_loss(
+        mm_loss, n_with_map = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
-        # The map loss is the mean over the batch, so it counts once per sample
+        # The map loss is the mean over the samples that have a map
         self.minu_map_loss_sum += (
-            self.weights.minutia_map * mm_loss.detach().item() * labels.shape[0]
+            self.weights.minutia_map * mm_loss.detach().item() * n_with_map
         )
+        self.n_minu_maps += n_with_map
         return texture_loss + minutia_loss + self.weights.minutia_map * mm_loss
 
     def get_recorded_loss(self) -> dict:
         return {
             "texture_loss": self.texture_loss_fun.get_recorded_loss(),
             "minutia_loss": self.minu_loss_fun.get_recorded_loss(),
-            "minutia_map_loss": self.minu_map_loss_sum
-            / self.texture_loss_fun.n_datapoints
-            if self.texture_loss_fun.n_datapoints > 0
+            # Mean over the samples that had a map (0 if none had one)
+            "minutia_map_loss": self.minu_map_loss_sum / self.n_minu_maps
+            if self.n_minu_maps > 0
             else 0,
         }
 
@@ -289,6 +311,7 @@ class DeepPrintLoss_TexMinu(nn.Module):
         self.texture_loss_fun.reset_recorded_loss()
         self.minu_loss_fun.reset_recorded_loss()
         self.minu_map_loss_sum = 0
+        self.n_minu_maps = 0
 
 
 def main():

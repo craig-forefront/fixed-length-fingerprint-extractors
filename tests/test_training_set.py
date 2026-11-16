@@ -90,7 +90,9 @@ def test_mcyt_samples_have_an_empty_minutia_map_with_weight_zero(monkeypatch):
     assert tuple(maps.shape) == (4, *MAP_SHAPE)
     assert weights.tolist() == [1.0, 1.0, 0.0, 0.0]
     predicted = torch.rand(4, *MAP_SHAPE, requires_grad=True)
-    _compute_minutia_map_loss(predicted, maps, weights).backward()
+    loss, n_with_map = _compute_minutia_map_loss(predicted, maps, weights)
+    assert n_with_map == 2
+    loss.backward()
     gradient = predicted.grad.reshape(4, -1).abs().sum(dim=1)
     assert gradient[0] > 0 and gradient[1] > 0
     assert gradient[2] == 0 and gradient[3] == 0
@@ -99,5 +101,8 @@ def test_mcyt_samples_have_an_empty_minutia_map_with_weight_zero(monkeypatch):
     batch = [samples[i] for i in range(60000, 60064)]
     _, (maps, weights), _ = torch.utils.data.default_collate(batch)
     assert tuple(maps.shape) == (64, *MAP_SHAPE)
-    loss = _compute_minutia_map_loss(torch.rand(64, *MAP_SHAPE), maps, weights)
+    loss, n_with_map = _compute_minutia_map_loss(
+        torch.rand(64, *MAP_SHAPE), maps, weights
+    )
     assert float(loss) == 0.0
+    assert n_with_map == 0
