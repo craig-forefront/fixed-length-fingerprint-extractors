@@ -18,6 +18,35 @@ With FingerFlow-extracted minutiae:
         --minutiae_dir /path/to/minutiae \
         --output_dir /path/to/model
 
+Images from different sensors (see "Dataset Preparation" in
+TRAINING_PIPELINE_GUIDE.md):
+    Every image is loaded like scripts/extract_minutiae.py loads it: resampled
+    to 500 pixels per inch (ppi) and brought to dark ridges. The minutiae in
+    the .mnt files are in the pixels of that image. Give this script the same
+    options as the extraction:
+
+    --ppi 1000                  all files have this resolution
+    --ppi_manifest FILE         CSV with the columns path,ppi[,ridges] for
+                                files or directories, paths relative to
+                                --dataset_dir
+    --assume_ppi 500            for files whose resolution is not known from
+                                the manifest or the metadata of the file;
+                                without it such a file stops the training
+    --ridges dark|light|auto    ridge polarity of the files (default: dark)
+
+    Images that are at 500 ppi with dark ridges are used unchanged.
+
+    --canvas_size 512           cut or pad every 500 ppi image around its
+                                centre to a square of this many pixels before
+                                it is scaled to the input size of the model.
+                                The model then sees every sensor at the same
+                                scale. Default 0: every image is padded to a
+                                square of its own longer side, so a small
+                                sensor image is shown larger than a large one.
+
+    The settings are written to data_preparation.json in --output_dir. Images
+    must be prepared in the same way when the model is used later.
+
 Learned alignment (see "Learned alignment" in TRAINING_PIPELINE_GUIDE.md):
     The localization network is a small network in front of the model. It
     proposes a rotation and a shift for every image, and the image is
@@ -98,6 +127,8 @@ Learning rate (see "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md):
 
 import os
 import argparse
+import functools
+import json
 import random
 
 import torch
@@ -122,6 +153,8 @@ from flx.image_processing.binarization import LazilyAllocatedBinarizer
 from flx.models.learning_rate import SCHEDULES, LearningRateConfig
 from flx.models.deep_print_loss import LossWeights
 from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
+from flx.preparation import sensor_normalization
+from flx.preparation.sensor_normalization import SensorNormalizer
 
 
 # =============================================================================
@@ -177,7 +210,29 @@ class CustomFingerprintLoader(ImageLoader):
             1_2.png      # subject 1, impression 2
             ...
             50000_10.png # subject 50000, impression 10
+
+    With a SensorNormalizer the image files are loaded like
+    scripts/extract_minutiae.py loads them: resampled to 500 pixels per inch
+    and brought to dark ridges (see flx/preparation/sensor_normalization.py).
+    The minutiae of the .mnt files are in the pixels of that image. Without
+    one the files are loaded as they are.
     """
+
+    def __init__(self, root_dir: str, normalizer: SensorNormalizer | None = None):
+        super().__init__(root_dir)
+        self._normalizer = normalizer
+
+    def get(self, identifier: Identifier) -> torch.Tensor:
+        filepath = self._files.get(identifier)
+        if self._normalizer is None:
+            return self._load_image(filepath)
+        import torchvision.transforms.functional as VTF
+        try:
+            img, _ = self._normalizer.load(filepath)
+        except ValueError as error:
+            # Name the file: the message of the preparation does not
+            raise type(error)(f"{filepath}: {error}") from error
+        return VTF.to_tensor(img)
 
     @staticmethod
     def _extension() -> str:
@@ -397,24 +452,83 @@ def create_validation_benchmark(
     return VerificationBenchmark(comparisons)
 
 
-def create_image_dataset(dataset_dir: str, training_ids: IdentifierSet) -> Dataset:
-    """Create image dataset with augmentation pipeline."""
+def canvas_roi(canvas_size: int) -> tuple[int, int] | None:
+    """
+    The (height, width) that every image is cut or padded to before it is
+    scaled to the input size of the model; None without a canvas.
+    """
+    if canvas_size < 0:
+        raise ValueError(f"canvas_size must not be negative, got {canvas_size}")
+    return (canvas_size, canvas_size) if canvas_size > 0 else None
+
+
+def _resize_to_input_size(canvas_size: int):
+    """
+    The last step of the image pipeline. Without a canvas, the image is padded
+    to a square of its longer side and scaled to the input size. With one, it
+    is first cut or padded around its centre to canvas_size x canvas_size
+    pixels, so all images are scaled by the same factor.
+    """
+    roi = canvas_roi(canvas_size)
+    if roi is None:
+        return pad_and_resize_to_deepprint_input_size
+    return functools.partial(pad_and_resize_to_deepprint_input_size, roi=roi)
+
+
+def create_image_dataset(
+    dataset_dir: str,
+    training_ids: IdentifierSet,
+    normalizer: SensorNormalizer | None = None,
+    canvas_size: int = 0,
+) -> Dataset:
+    """
+    Create image dataset with augmentation pipeline.
+
+    Args:
+        normalizer: Loads the image files at 500 pixels per inch with dark
+            ridges, like scripts/extract_minutiae.py. None loads the files
+            as they are.
+        canvas_size: Side in pixels of the square that every image is cut or
+            padded to before it is scaled to the input size. 0 pads every
+            image to a square of its own longer side.
+    """
     image_loader = TransformedImageLoader(
-        images=CustomFingerprintLoader(dataset_dir),
+        images=CustomFingerprintLoader(dataset_dir, normalizer),
         poses=POSE_AUGMENTATION,  # Random pose for training robustness
         transforms=[
             QUALITY_AUGMENTATION,
             LazilyAllocatedBinarizer(BINARIZATION_THRESHOLD),
-            pad_and_resize_to_deepprint_input_size,
+            _resize_to_input_size(canvas_size),
         ],
     )
     return Dataset(image_loader, training_ids)
+
+
+def create_validation_image_loader(
+    dataset_dir: str,
+    normalizer: SensorNormalizer | None = None,
+    canvas_size: int = 0,
+) -> TransformedImageLoader:
+    """
+    The images as the model gets them outside of the training: prepared like
+    the training images, but without augmentation. Use the same loader (same
+    normalizer and canvas_size) when embeddings are extracted with the model.
+    """
+    return TransformedImageLoader(
+        images=CustomFingerprintLoader(dataset_dir, normalizer),
+        poses=None,  # No pose augmentation for validation
+        transforms=[
+            LazilyAllocatedBinarizer(BINARIZATION_THRESHOLD),
+            _resize_to_input_size(canvas_size),
+        ],
+    )
 
 
 def create_minutia_dataset(
     minutiae_dir: str,
     training_ids: IdentifierSet,
     images: TransformedImageLoader,
+    canvas_size: int = 0,
 ) -> Dataset:
     """
     Create minutia map dataset.
@@ -425,6 +539,12 @@ def create_minutia_dataset(
         training_ids: Identifiers for training samples
         images: Loader of the training images. The minutia map of a sample gets
                 the random pose of its image.
+        canvas_size: The canvas_size of create_image_dataset, so that the
+                minutiae are moved like the image.
+
+    The size in the header of a .mnt file is compared with the size of the
+    image that was loaded: a ValueError says so if extraction and training
+    prepared the image differently.
 
     Returns:
         Dataset containing minutia maps
@@ -432,7 +552,7 @@ def create_minutia_dataset(
     if minutiae_dir is not None:
         print(f"Loading minutiae from {minutiae_dir}")
         minutia_loader = PoseTransformedMinutiaMapLoader(
-            FingerFlowMinutiaMapLoader(minutiae_dir), images
+            FingerFlowMinutiaMapLoader(minutiae_dir), images, roi=canvas_roi(canvas_size)
         )
         return Dataset(minutia_loader, training_ids)
     else:
@@ -501,7 +621,19 @@ def main():
                         help="Factor of the minutia map loss in the training loss, used with "
                              "--minutiae_dir (default: LOSS_WEIGHT_MINUTIA_MAP in "
                              "flx/setup/config.py)")
+    sensor_normalization.add_arguments(parser)
+    parser.add_argument("--canvas_size", type=int, default=0,
+                        help="Cut or pad every 500 ppi image around its centre to a square "
+                             "of this many pixels before it is scaled to the input size, so "
+                             "that all sensors are shown at one scale (default: 0 = pad "
+                             "every image to a square of its own longer side)")
     args = parser.parse_args()
+    if args.canvas_size < 0:
+        parser.error("--canvas_size must not be negative")
+    try:
+        normalizer = sensor_normalization.from_arguments(args, args.dataset_dir)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     # Options that were not given are None and take the value from the config
     try:
         loss_weights = LossWeights(
@@ -527,6 +659,12 @@ def main():
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    # How the images are prepared; needed again when the model is used
+    preparation = dict(
+        normalizer.settings(), canvas_size=args.canvas_size, ppi_manifest=args.ppi_manifest
+    )
+    with open(os.path.join(args.output_dir, "data_preparation.json"), "w") as file:
+        json.dump(preparation, file, indent=2, sort_keys=True)
 
     # Create identifiers for training and validation. Whole subjects are held
     # out for validation; the model gets one class per training subject.
@@ -547,6 +685,10 @@ def main():
     print(f"=" * 60)
     print(f"Dataset:      {args.dataset_dir}")
     print(f"Minutiae:     {args.minutiae_dir or 'None'}")
+    print(f"Images:       {normalizer.describe()}")
+    print(f"Canvas:       "
+          + (f"{args.canvas_size}x{args.canvas_size} pixels at 500 ppi for every image"
+             if args.canvas_size else "square of the longer side of each image"))
     print(f"Subjects:     {args.num_subjects:,} total")
     print(f"  Training:   {num_train_subjects:,} subjects")
     print(f"  Validation: {num_val_subjects:,} subjects held out (seed {args.validation_seed})")
@@ -599,11 +741,13 @@ def main():
 
     # Create training datasets
     print(f"Loading training image dataset from {args.dataset_dir}...")
-    image_dataset = create_image_dataset(args.dataset_dir, training_ids)
+    image_dataset = create_image_dataset(
+        args.dataset_dir, training_ids, normalizer, args.canvas_size
+    )
 
     print(f"Creating minutia dataset...")
     minutia_dataset = create_minutia_dataset(
-        args.minutiae_dir, training_ids, image_dataset.data_loader
+        args.minutiae_dir, training_ids, image_dataset.data_loader, args.canvas_size
     )
 
     print(f"Creating label dataset...")
@@ -615,13 +759,8 @@ def main():
     if validation_ids:
         print(f"\nCreating validation dataset...")
         # For validation, we don't use augmentation - just basic preprocessing
-        validation_image_loader = TransformedImageLoader(
-            images=CustomFingerprintLoader(args.dataset_dir),
-            poses=None,  # No pose augmentation for validation
-            transforms=[
-                LazilyAllocatedBinarizer(BINARIZATION_THRESHOLD),
-                pad_and_resize_to_deepprint_input_size,
-            ],
+        validation_image_loader = create_validation_image_loader(
+            args.dataset_dir, normalizer, args.canvas_size
         )
         validation_fingerprints = Dataset(validation_image_loader, validation_ids)
 

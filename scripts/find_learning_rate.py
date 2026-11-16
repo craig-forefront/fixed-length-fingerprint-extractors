@@ -23,6 +23,10 @@ The suggested rate is printed at the end. Pass it to train_500k.py with
 --learning_rate. See "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md
 for how to read the plot.
 
+The images are prepared as in train_500k.py (resampled to 500 pixels per inch,
+dark ridges): give the same --ppi, --ppi_manifest, --assume_ppi, --ridges and
+--canvas_size options as for the training.
+
 The test runs in one process on one GPU (or on the CPU). Use the batch size of
 the planned training. For a multi-GPU training, the batch size that counts is
 the batch size per GPU times the number of GPUs.
@@ -47,6 +51,7 @@ from flx.extractor.fixed_length_extractor import (  # noqa: E402
     get_DeepPrint_TexMinu,
 )
 from flx.models.deep_print_loss import LossWeights  # noqa: E402
+from flx.preparation import sensor_normalization  # noqa: E402
 from flx.models.learning_rate_finder import (  # noqa: E402
     run_range_test,
     save_range_test_csv,
@@ -89,11 +94,16 @@ def build_training_set(
     minutiae_dir: str | None,
     ids: IdentifierSet,
     with_minutiae: bool,
+    normalizer=None,
+    canvas_size: int = 0,
 ) -> Dataset:
-    """The zipped training set of train_model, built as train_500k.py builds it."""
-    images = train_500k.create_image_dataset(dataset_dir, ids)
+    """
+    The zipped training set of train_model, built as train_500k.py builds it.
+    normalizer and canvas_size are those of train_500k.create_image_dataset.
+    """
+    images = train_500k.create_image_dataset(dataset_dir, ids, normalizer, canvas_size)
     minutiae = train_500k.create_minutia_dataset(
-        minutiae_dir if with_minutiae else None, ids, images.data_loader
+        minutiae_dir if with_minutiae else None, ids, images.data_loader, canvas_size
     )
     labels = Dataset(LabelIndex(ids), ids)
     return Dataset.zip(images, minutiae, labels)
@@ -152,7 +162,17 @@ def main():
                         help="Processes that load images (default: 4)")
     parser.add_argument("--seed", type=int, default=0,
                         help="Seed of the subject choice, the model and the batch order")
+    sensor_normalization.add_arguments(parser)
+    parser.add_argument("--canvas_size", type=int, default=0,
+                        help="As for train_500k.py: side in pixels of the square that every "
+                             "500 ppi image is cut or padded to (default: 0 = off)")
     args = parser.parse_args()
+    if args.canvas_size < 0:
+        parser.error("--canvas_size must not be negative")
+    try:
+        normalizer = sensor_normalization.from_arguments(args, args.dataset_dir)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     try:
         loss_weights = LossWeights(
             cross_entropy=args.loss_weight_cross_entropy,
@@ -189,7 +209,8 @@ def main():
         variant, len(subjects), args.embedding_dim, loss_weights
     )
     train_set = build_training_set(
-        args.dataset_dir, args.minutiae_dir, ids, with_minutiae
+        args.dataset_dir, args.minutiae_dir, ids, with_minutiae,
+        normalizer, args.canvas_size,
     )
     result = run_range_test(
         extractor.model,

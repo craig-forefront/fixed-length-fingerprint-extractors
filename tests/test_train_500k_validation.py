@@ -166,6 +166,8 @@ def test_model_has_one_class_per_training_subject(
             "--output_dir", str(tmp_path / "model"),
             "--num_subjects", str(num_subjects),
             "--num_impressions", "2",
+            # The test images hold no resolution
+            "--assume_ppi", "500",
         ]
         + extra_args,
     )

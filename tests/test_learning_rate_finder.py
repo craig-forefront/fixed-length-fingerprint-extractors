@@ -305,6 +305,8 @@ def test_script_runs_on_the_dataset_layout_of_train_500k(
         "--output_dir", str(out_dir),
         "--num_subjects", "6",
         "--num_impressions", "2",
+        # The test images hold no resolution
+        "--assume_ppi", "500",
         "--max_subjects", "4",
         "--batch_size", "4",
         "--num_steps", "60",

@@ -157,6 +157,8 @@ def _run_main(train_500k, tmp_path, monkeypatch, extra_args) -> LossWeights:
             "--output_dir", str(tmp_path / "model"),
             "--num_subjects", "4",
             "--num_impressions", "2",
+            # The test images hold no resolution
+            "--assume_ppi", "500",
             "--validation_split", "0",
         ]
         + extra_args,

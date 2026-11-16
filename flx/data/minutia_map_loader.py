@@ -1,4 +1,5 @@
 import os
+from typing import Union
 from abc import abstractmethod
 
 import numpy as np
@@ -84,16 +85,75 @@ class PoseTransformedMinutiaMapLoader(MinutiaMapLoader):
     map dataset in Dataset.zip, like in the training.
 
     After the pose transform, the images must either be resized with
-    pad_and_resize_to_deepprint_input_size (without roi) or already have the input size.
+    pad_and_resize_to_deepprint_input_size or already have the input size. If the
+    images are cut or padded to a fixed size first (the roi argument of
+    pad_and_resize_to_deepprint_input_size), give the same roi here.
+
+    If the minutia loader knows the size of the image that its minutiae were
+    extracted from (get_frame_size, the header of a .mnt file), it is compared with
+    the size of the image that was loaded, see _check_frame_size.
 
     The alignment of the localization network (Loc* variants) is not applied here,
     because it is only known inside the model. The loss moves the minutia map with
     it, see align_minutia_maps in flx/models/deep_print_loss.py.
     """
 
-    def __init__(self, minutia_maps: MinutiaMapLoader, images: TransformedImageLoader):
+    def __init__(
+        self,
+        minutia_maps: MinutiaMapLoader,
+        images: TransformedImageLoader,
+        roi: Union[None, tuple[int, int]] = None,
+    ):
+        """
+        @param roi : (height, width) that the images are centre-cropped or padded to
+            after the pose transform and before they are resized to the input size.
+        """
         self._minutia_maps: MinutiaMapLoader = minutia_maps
         self._images: TransformedImageLoader = images
+        self._roi: Union[None, tuple[int, int]] = roi
+
+    def _check_frame_size(self, identifier: Identifier, height: int, width: int) -> None:
+        """
+        Raises a ValueError if the minutiae were extracted from an image of another
+        shape than the one that was loaded for the training.
+
+        Without roi, both are scaled to the input size by their longer side, so an
+        image that is the same picture at another size (for example 1000 instead of
+        500 pixels per inch) still fits its minutiae: only a different aspect ratio
+        is an error. With roi the pixels count, and the sizes must be equal.
+        An image that already has the input size is not checked without roi.
+        """
+        get_frame_size = getattr(self._minutia_maps, "get_frame_size", None)
+        if get_frame_size is None:
+            return
+        if self._roi is None and (height, width) == get_input_resolution():
+            # The image loader has already padded and resized the image to the
+            # input size (like the MCYT loaders): its shape says nothing
+            return
+        frame_width, frame_height = get_frame_size(identifier)
+        if frame_width <= 0 or frame_height <= 0:
+            return
+        if self._roi is not None:
+            fits = (frame_width, frame_height) == (width, height)
+        else:
+            scale = frame_width / width
+            fits = abs(frame_height - height * scale) <= 1 + scale
+        if not fits:
+            raise ValueError(
+                f"The minutiae of {identifier} were extracted from an image of "
+                f"{frame_width}x{frame_height} pixels (width x height), but the "
+                f"training loads this image with {width}x{height} pixels"
+                + (
+                    " and cuts it to a fixed size, which needs equal sizes"
+                    if self._roi is not None
+                    else ", which is another shape"
+                )
+                + ". The minutiae would be in the wrong places. Extraction and "
+                "training must prepare the images in the same way: use the same "
+                "--ppi, --ppi_manifest and --assume_ppi options for "
+                "scripts/extract_minutiae.py and for the training, and extract "
+                "the minutiae again if the image files changed."
+            )
 
     @property
     def ids(self) -> IdentifierSet:
@@ -107,16 +167,23 @@ class PoseTransformedMinutiaMapLoader(MinutiaMapLoader):
         """
         locs, oris = self._minutia_maps.get_minutiae(identifier)
         pose, (height, width) = self._images.get_last_pose(identifier)
-        if pose is None or locs.shape[0] == 0:
+        if locs.shape[0] == 0:
+            return locs, oris
+        self._check_frame_size(identifier, height, width)
+        if pose is None and self._roi is None:
             return locs, oris
 
-        # The pose transform is applied to the image before it is resized to the input size
+        # The pose transform is applied to the image before it is cut to the roi and
+        # resized to the input size
         locs = transform_from_input_size(locs, height, width)
-        locs = pose.transform_coordinates(locs, height, width)
+        pad = 0
+        if pose is not None:
+            locs = pose.transform_coordinates(locs, height, width)
+            oris = pose.transform_orientations(oris)
+            pad = pose.pad
         locs = transform_to_input_size(
-            locs, height + 2 * pose.pad, width + 2 * pose.pad
+            locs, height + 2 * pad, width + 2 * pad, roi=self._roi
         )
-        oris = pose.transform_orientations(oris)
 
         # Minutiae can be moved out of the image
         input_height, input_width = get_input_resolution()
