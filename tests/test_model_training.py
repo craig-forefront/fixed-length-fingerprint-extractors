@@ -448,3 +448,21 @@ def test_accuracy_is_the_share_of_samples_named_correctly_also_with_many_classes
         use_amp=False,
     )
     assert accuracy == pytest.approx(6 / 8)
+
+
+def test_training_batch_size_can_be_set():
+    from flx.models import torch_helpers
+
+    assert torch_helpers.get_dataloader_args(train=True)["batch_size"] == 64
+    try:
+        torch_helpers.set_training_batch_size(24)
+        assert torch_helpers.get_training_batch_size() == 24
+        assert torch_helpers.get_dataloader_args(train=True)["batch_size"] == 24
+        # Twice the value where no gradients are kept
+        assert torch_helpers.get_dataloader_args(train=False)["batch_size"] == 48
+        for value in (0, -1, 2.5, True):
+            with pytest.raises(ValueError):
+                torch_helpers.set_training_batch_size(value)
+        assert torch_helpers.get_training_batch_size() == 24
+    finally:
+        torch_helpers.set_training_batch_size(torch_helpers.DEFAULT_TRAINING_BATCH_SIZE)

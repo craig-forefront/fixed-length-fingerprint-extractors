@@ -119,22 +119,41 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
+# Images per step in each training process (each GPU). Change it with
+# set_training_batch_size, or --batch_size of scripts/train_500k.py.
+DEFAULT_TRAINING_BATCH_SIZE = 64
+_training_batch_size = DEFAULT_TRAINING_BATCH_SIZE
+
+
+def set_training_batch_size(batch_size: int) -> None:
+    """
+    Sets the number of images per training step of this process. With several
+    GPUs every process (GPU) uses a batch of this size. Embedding extraction
+    and validation use twice the value. Call it before train_model.
+    """
+    global _training_batch_size
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"batch_size must be a whole number of at least 1, got {batch_size}")
+    _training_batch_size = batch_size
+
+
+def get_training_batch_size() -> int:
+    return _training_batch_size
+
+
 def get_dataloader_args(train: bool) -> dict:
     """
     Get DataLoader arguments optimized for training scale.
 
-    Batch sizes:
-    - Small datasets (<100K samples): batch_size=32
-    - Large datasets (>100K samples): batch_size=64-128
-    - Adjust based on GPU memory (reduce if OOM errors)
+    The batch size is the one of set_training_batch_size (default 64, chosen
+    for GPUs with 24 GB or more; reduce it if the GPU runs out of memory),
+    and twice that outside of training.
 
     Workers:
     - Rule of thumb: 2-4 workers per GPU
     - For 4 GPUs: 16 workers, 8 GPUs: 16-32 workers
     """
-    # Default batch size for modern GPUs (24GB+ VRAM)
-    # Reduce to 32 if you get OOM errors
-    batch_size = 64
+    batch_size = _training_batch_size
 
     if not train:
         batch_size *= 2  # More memory available without gradients
