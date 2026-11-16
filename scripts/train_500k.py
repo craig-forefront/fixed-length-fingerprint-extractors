@@ -94,6 +94,7 @@ from flx.extractor.fixed_length_extractor import get_DeepPrint_LocTexMinu, get_D
 from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
 from flx.image_processing.binarization import LazilyAllocatedBinarizer
 from flx.models.learning_rate import SCHEDULES, LearningRateConfig
+from flx.models.deep_print_loss import LossWeights
 from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
 
 
@@ -415,8 +416,26 @@ def main():
     parser.add_argument("--gradient_clip_norm", type=float, default=None,
                         help="Upper limit for the gradient norm of one step, 0=no limit "
                              "(default: GRADIENT_CLIP_NORM in flx/setup/config.py)")
+    parser.add_argument("--loss_weight_cross_entropy", type=float, default=None,
+                        help="Factor of the cross entropy of each classifier in the training "
+                             "loss (default: LOSS_WEIGHT_CROSS_ENTROPY in flx/setup/config.py)")
+    parser.add_argument("--loss_weight_center", type=float, default=None,
+                        help="Factor of the center loss of each embedding in the training "
+                             "loss (default: LOSS_WEIGHT_CENTER in flx/setup/config.py)")
+    parser.add_argument("--loss_weight_minutia_map", type=float, default=None,
+                        help="Factor of the minutia map loss in the training loss, used with "
+                             "--minutiae_dir (default: LOSS_WEIGHT_MINUTIA_MAP in "
+                             "flx/setup/config.py)")
     args = parser.parse_args()
     # Options that were not given are None and take the value from the config
+    try:
+        loss_weights = LossWeights(
+            cross_entropy=args.loss_weight_cross_entropy,
+            center=args.loss_weight_center,
+            minutia_map=args.loss_weight_minutia_map,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     learning_rate = LearningRateConfig(
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
@@ -459,6 +478,9 @@ def main():
         print(f"Best model:   lowest training loss (no validation set)")
     print(f"Embedding:    {args.embedding_dim} dims")
     print(f"Optimizer:    Adam, {learning_rate.describe()}")
+    print(f"Loss weights: cross entropy {loss_weights.cross_entropy:g}, "
+          f"center {loss_weights.center:g}"
+          + (f", minutia map {loss_weights.minutia_map:g}" if args.minutiae_dir else ""))
     print(f"Output:       {args.output_dir}")
     print(f"Device:       {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     if torch.cuda.is_available():
@@ -483,12 +505,14 @@ def main():
         extractor = get_DeepPrint_LocTexMinu(
             num_training_subjects=num_train_subjects,
             num_dims=args.embedding_dim,
+            loss_weights=loss_weights,
         )
     else:
         print(f"\nInitializing DeepPrint_LocTex model (texture-only)...")
         extractor = get_DeepPrint_LocTex(
             num_training_subjects=num_train_subjects,
             num_texture_dims=args.embedding_dim,
+            loss_weights=loss_weights,
         )
 
     # Create training datasets

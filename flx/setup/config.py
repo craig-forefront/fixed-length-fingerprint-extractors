@@ -37,5 +37,26 @@ GRADIENT_CLIP_NORM = None
 # A loss that is not a finite number always stops the training.
 LOSS_EXPLOSION_FACTOR = 10.0
 
+# --- Loss weights ------------------------------------------------------------
+# The training loss is a sum of parts. Each part is multiplied by its weight.
+# These values are only the defaults of flx.models.deep_print_loss.LossWeights.
+
+# Cross entropy of each classifier (variants with texture and minutiae have
+# two): how wrong the model is when it names the subject of a training image.
+# It is the mean over the images of a batch.
+LOSS_WEIGHT_CROSS_ENTROPY = 1.0
+
+# Center loss of each embedding: the squared distance between the embedding of
+# an image and the running average of the embeddings of its subject (the
+# "center"). It pulls the embeddings of one finger together. It is the sum
+# over the images of a batch.
+LOSS_WEIGHT_CENTER = 0.125
+
+# Minutia map loss (variants with minutiae only): the squared difference
+# between the minutia map that the model draws and the map made from the
+# minutiae of the image, as the mean over the cells of the map (6 x 128 x 128)
+# and over the images of a batch.
+LOSS_WEIGHT_MINUTIA_MAP = 0.3
+
 # Change this when switching models DeepPrint has 299 while ViT has 224
 INPUT_SIZE = 299

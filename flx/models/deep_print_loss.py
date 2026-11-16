@@ -1,12 +1,47 @@
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 
 from flx.models.deep_print_arch import DeepPrintTrainingOutput
 from flx.models.center_loss import CenterLoss
+from flx.setup import config
 
-W_CROSS_ENTROPY = 1.0
-W_CENTER_LOSS = 0.125
-W_MINUTIA_MAP_LOSS = 0.3
+
+@dataclass(frozen=True)
+class LossWeights:
+    """
+    The factors with which the parts of the training loss are added up. A
+    value of None takes the default from flx/setup/config.py, where the parts
+    are explained (LOSS_WEIGHT_CROSS_ENTROPY, LOSS_WEIGHT_CENTER and
+    LOSS_WEIGHT_MINUTIA_MAP).
+
+    cross_entropy: factor of the cross entropy of each classifier
+    center:        factor of the center loss of each embedding
+    minutia_map:   factor of the minutia map loss (variants with minutiae only)
+    """
+
+    cross_entropy: float | None = None
+    center: float | None = None
+    minutia_map: float | None = None
+
+    def __post_init__(self):
+        defaults = {
+            "cross_entropy": config.LOSS_WEIGHT_CROSS_ENTROPY,
+            "center": config.LOSS_WEIGHT_CENTER,
+            "minutia_map": config.LOSS_WEIGHT_MINUTIA_MAP,
+        }
+        for name, default in defaults.items():
+            value = getattr(self, name)
+            if value is None:
+                value = default
+            value = float(value)
+            if not value >= 0 or value == float("inf"):
+                raise ValueError(
+                    f"The loss weight {name} must be a number that is not "
+                    f"negative, found {value}"
+                )
+            object.__setattr__(self, name, value)
 
 
 def _compute_minutia_map_loss(
@@ -20,11 +55,17 @@ def _compute_minutia_map_loss(
 
 
 class _DeepPrint_Embedding_Loss(nn.Module):
-    def __init__(self, num_classes: int, num_embedding_dims: int):
+    def __init__(
+        self,
+        num_classes: int,
+        num_embedding_dims: int,
+        weights: LossWeights | None = None,
+    ):
         """
-        @param center_loss_weight : Must be greater than zero. The center loss is multiplied by this term.
+        @param weights : Factors of the cross entropy and the center loss. None uses the defaults.
         """
         super().__init__()
+        self.weights: LossWeights = weights if weights is not None else LossWeights()
         self.crossent_loss_fun = nn.CrossEntropyLoss()
         self.center_loss_fun = CenterLoss(num_classes, num_embedding_dims)
         self.crossent_loss_sum: float = 0
@@ -57,26 +98,39 @@ class _DeepPrint_Embedding_Loss(nn.Module):
         # The cross entropy is the mean over the batch, so it counts once per
         # sample. The center loss is already a sum over the batch.
         self.crossent_loss_sum += (
-            crossent_loss.detach().item() * W_CROSS_ENTROPY * labels.shape[0]
+            crossent_loss.detach().item()
+            * self.weights.cross_entropy
+            * labels.shape[0]
         )
-        self.center_loss_sum += center_loss.detach().item() * W_CENTER_LOSS
+        self.center_loss_sum += center_loss.detach().item() * self.weights.center
         self.n_datapoints += labels.shape[0]
-        return W_CROSS_ENTROPY * crossent_loss + W_CENTER_LOSS * center_loss
+        return (
+            self.weights.cross_entropy * crossent_loss
+            + self.weights.center * center_loss
+        )
 
 
 class DeepPrintLoss_Tex(nn.Module):
     """
-    The weights that are use for the
-
+    Loss of the variants without minutiae: cross entropy and center loss of
+    the texture embedding.
     """
 
-    def __init__(self, num_classes: int, texture_embedding_dims: int):
+    def __init__(
+        self,
+        num_classes: int,
+        texture_embedding_dims: int,
+        weights: LossWeights | None = None,
+    ):
         """
-        @param center_loss_weight : Must be greater than zero. The center loss is multiplied by this term.
+        @param weights : Factors of the parts of the loss. None uses the defaults from flx/setup/config.py.
         """
         super().__init__()
+        self.weights: LossWeights = weights if weights is not None else LossWeights()
         self.texture_loss_fun: _DeepPrint_Embedding_Loss = _DeepPrint_Embedding_Loss(
-            num_classes=num_classes, num_embedding_dims=texture_embedding_dims
+            num_classes=num_classes,
+            num_embedding_dims=texture_embedding_dims,
+            weights=self.weights,
         )
 
     def forward(
@@ -112,14 +166,17 @@ class DeepPrintLoss_Minu(nn.Module):
         self,
         num_classes: int,
         minutia_embedding_dims: int,
+        weights: LossWeights | None = None,
     ):
         """
-        @param center_loss_weight : Must be greater than zero. The center loss is multiplied by this term.
+        @param weights : Factors of the parts of the loss. None uses the defaults from flx/setup/config.py.
         """
         super().__init__()
+        self.weights: LossWeights = weights if weights is not None else LossWeights()
         self.minu_loss_fun: _DeepPrint_Embedding_Loss = _DeepPrint_Embedding_Loss(
             num_classes=num_classes,
             num_embedding_dims=minutia_embedding_dims,
+            weights=self.weights,
         )
         self.minu_map_loss_sum: float = 0
 
@@ -143,9 +200,9 @@ class DeepPrintLoss_Minu(nn.Module):
         )
         # The map loss is the mean over the batch, so it counts once per sample
         self.minu_map_loss_sum += (
-            W_MINUTIA_MAP_LOSS * mm_loss.detach().item() * labels.shape[0]
+            self.weights.minutia_map * mm_loss.detach().item() * labels.shape[0]
         )
-        return minutia_loss + W_MINUTIA_MAP_LOSS * mm_loss
+        return minutia_loss + self.weights.minutia_map * mm_loss
 
     def get_recorded_loss(self) -> dict:
         return {
@@ -162,8 +219,8 @@ class DeepPrintLoss_Minu(nn.Module):
 
 class DeepPrintLoss_TexMinu(nn.Module):
     """
-    The weights that are use for the
-
+    Loss of the variants with texture and minutiae: cross entropy and center
+    loss of both embeddings, and the minutia map loss.
     """
 
     def __init__(
@@ -171,18 +228,22 @@ class DeepPrintLoss_TexMinu(nn.Module):
         num_classes: int,
         texture_embedding_dims: int,
         minutia_embedding_dims: int,
+        weights: LossWeights | None = None,
     ):
         """
-        @param center_loss_weight : Must be greater than zero. The center loss is multiplied by this term.
+        @param weights : Factors of the parts of the loss. None uses the defaults from flx/setup/config.py.
         """
         super().__init__()
+        self.weights: LossWeights = weights if weights is not None else LossWeights()
         self.minu_loss_fun: _DeepPrint_Embedding_Loss = _DeepPrint_Embedding_Loss(
             num_classes=num_classes,
             num_embedding_dims=minutia_embedding_dims,
+            weights=self.weights,
         )
         self.texture_loss_fun: _DeepPrint_Embedding_Loss = _DeepPrint_Embedding_Loss(
             num_classes=num_classes,
             num_embedding_dims=texture_embedding_dims,
+            weights=self.weights,
         )
         self.minu_map_loss_sum: float = 0
 
@@ -209,9 +270,9 @@ class DeepPrintLoss_TexMinu(nn.Module):
         )
         # The map loss is the mean over the batch, so it counts once per sample
         self.minu_map_loss_sum += (
-            W_MINUTIA_MAP_LOSS * mm_loss.detach().item() * labels.shape[0]
+            self.weights.minutia_map * mm_loss.detach().item() * labels.shape[0]
         )
-        return texture_loss + minutia_loss + W_MINUTIA_MAP_LOSS * mm_loss
+        return texture_loss + minutia_loss + self.weights.minutia_map * mm_loss
 
     def get_recorded_loss(self) -> dict:
         return {
@@ -230,8 +291,8 @@ class DeepPrintLoss_TexMinu(nn.Module):
 
 
 def main():
-    loss = DeepPrintLoss_Tex(100)
-    loss = DeepPrintLoss_TexMinu(100)
+    loss = DeepPrintLoss_Tex(100, 96)
+    loss = DeepPrintLoss_TexMinu(100, 96, 96)
     print("No syntax errors")
 
 

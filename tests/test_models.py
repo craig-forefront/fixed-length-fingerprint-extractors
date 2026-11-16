@@ -2,7 +2,12 @@ import pytest
 import torch
 
 from flx.models.deep_print_arch import DeepPrintTrainingOutput
-from flx.models.deep_print_loss import DeepPrintLoss_TexMinu, W_MINUTIA_MAP_LOSS
+from flx.models.deep_print_loss import (
+    DeepPrintLoss_Tex,
+    DeepPrintLoss_TexMinu,
+    LossWeights,
+)
+from flx.setup import config
 from flx.models.localization_network import LocalizationNetwork
 
 
@@ -77,7 +82,7 @@ def test_recorded_loss_is_the_mean_per_sample():
         expected_crossent
     )
     # Predicted maps are all 0 and the target maps all 1: squared error 1
-    assert recorded["minutia_map_loss"] == pytest.approx(W_MINUTIA_MAP_LOSS)
+    assert recorded["minutia_map_loss"] == pytest.approx(config.LOSS_WEIGHT_MINUTIA_MAP)
 
 
 def test_recorded_loss_does_not_depend_on_the_batch_size():

@@ -22,6 +22,7 @@ from flx.models.deep_print_loss import (
     DeepPrintLoss_Tex,
     DeepPrintLoss_Minu,
     DeepPrintLoss_TexMinu,
+    LossWeights,
 )
 from flx.setup.paths import get_best_model_file
 from flx.data.dataset import Dataset
@@ -84,10 +85,11 @@ class DeepPrintExtractor:
 
 
 def get_DeepPrint_Tex(
-    num_training_subjects: int, num_texture_dims: int
+    num_training_subjects: int, num_texture_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_Tex(num_training_subjects, num_texture_dims)
-    loss = DeepPrintLoss_Tex(num_training_subjects, num_texture_dims)
+    loss = DeepPrintLoss_Tex(num_training_subjects, num_texture_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=False,
         model=model,
@@ -96,10 +98,11 @@ def get_DeepPrint_Tex(
 
 
 def get_DeepPrint_Minu(
-    num_training_subjects: int, num_minutia_dims: int
+    num_training_subjects: int, num_minutia_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_Minu(num_training_subjects, num_minutia_dims)
-    loss = DeepPrintLoss_Minu(num_training_subjects, num_minutia_dims)
+    loss = DeepPrintLoss_Minu(num_training_subjects, num_minutia_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=True,
         model=model,
@@ -108,11 +111,11 @@ def get_DeepPrint_Minu(
 
 
 def get_DeepPrint_LocTex(
-    num_training_subjects: int, num_texture_dims: int
+    num_training_subjects: int, num_texture_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_LocTex(num_training_subjects, num_texture_dims)
-    loss = DeepPrintLoss_Tex(num_training_subjects, num_texture_dims)
-    optimizer = torch.optim.Adam(params=model.parameters())
+    loss = DeepPrintLoss_Tex(num_training_subjects, num_texture_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=False,
         model=model,
@@ -121,10 +124,11 @@ def get_DeepPrint_LocTex(
 
 
 def get_DeepPrint_TexMinu(
-    num_training_subjects: int, num_dims: int
+    num_training_subjects: int, num_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_TexMinu(num_training_subjects, num_dims, num_dims)
-    loss = DeepPrintLoss_TexMinu(num_training_subjects, num_dims, num_dims)
+    loss = DeepPrintLoss_TexMinu(num_training_subjects, num_dims, num_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=True,
         model=model,
@@ -133,10 +137,11 @@ def get_DeepPrint_TexMinu(
 
 
 def get_DeepPrint_LocTex(
-    num_training_subjects: int, num_texture_dims: int
+    num_training_subjects: int, num_texture_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_LocTex(num_training_subjects, num_texture_dims)
-    loss = DeepPrintLoss_Tex(num_training_subjects, num_texture_dims)
+    loss = DeepPrintLoss_Tex(num_training_subjects, num_texture_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=False,
         model=model,
@@ -145,10 +150,11 @@ def get_DeepPrint_LocTex(
 
 
 def get_DeepPrint_LocMinu(
-    num_training_subjects: int, num_texture_dims: int
+    num_training_subjects: int, num_texture_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_LocMinu(num_training_subjects, num_texture_dims)
-    loss = DeepPrintLoss_Minu(num_training_subjects, num_texture_dims)
+    loss = DeepPrintLoss_Minu(num_training_subjects, num_texture_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=True,
         model=model,
@@ -157,10 +163,11 @@ def get_DeepPrint_LocMinu(
 
 
 def get_DeepPrint_LocTexMinu(
-    num_training_subjects: int, num_dims: int
+    num_training_subjects: int, num_dims: int,
+    loss_weights: LossWeights | None = None,
 ) -> DeepPrintExtractor:
     model = DeepPrint_LocTexMinu(num_training_subjects, num_dims, num_dims)
-    loss = DeepPrintLoss_TexMinu(num_training_subjects, num_dims, num_dims)
+    loss = DeepPrintLoss_TexMinu(num_training_subjects, num_dims, num_dims, loss_weights)
     return DeepPrintExtractor(
         training_with_minutia_map=True,
         model=model,

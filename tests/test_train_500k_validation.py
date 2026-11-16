@@ -152,7 +152,7 @@ def test_model_has_one_class_per_training_subject(
     extractor = _FakeExtractor()
     created = {}
 
-    def fake_get_model(num_training_subjects, num_texture_dims):
+    def fake_get_model(num_training_subjects, num_texture_dims, **_):
         created["num_training_subjects"] = num_training_subjects
         return extractor
 
