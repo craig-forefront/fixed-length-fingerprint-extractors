@@ -37,6 +37,7 @@ pip download \
   matplotlib \
   numpy \
   opencv-python \
+  pillow \
   scipy \
   scikit-learn \
   "torch>=2.9.0" \
@@ -79,14 +80,33 @@ If you plan to use the FingerFlow minutiae extractor ([scripts/extract_minutiae.
 
 ```bash
 git clone https://github.com/craig-forefront/minutiae_extractor.git
+cd minutiae_extractor
+git checkout claude/serene-albattani-s6ehsj
+cd ..
 ```
 
-This is a fork of https://github.com/tourmii/minutiae_extractor. The script needs a revision of it that has the
-direction refinement (`image_dpi` option of its `Extractor`, file `src/fingerflow/extractor/direction_sense.py`)
-and whose `Extractor` accepts `None` for the ClassifyNet and CoreNet paths (its README says so in the constructor
-reference); check your checkout for both, and check out the branch that has them if not. The `fingerflow` release on
-PyPI does not have it. Also download the dependencies listed in its `pyproject.toml` (TensorFlow, pandas,
-scikit-image, ...) to `./packages-fingerflow`.
+This is a fork of https://github.com/tourmii/minutiae_extractor. `scripts/extract_minutiae.py` needs a revision
+of it whose `Extractor` has the `image_dpi` option (direction refinement, file
+`src/fingerflow/extractor/direction_sense.py`) and accepts `None` for the ClassifyNet and CoreNet paths. That is
+the branch `claude/serene-albattani-s6ehsj` from its commit "Make ClassifyNet and CoreNet optional in the
+Extractor" on. When this was written the branch was to go into `main` of that repository through a pull request;
+once it is merged, `main` works and the `git checkout` line is not needed. To check a checkout:
+
+```bash
+grep -c "classify_net_path is not None" minutiae_extractor/src/fingerflow/extractor/extractor.py   # must print 1
+```
+
+An older checkout and the `fingerflow` release on PyPI do not work. With them `scripts/extract_minutiae.py` stops
+at the first image with exit status 2 and a message that names this branch.
+
+The extractor has its own dependencies (TensorFlow, pandas, scikit-image, ...), listed in its `pyproject.toml`.
+Download them as its own guide describes (`AIR_GAPPED_DEPLOYMENT_GUIDE.md` in that repository, "Download All
+Python Dependencies") and put them into `./packages-fingerflow`. Add Pillow and tqdm, which
+`scripts/extract_minutiae.py` needs in the same environment:
+
+```bash
+pip download pillow tqdm --dest ./packages-fingerflow
+```
 
 **Note**: FingerFlow requires pre-trained model weights. `scripts/extract_minutiae.py` needs CoarseNet.h5 and FineNet.h5; ClassifyNet_6_classes.h5 is optional for it and CoreNet.weights is not used by it. See Step 2 below.
 
@@ -115,7 +135,7 @@ If using the FingerFlow minutiae extractor, download the required model weights:
 
 ```bash
 # Clone the repository
-git clone https://github.com/DorsaRoh/fixed-length-fingerprint-extractors.git
+git clone https://github.com/craig-forefront/fixed-length-fingerprint-extractors.git
 cd fixed-length-fingerprint-extractors
 
 # Create a tarball with the source code
@@ -176,10 +196,13 @@ pip install --no-index --find-links=../airgap-packages/packages \
   matplotlib \
   numpy \
   opencv-python \
+  pillow \
   scipy \
   scikit-learn \
   torchmetrics \
-  tqdm
+  tqdm \
+  setuptools \
+  wheel
 ```
 
 #### Install PyTorch (Choose GPU or CPU)
@@ -212,10 +235,15 @@ pip install --no-index --find-links=../airgap-packages/packages-dev \
 
 #### Install FingerFlow (Optional)
 
-Install the dependencies of the minutiae_extractor repository from `../airgap-packages/packages-fingerflow` and make
-its `fingerflow` package importable, e.g.
+The minutiae extraction runs in an environment that has the dependencies of the minutiae_extractor repository
+(install them from `../airgap-packages/packages-fingerflow` as its `AIR_GAPPED_DEPLOYMENT_GUIDE.md` describes,
+with `--no-index --find-links`), Pillow and tqdm, and in which its `fingerflow` package can be imported. It does
+not need torch, so it can be an environment of its own. The `flx` package does not need to be installed there:
+the script finds it in this repository.
 
 ```bash
+pip install --no-index --find-links=../airgap-packages/packages-fingerflow pillow tqdm
+
 # An absolute path, so that it also works from other directories
 export PYTHONPATH="$(realpath ../airgap-packages/minutiae_extractor/src)"
 python3 -c "from fingerflow.extractor import Extractor, direction_sense"
@@ -224,9 +252,12 @@ python3 -c "from fingerflow.extractor import Extractor, direction_sense"
 ### Step 5: Install the FLX Package
 
 ```bash
-# Install the package in editable mode
-pip install -e .
+# Install the package in editable mode, without looking for anything online
+pip install --no-index --find-links=../airgap-packages/packages --no-build-isolation -e .
 ```
+
+The dependencies were installed in Step 4; this step only makes `import flx` work. If `pip` reports a missing
+dependency here, a package of Step 4 is missing from the bundle.
 
 ### Step 6: Verify Installation
 
@@ -261,11 +292,10 @@ data/
         └── ... (minutiae files, 1_1.mnt, ...)
 ```
 
-`scripts/train_500k.py` and the `FingerFlowMinutiaMapLoader` read these file names as they are. For other names or
-nested directories, write your own image loader and use `FingerFlowMinutiaMapLoaderCustomNaming`, see Steps 4 and 5
-of [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md).
-
-See [notebooks/dataset_tutorial.ipynb](notebooks/dataset_tutorial.ipynb) for detailed instructions on dataset preparation.
+`scripts/train_500k.py` and the `FingerFlowMinutiaMapLoader` read these file names as they are. The files may be
+in subdirectories (for example one per sensor); every subject needs the same number of impressions, numbered
+without gaps. "Step 1" of [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) describes the layout and what
+to do when your data does not fit it.
 
 ### Extract Minutiae (Optional)
 
@@ -285,54 +315,28 @@ from the manifest, from the metadata of the file or from `--assume_ppi`. See "Op
 FingerFlow" and "Images from different sensors" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for
 these options, the ridge polarity and the extraction of very large datasets.
 
-### Training Examples
+### Train
 
-Follow the training tutorial in [notebooks/model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb).
-
-Basic training workflow:
-
-1. **Configure your dataset** - Edit `flx/setup/datasets.py` to add your dataset
-2. **Configure the model** - Edit `flx/setup/models.py` to define model architecture
-3. **Train the model** - Use the training scripts or Jupyter notebooks
-4. **Generate embeddings** - See [notebooks/embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb)
-
-Example training session:
-```python
-from flx.data.dataset import Dataset
-from flx.models.model_training import train_model
-from flx.models.deep_print_arch import DeepPrint_Tex_512
-from flx.models.deep_print_loss import DeepPrintLoss
-
-# Load your dataset
-train_dataset = Dataset.load("your-dataset-train")
-val_dataset = Dataset.load("your-dataset-val")
-
-# Initialize model
-model = DeepPrint_Tex_512(num_classes=train_dataset.num_subjects)
-loss = DeepPrintLoss(model_config=model.config)
-
-# Train
-train_model(
-    fingerprints=train_dataset,
-    minutia_maps=train_dataset.minutia_maps,
-    labels=train_dataset.labels,
-    validation_fingerprints=val_dataset,
-    validation_benchmark=validation_benchmark,
-    model=model,
-    loss=loss,
-    num_epochs=100,
-    out_dir="models/your-model",
-    patience=10
-)
-```
-
-### Multi-GPU Training
-
-For distributed training across multiple GPUs:
+Follow [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md). Its training command, for 50,000 fingers with 10
+images each:
 
 ```bash
-torchrun --nproc_per_node=4 your_training_script.py
+python scripts/train_500k.py \
+  --dataset_dir data/fingerprints/your-dataset \
+  --minutiae_dir data/poses/your-dataset \
+  --num_subjects 50000 --num_impressions 10 \
+  --ppi_manifest data/fingerprints/your-dataset-resolutions.csv \
+  --learning_rate 0.0001 --lr_schedule cosine \
+  --num_epochs 10 \
+  --output_dir models/your-model
 ```
+
+For several GPUs, put `torchrun --nproc_per_node=4` in place of `python`. The same command again continues the
+training; a new `--output_dir` starts a new one.
+
+The notebooks [model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb) and
+[embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb) show the classes underneath
+on the SFinGe example data.
 
 ---
 
@@ -346,9 +350,9 @@ torchrun --nproc_per_node=4 your_training_script.py
 
 ### Model Training Performance
 
-- **Expected training time**: 10-15 minutes per epoch on NVIDIA A100
-- **CPU cores**: 8+ cores recommended for efficient data preprocessing
-- Training can take up to 100 epochs depending on model complexity
+No training time was measured on a GPU for these guides. The image preparation runs on the CPU and took about
+1 second per rolled print per core here, so plan CPU cores per GPU; see "What limits the speed" in
+[LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
 
 ### Dataset Requirements
 
@@ -365,7 +369,7 @@ Estimate storage needs:
 - **Python packages**: ~2-5 GB
 - **Pre-trained models**: ~100-500 MB
 - **Training datasets**: Varies (plan for 10-100+ GB)
-- **Model checkpoints**: ~100-500 MB per checkpoint
+- **Model checkpoints**: `model.pyt` and `best_model.pyt`, 0.8 GB each plus 8.2 kB per training subject (measured)
 - **Embeddings**: Depends on dataset size
 
 ---
@@ -376,13 +380,18 @@ Estimate storage needs:
 Ensure you've activated the virtual environment: `source venv/bin/activate`
 
 ### CUDA out of memory
-Reduce batch size in your training configuration or use gradient accumulation.
+Lower `--batch_size` of `scripts/train_500k.py` (default 64).
 
 ### Missing dependencies during installation
 Ensure all wheel files were downloaded in Step 1. Re-download any missing packages on the internet-connected machine.
 
 ### FingerFlow model files not found
-Verify that all four .h5 model files are present and paths are correct.
+`scripts/extract_minutiae.py` needs `CoarseNet.h5` and `FineNet.h5`; check the paths given to `--coarse_net` and
+`--fine_net`. `ClassifyNet_6_classes.h5` is optional (`--classify_net`), and `CoreNet.weights` is not used.
+
+### The extraction stops with "too old"
+The `fingerflow` package that Python finds is not the revision named under "Download FingerFlow for Minutiae
+Extraction" above. The message shows where it was imported from.
 
 ---
 
@@ -415,8 +424,3 @@ If you use this code in your research, please cite:
     year = {2023}
 }
 ```
-
----
-
-**Document Version**: 1.0
-**Last Updated**: 2026-01-14

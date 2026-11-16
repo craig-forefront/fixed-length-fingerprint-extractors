@@ -11,7 +11,7 @@ Using the `flx` package
 
 To install the package, clone the repository and run `pip install -e .` in the root directory of the repository.
 
-The package requires Python 3.9 or higher. Other dependencies are listed in the `requirements.txt` file. Install them with
+The package requires Python 3.11 or higher (`requires-python` in `pyproject.toml`). The dependencies are listed in `pyproject.toml` and in the `requirements.txt` file. Install them with
 
 ```pip install -r requirements.txt```
 
@@ -23,7 +23,9 @@ To learn how to add your own dataset to the package, see the [dataset tutorial n
 
 To learn how to train a variant of the DeepPrint model on a small example dataset, see the [training example notebook](notebooks/model_training_tutorial.ipynb).
 
-To learn how to extract embeddings from a dataset using a trained model, see the [embedding extraction tutorial notebook](notebooks/embedding_extraction_tutorial.ipynb).
+To learn how to extract embeddings from a dataset using a trained model, see the [embedding generation tutorial notebook](notebooks/embedding_generation_tutorial.ipynb).
+
+To train on your own images with the scripts of this repository (`scripts/extract_minutiae.py`, `scripts/find_learning_rate.py`, `scripts/train_500k.py`), follow the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). It describes the file layout that the training script reads, one complete training command, how a training is continued or started again, and how the trained model is loaded. For large datasets see [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md) and the section "Above about one million subjects" of the training guide, which states what the code cannot do today.
 
 To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). For prints from different sensors (resolution, ridge polarity, image sizes) and for the extraction of very large datasets (continuing a run, shards, failure log), see "Images from different sensors" there. The extraction and `scripts/train_500k.py` resample every image to 500 pixels per inch and need to know the resolution of each file.
 
@@ -38,7 +40,8 @@ Project Organization
     ├── LICENSE
     ├── README.md          <- The top-level README for developers using this project.
     ├── requirements.txt   <- The requirements file for reproducing the analysis environment
-    ├── setup.py           <- makes project pip installable (pip install -e .) so you can  `import flx. ...`
+    ├── pyproject.toml     <- makes project pip installable (pip install -e .) so you can  `import flx. ...`
+    ├── scripts            <- Minutiae extraction, learning rate range test and training (`train_500k.py`) for your own data
     ├── figures            <- Figures for the README
     ├── models             <- Trained and serialized models, training logs
     ├── notebooks          <- Jupyter notebooks for tutorials and examples
@@ -60,7 +63,8 @@ Project Organization
         ├── data           <- Code to manage datasets of fingerprints, poses, embeddings etc.
         ├── extractor      <- Embedding extraction code using the DeepPrint model
         ├── models         <- DeepPrint model architectures, loss functions and pytorch code for training
-        ├── preprocessing  <- Data augmentation and contrast enhancement
+        ├── image_processing <- Data augmentation and contrast enhancement
+        ├── preparation    <- Images from different sensors (500 ppi, dark ridges) and the minutiae extraction
         ├── reweighting    <- Code to reweight embedding dimensions after extraction
         ├── scripts        <- Different scripts for running benchmarks, generating embeddings etc.
         ├── setup          <- Settings, predefined models and datasets are defined here. This allows to easily benchmark different models and datasets.
@@ -103,7 +107,7 @@ In this project, many smaller variants of the DeepPrint model were examined. In 
 
 `DeepPrint_[Loc][Tex][Minu]_<NDIMS>`
 
-Where `[Loc]` means that the localization network is included, `[Tex]` means that the texture branch is included and `[Minu]` means that the minutiae branch is included. `<NDIMS>` is the dimensionality of the fixed-length fingerprint representation (i.e. the number of neurons in the last linear layer).
+Where `[Loc]` means that the localization network is included, `[Tex]` means that the texture branch is included and `[Minu]` means that the minutiae branch is included. `<NDIMS>` is the dimensionality of the fixed-length fingerprint representation (i.e. the number of neurons in the last linear layer). In `scripts/train_500k.py`, `--embedding_dim` is the size per branch: a variant with texture and minutiae branch gives twice that many values per print (512 with the default of 256).
 
 ### Databases
 
@@ -143,8 +147,9 @@ or passed as `LossWeights`; see "Loss weights" in [TRAINING_PIPELINE_GUIDE.md](T
 The number of epochs is chosen based on the equal error rate on a validation set (subjects that are not in the training set). The training is stopped when this error rate does not decrease anymore,
 and the epoch with the lowest validation error rate is saved as `best_model.pyt`. Without a validation set, the epoch with the lowest training loss is saved instead, which does not detect overfitting.
 
-Depending on the learning rate and model, up to 100 epochs are necessary to train the model. Expect roughly 10-15 minutes per epoch on an A100. As much of the preprocessing
-happens on the CPU, a CPU with at least 8 cores is recommended in order to fully utilize the GPU.
+For the datasets of the paper (60,000 training images), up to 100 epochs were necessary depending on the learning rate and model, at roughly 10-15 minutes per epoch on an A100
+(figures of the original authors, not measured again). `scripts/train_500k.py` defaults to at most 10 epochs with early stopping after 3 epochs without a lower validation error rate; how many
+epochs a large dataset needs was not measured. Most of the preprocessing happens on the CPU: about 1 second per rolled 800x750 print per core was measured here, so the number of CPU cores per GPU matters.
 
 ### Experiments
 
