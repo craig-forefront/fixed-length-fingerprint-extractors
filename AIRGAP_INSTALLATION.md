@@ -82,12 +82,13 @@ git clone https://github.com/craig-forefront/minutiae_extractor.git
 ```
 
 This is a fork of https://github.com/tourmii/minutiae_extractor. The script needs a revision of it that has the
-direction refinement (`image_dpi` option of its `Extractor`, file `src/fingerflow/extractor/direction_sense.py`);
-check that this file is in your checkout, and check out the branch that has it if not. The `fingerflow` release on
+direction refinement (`image_dpi` option of its `Extractor`, file `src/fingerflow/extractor/direction_sense.py`)
+and whose `Extractor` accepts `None` for the ClassifyNet and CoreNet paths (its README says so in the constructor
+reference); check your checkout for both, and check out the branch that has them if not. The `fingerflow` release on
 PyPI does not have it. Also download the dependencies listed in its `pyproject.toml` (TensorFlow, pandas,
 scikit-image, ...) to `./packages-fingerflow`.
 
-**Note**: FingerFlow requires pre-trained model weights (CoarseNet.h5, FineNet.h5, ClassifyNet_6_classes.h5, CoreNet.weights). See Step 2 below.
+**Note**: FingerFlow requires pre-trained model weights. `scripts/extract_minutiae.py` needs CoarseNet.h5 and FineNet.h5; ClassifyNet_6_classes.h5 is optional for it and CoreNet.weights is not used by it. See Step 2 below.
 
 ### Step 2: Download Pre-trained Models (Optional)
 
@@ -276,13 +277,13 @@ python scripts/extract_minutiae.py \
   --output_dir data/poses/your-dataset \
   --coarse_net ../pretrained-models/fingerflow/CoarseNet.h5 \
   --fine_net ../pretrained-models/fingerflow/FineNet.h5 \
-  --classify_net ../pretrained-models/fingerflow/ClassifyNet_6_classes.h5 \
-  --core_net ../pretrained-models/fingerflow/CoreNet.weights \
-  --image_dpi 500
+  --ppi_manifest data/fingerprints/your-dataset-resolutions.csv
 ```
 
-See "Option A: Extract Minutiae Using FingerFlow" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for the
-choice of `--image_dpi`.
+The script resamples every image to 500 pixels per inch and must know the resolution of each file: from `--ppi`,
+from the manifest, from the metadata of the file or from `--assume_ppi`. See "Option A: Extract Minutiae Using
+FingerFlow" and "Images from different sensors" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for
+these options, the ridge polarity and the extraction of very large datasets.
 
 ### Training Examples
 

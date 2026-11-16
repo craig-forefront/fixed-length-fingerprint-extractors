@@ -97,34 +97,215 @@ python scripts/extract_minutiae.py \
   --output_dir data/poses/my-dataset \
   --coarse_net path/to/CoarseNet.h5 \
   --fine_net path/to/FineNet.h5 \
-  --classify_net path/to/ClassifyNet_6_classes.h5 \
-  --core_net path/to/CoreNet.weights \
-  --image_dpi 500 \
+  --ppi_manifest data/fingerprints/my-dataset-resolutions.csv \
+  --skip_existing \
   --workers 1
 ```
 
-This creates `.mnt` files with minutiae coordinates and angles. The script needs the `fingerflow` package of a
-minutiae_extractor version that has the direction refinement (`image_dpi` option of its `Extractor`, see
-[AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) for where to get it); the `fingerflow` release on PyPI does not have
-it. Without it the script stops with an error at the first image. Its exit status is 1 if the extraction failed for
-any image; those images are listed in `extraction_errors.txt` in the output directory.
+This creates one `.mnt` file with minutiae coordinates and angles per image, in the same directory structure as the
+images. The script needs the `fingerflow` package of a minutiae_extractor revision whose `Extractor` has the
+`image_dpi` option and accepts `None` for the ClassifyNet and CoreNet paths (see
+[AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) for where to get it); the `fingerflow` release on PyPI has neither.
+Without it the script stops with an error at the first image. It needs Pillow, and it does not need torch, so it runs
+in the environment of the extractor.
 
-- Feed the images as they are: 8-bit grayscale in their native resolution, not resized or enhanced. The header of
-  the `.mnt` file holds the image size, so that the minutiae are scaled together with the images later.
-- `--image_dpi` is only used to find the direction of the minutiae. Choose it by the ridge period of the images
-  rather than by the nominal resolution: roughly `500 * period_px / 9.5`, i.e. 500 for ordinary 500 ppi prints.
-  The 9.5 px depend on how the period is measured. If you have ordinary 500 ppi prints, measure them in the same way
-  and use `500 * period_px / period_px_of_the_500_ppi_prints`.
-  The 292x392 SFinGe example images of this repository have a ridge period of about 8 px for the typical image, which gives 400 to 450
-  (single images range from 6 to 10 px).
-  The setting is tolerant: on these images and on 500 ppi prints, values up to 50 below or above the suitable one
-  gave the same accuracy.
-- Extract all `.mnt` files of a dataset with the same setting, and extract them again when the setting or the
-  extractor changes. Files from before the direction refinement have unreliable minutia directions.
+The next section, "Images from different sensors", explains the options for resolution and ridge polarity, which you
+must set, and how to run the extraction over a very large number of files. The rest of this section describes the
+output.
+
+- Feed the image files as the sensor delivered them: 8-bit grayscale, not resized or enhanced. The script resamples
+  them to 500 ppi itself. The header of the `.mnt` file holds the size of the 500 ppi image, and the coordinates are
+  in its pixels.
+- `--classify_net` is optional. ClassifyNet assigns a type (ending, bifurcation, ...) to every minutia. DeepPrint does
+  not read the type, so leave the option out: the class index in the file is then -1 and the extraction is faster.
+  Measured on this machine (CPU, one worker, 8 prints at 500 ppi with 369 minutiae, other jobs running, so the times
+  are rough): 153 seconds without and 263 seconds with ClassifyNet, and the same 369 positions, angles and
+  confidences in both runs. CoreNet is never run, because the script never wrote its result (`--core_net` is accepted
+  and ignored).
+- `--image_dpi` is only used to find the direction of the minutiae, and it refers to the image after the resampling.
+  Leave it at 500. (If you give the script a resolution that is not the true one, for example `--assume_ppi 500` for
+  the 292x392 SFinGe example images of this repository, whose ridge period of about 8 px corresponds to about 420 ppi,
+  the ridge period of the resampled image is off, and `--image_dpi` can correct the direction step for it: roughly
+  `500 * period_px / 9.5`. The setting is tolerant: values up to 50 below or above the suitable one gave the same
+  accuracy on those images and on 500 ppi prints.)
+- Extract all `.mnt` files of a dataset with the same settings, and extract them again when the settings or the
+  extractor change. The script stores its settings in `extraction_settings.json` in the output directory and refuses
+  to add files with other settings to it. Files from before the direction refinement have unreliable minutia
+  directions.
 - Each row is `x y angle class direction_confidence`. The angle is in radians, the direction vector is
   `(cos(angle), sin(angle))` with y pointing down. This is the convention of the minutia maps, the
   `FingerFlowMinutiaMapLoader` uses the angle as it is. Do not remove minutiae with a low `direction_confidence`
-  when building minutia maps: it only rates the direction, the minutia itself is still there.
+  when building minutia maps: it only rates the direction, the minutia itself is still there. The last line of the
+  file starts with `#` and records how the image was prepared, for example
+  `# source 826x1274 at 1000 ppi (manifest), ridges dark (argument), prepared 413x637`. The loaders do not read it.
+
+### Images from different sensors
+
+This section applies when the prints come from more than one kind of sensor, or from any sensor that is not a 500 ppi
+sensor with dark ridges. "ppi" means pixels per inch, the resolution of the image. "Ridge polarity" says whether the
+ridges of the finger are the dark or the light lines of the image.
+
+**Why it matters.** The minutiae extractor only works near 500 ppi and expects dark ridges on a light background. It
+does not rescale or invert anything, and it does not fail on other images: it silently returns few and wrong
+minutiae. On 8 NIST SD 302 prints (5 rolled, 3 slap, 688 minutiae marked by examiners, a minutia counts as found
+when the extractor reports one within 10 pixels at 500 ppi):
+
+| Image file given to `scripts/extract_minutiae.py` | Examiner minutiae found | Reported minutiae that are examiner minutiae | Same as from the 500 ppi file |
+|---|---|---|---|
+| 500 ppi file | 42.7 % | 79.7 % | |
+| 1000 ppi file of the same print, resolution from the file metadata | 42.6 % | 79.0 % | 98.6 % |
+| 385 ppi file of the same print (made from the 1000 ppi file) | 44.8 % | 78.4 % | 88.1 % |
+| 1000 ppi negative of the same print, declared as light ridges | 42.4 % | 78.9 % | 98.4 % |
+| 1000 ppi file declared as 500 ppi, which is what happened before the resampling existed (7 prints) | 5.3 % | 27.2 % | 5.6 % |
+
+Eight prints show that the preparation works; they are not an accuracy figure for your data. The 385 ppi row comes
+from images that were first shrunk and then enlarged again, which loses detail; a real 385 ppi sensor was not
+available.
+
+**What the scripts do.** `scripts/extract_minutiae.py`, `scripts/train_500k.py` and `scripts/find_learning_rate.py`
+load every image file through the same function (`SensorNormalizer.load` in
+`flx/preparation/sensor_normalization.py`). It resamples the image to 500 ppi and, if the file is declared to have
+light ridges, inverts it. A file that is at 500 ppi with dark ridges is used unchanged, bit for bit. Because the
+extraction and the training load the file in the same way, the minutiae in a `.mnt` file are in the pixels of the
+image that the training loads. **Give all three scripts the same options.**
+
+**Where the resolution of a file comes from**, in this order:
+
+1. `--ppi 1000`: all files have this resolution. Use it only for a dataset from one kind of sensor.
+2. `--ppi_manifest FILE`: a CSV file with a row per file or per directory. This is the option for mixed sensors.
+3. The metadata of the image file (PNG, TIFF, JPEG and BMP files can store their resolution). A value is only used
+   if it is between 200 and 2100 ppi, because image programs write 72 or 96 into files without knowing the sensor.
+   The example images in `tests/data/SFingeExample` state 96 ppi, for instance.
+4. `--assume_ppi 500`: for the files that are still without a value.
+
+If none of the four gives a value, the file fails with a message that names these options. The scripts never guess a
+resolution. With `--assume_ppi` you take the responsibility that the files without a value really have that
+resolution.
+
+The manifest has a header line and the columns `path`, `ppi` and optionally `ridges`. Paths are relative to the image
+directory (`--input_dir` of the extraction, `--dataset_dir` of the training). A row for a directory applies to all
+files below it; the row of a file wins over that of its directory. If the files of each sensor are in their own
+directory, the manifest has one row per sensor:
+
+```
+path,ppi,ridges
+optical_500,500,dark
+optical_1000,1000,dark
+capacitive_385,385,light
+optical_500/retakes/7_3.png,1000,
+```
+
+If your sensors are not separated by directory, write one row per file. Every process reads the manifest into
+memory, which took 186 bytes per row for a manifest of 1 million file rows with paths of about 35 characters. For
+100 million file rows that is about 19 GB per process, so for a dataset of that size directory rows are the
+practical form.
+
+**Ridge polarity.** `--ridges dark` (the default) uses the files as they are. `--ridges light` inverts all files.
+`--ridges auto` decides per image: the scripts compare the gray level of the background (blocks of the image with
+little contrast) with that of the print, and take the image as light-ridged if the background is darker. A `ridges`
+value in the manifest wins over the option. Prefer the manifest: a sensor delivers one polarity, so one row per
+sensor is exact, while the estimate needs background in the image. Measured on 1708 NIST SD 302 exemplars from 5
+devices at 500 ppi, each as it is and as its negative, the estimate was right for all 3416 images. On the centre
+third of the same images, which shows little or no background, it gave no decision for 549, was right for 1148 and
+wrong for 11. Without a decision, `auto` takes the image as dark-ridged.
+
+The extraction checks every image with the same estimate, whatever the setting. An image that looks different from
+what it was declared to be is still extracted, and it is listed with the reason in `extraction_warnings.txt` in the
+output directory. Read that file after the first shard: many entries from one sensor mean that its polarity is
+declared wrongly.
+
+**Different image sizes.** The sensors may deliver images of different sizes; every `.mnt` file carries the size of
+its own image. By default the training pads every 500 ppi image to a square of its own longer side and scales that to
+the model input of 299x299 pixels. A 256x360 image of a small sensor is then shown 2.2 times larger than a 800x750
+rolled print, although both are at 500 ppi. To show all sensors at one scale, give the training
+`--canvas_size N`: every 500 ppi image is cut or padded around its centre to N x N pixels before it is scaled, and
+the minutiae are moved with it. Things to know before you choose N:
+
+- The scale of the model input is 299 / N. With N = 512 a ridge period of about 9.5 pixels at 500 ppi becomes about
+  5.5 pixels; with N = 800 about 3.6 pixels.
+- Whatever is outside of the N x N square around the centre of the *image* (not of the print) is cut off. A rolled
+  print of 800x750 pixels loses its sides with N = 512, and a print that is not in the middle of its image can lose
+  more. Of the two real prints that were looked at with N = 512, the slap print (603x842 pixels at 1000 ppi) was
+  complete, and the rolled print (1600x1500 pixels at 1000 ppi), which lies in the lower left of its image, lost a
+  large part.
+- Whether a canvas, and which N, gives better matching was not measured here. It needs a comparison on your data: two
+  trainings that differ only in `--canvas_size`, compared by their validation equal error rate, as described for the
+  learned alignment in "How to find out whether it helps on your data".
+- The default is 0 (no canvas), which is the behaviour before this option existed.
+
+The training writes its preparation settings to `data_preparation.json` in the output directory. When the trained
+model is used later, the images must be prepared in the same way; `create_validation_image_loader` in
+`scripts/train_500k.py` builds that loader.
+
+**A check against mixed-up data.** The training compares the image size in the header of each `.mnt` file with the
+size of the image that it loaded. If they do not fit (the image file was replaced, or extraction and training were
+given different options), it stops with a message that names the sample and both sizes. Without `--canvas_size`
+only a different shape (ratio of width to height) is an error, because image and minutiae are both scaled by the
+longer side, so the same picture at another resolution still fits. With `--canvas_size` the sizes must be equal.
+
+**If you write your own image loader** (Step 4 below) instead of using `scripts/train_500k.py`, load the files with
+`SensorNormalizer.load` there as well, as `CustomFingerprintLoader` in that script does. A loader that reads the
+files directly gets images in other pixels than the `.mnt` files for every sensor that is not at 500 ppi.
+
+#### Running the extraction over a very large number of files
+
+The extraction is the slow step. On the 4 CPU cores of the machine used here, without a GPU, one process needed
+19 seconds per print without ClassifyNet and 33 seconds with it (8 prints each, model loading included, other jobs
+running). No GPU was available, so the speed on your hardware must be measured: time one shard of a few hundred
+files before you choose the number of shards. Plan the extraction as a job that runs on many machines, is
+interrupted and is continued.
+
+1. **Make the file list once**, so that every process works on the same list in the same order:
+
+   ```bash
+   cd data/fingerprints/my-dataset && find . -name '*.png' | sort > ../my-dataset-files.txt
+   ```
+
+   Without `--file_list` the script walks the image directory in sorted order itself, which gives the same list as
+   long as no file is added or removed.
+
+2. **Start one process per shard.** A shard is one of N equal parts of the list: shard I holds the files number I,
+   I + N, I + 2N, ... (counted from 0). Every file is in exactly one shard.
+
+   ```bash
+   python scripts/extract_minutiae.py \
+     --input_dir data/fingerprints/my-dataset \
+     --file_list data/fingerprints/my-dataset-files.txt \
+     --output_dir data/poses/my-dataset \
+     --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 \
+     --ppi_manifest data/fingerprints/my-dataset-resolutions.csv \
+     --num_shards 64 --shard_index 0 \
+     --skip_existing
+   ```
+
+   Run the same command with `--shard_index 1` to `63` on the other machines or GPUs. All shards write into the same
+   output directory. `--workers W` starts W worker processes inside one shard; each loads its own copy of the
+   networks, so on a GPU keep it at 1 unless the memory allows more.
+
+3. **Continue after an interruption** by running the same command again. With `--skip_existing`, images that already
+   have a `.mnt` file are left out. A `.mnt` file is written under a temporary name and renamed when it is complete,
+   so a file with the ending `.mnt` is always a finished one, also after a crash. Without `--skip_existing` every
+   file is extracted again.
+
+4. **Look at the failures.** One bad file never stops the run. Each failure is written at once to
+   `extraction_errors.shard-00000-of-00064.txt` (`extraction_errors.txt` without shards) in the output directory:
+   the path, a tab, and the reason, for example an unreadable file, an unknown resolution or an error inside the
+   extractor. The exit status of the process is 1 if any file of its run failed, 0 if none did, and 2 if the run did
+   not start (settings differ from those stored in the output directory). Every run starts its log anew; with
+   `--skip_existing` the log then lists exactly the files of the shard that still have no `.mnt` file. If a worker
+   process dies (for example because the machine runs out of memory), the files that were being worked on are logged
+   as failed and the run goes on with new processes; this happened once in the runs for the table above. Remove the
+   cause and run the command again to extract only the failed files.
+
+5. **Check that it is complete** before the training: run every shard once more with `--skip_existing`. Each should
+   end with "Successful: 0", "Failed: 0" and exit status 0. The training needs a `.mnt` file for every image that it
+   uses; files that can not be extracted must be taken out of the dataset. A print for which the extractor finds no
+   minutia gets a `.mnt` file with 0 minutiae; the training leaves it out of the minutia map loss and uses it for
+   the rest (see "Loss weights"). The script prints how many there were.
+
+Not covered by the scripts: the image loader of `scripts/train_500k.py` reads one file extension (`.png` unless you
+change `_extension`), while the extraction reads PNG, JPEG, BMP and TIFF files. Convert the files to one format, or
+adapt the loader. Multi-finger images must be cut into single fingers before both steps.
 
 #### Option B: Use Texture-Only Models
 
@@ -850,9 +1031,13 @@ python scripts/find_learning_rate.py \
     --num_subjects 50000 --num_impressions 10 \
     --max_subjects 2000 \
     --batch_size 64 \
+    --ppi_manifest /path/to/resolutions.csv \
     --output_dir /path/to/lr_range_test
 ```
 
+- `--ppi_manifest` (or `--ppi`, `--assume_ppi`, `--ridges`, `--canvas_size`) must be what the minutiae extraction
+  and the planned training use, see "Images from different sensors". Without any of them, a file that does not
+  state its resolution stops the test.
 - `--max_subjects 2000` uses a random 2,000 of the subjects. The test needs
   `--num_steps` times `--batch_size` images (19,200 with the defaults); a
   subset with at least that many images is enough.
@@ -1519,6 +1704,7 @@ seen. This is called an A/B run. The recipe:
 
    ```bash
    COMMON="--dataset_dir /data/subset --minutiae_dir /data/subset_minutiae \
+           --ppi_manifest /data/subset_resolutions.csv \
            --num_subjects 20000 --num_impressions 10 \
            --validation_split 0.1 --max_validation_subjects 2000 --validation_seed 42 \
            --num_epochs 10 --patience 3 --learning_rate 0.0001"
@@ -1912,7 +2098,7 @@ python train_my_model.py
 torchrun --nproc_per_node=4 train_my_model.py
 
 # Extract minutiae
-python scripts/extract_minutiae.py --input_dir data/fingerprints/my-dataset --output_dir data/poses/my-dataset --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 --classify_net path/to/ClassifyNet_6_classes.h5 --core_net path/to/CoreNet.weights --image_dpi 500
+python scripts/extract_minutiae.py --input_dir data/fingerprints/my-dataset --output_dir data/poses/my-dataset --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --skip_existing
 
 # Run tests
 pytest tests/

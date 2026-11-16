@@ -277,10 +277,18 @@ from another batch size: run the range test again.
 python scripts/train_500k.py \
     --dataset_dir /path/to/fingerprints \
     --output_dir /path/to/model \
+    --ppi_manifest /path/to/resolutions.csv \
     --learning_rate <rate from the range test> \
     --warmup_steps 1000 \
     --lr_schedule cosine
 ```
+
+`scripts/train_500k.py` resamples every image to 500 pixels per inch and must
+know the resolution of each file (`--ppi_manifest`, `--ppi`, the metadata of
+the file or `--assume_ppi`); a file of unknown resolution stops the training.
+The minutiae extraction takes the same options. For prints from different
+sensors, see
+["Images from different sensors" in TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#images-from-different-sensors).
 
 `scripts/train_500k.py` trains with a learned alignment of the image (the
 localization network) by default; `--localization off` trains the same model
