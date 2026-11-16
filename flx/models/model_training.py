@@ -148,8 +148,19 @@ class TrainingLog:
     def __len__(self) -> int:
         return len(self._entries)
 
+    @property
+    def last_entry(self) -> TrainingLogEntry | None:
+        return self._entries[-1] if self._entries else None
+
     def add_entry(self, entry: TrainingLogEntry):
         self._entries.append(entry)
+        self._save()
+
+    def set_validation_result(
+        self, entry: TrainingLogEntry, equal_error_rate: float
+    ) -> None:
+        """Stores the validation result of an entry that is already in the log."""
+        entry.validation_equal_error_rate = equal_error_rate
         self._save()
 
 
@@ -321,6 +332,28 @@ def _validate(
     return result.get_equal_error_rate()
 
 
+def _record_validation(
+    log: TrainingLog,
+    entry: TrainingLogEntry,
+    validation_eer: float | None,
+    model_path: str,
+    best_model_path: str,
+) -> None:
+    """
+    Stores the validation result of the newest epoch (None without a
+    validation set) and copies model.pyt, which holds that epoch, to
+    best_model.pyt if nothing before it was as good.
+    """
+    if validation_eer is not None:
+        log.set_validation_result(entry, validation_eer)
+    if log.best_entry is entry:
+        shutil.copyfile(model_path, best_model_path)
+        print(
+            f"Saved epoch {entry.epoch} as best model "
+            f"(lowest {log.selection_metric} so far)"
+        )
+
+
 def train_model(
     fingerprints: Dataset,
     minutia_maps: Dataset,
@@ -375,6 +408,11 @@ def train_model(
                  network of a Loc* variant moved most prints of a batch out
                  of the frame, see flx/models/alignment_check.py.
     """
+    if (validation_fingerprints is None) != (validation_benchmark is None):
+        raise ValueError(
+            "validation_fingerprints and validation_benchmark must be given "
+            "together or both be None"
+        )
     if learning_rate is None:
         learning_rate = LearningRateConfig()
     # Initialize distributed training if available
@@ -423,6 +461,30 @@ def train_model(
         if is_main_process():
             print(f"No model file found at {model_path}")
 
+    # model.pyt and its log entry are written before the validation of an
+    # epoch. If the run was stopped during that validation, the entry has no
+    # error rate yet: measure it now, on the model that was just loaded.
+    if (
+        is_main_process()
+        and validation_fingerprints is not None
+        and validation_benchmark is not None
+        and exists(model_path)
+        and log.last_entry is not None
+        and log.last_entry.validation_equal_error_rate is None
+    ):
+        print(
+            f"Epoch {log.last_entry.epoch} was trained but not validated "
+            "(the run was stopped before its validation finished). "
+            "Validating it now."
+        )
+        _record_validation(
+            log,
+            log.last_entry,
+            _validate(model, validation_fingerprints, validation_benchmark),
+            model_path,
+            best_model_path,
+        )
+
     # Wrap model with DDP for distributed training
     model = wrap_model_ddp(model)
 
@@ -437,6 +499,30 @@ def train_model(
 
     # Determine starting epoch (only main process has log)
     start_epoch = (len(log) + 1) if is_main_process() else 1
+    if is_main_process():
+        if (
+            validation_fingerprints is not None
+            and patience > 0
+            and log.epochs_since_best >= patience
+        ):
+            # The stored training already ended by early stopping (or its
+            # last validation, measured above, ends it now)
+            print(
+                f"The training in {out_dir} already went {log.epochs_since_best} "
+                f"epochs without a lower error rate (patience {patience}): "
+                "nothing more is trained. best_model.pyt is epoch "
+                f"{log.best_entry.epoch}."
+            )
+            start_epoch = num_epochs + 1
+        elif len(log) > 0 and start_epoch > num_epochs:
+            print(
+                f"The training in {out_dir} already has {len(log)} of "
+                f"{num_epochs} epochs: nothing more is trained. Raise the "
+                "number of epochs to continue it, or use another output "
+                "directory to train again with other settings."
+            )
+        elif len(log) > 0:
+            print(f"Continuing the training in {out_dir} with epoch {start_epoch}.")
     # In a resumed training the loss may already be far below the loss at the
     # start, so the check for an exploded loss compares with the highest epoch
     # loss in the log (-1 if there is none)
@@ -478,11 +564,6 @@ def train_model(
                 "after the warm-up)"
             )
 
-    if (validation_fingerprints is None) != (validation_benchmark is None):
-        raise ValueError(
-            "validation_fingerprints and validation_benchmark must be given "
-            "together or both be None"
-        )
     if validation_fingerprints is None and is_main_process():
         print(
             "No validation set: best_model.pyt will be the epoch with the "
@@ -538,37 +619,38 @@ def train_model(
                     model_path, unwrap_model(model), loss, optimizer
                 )
 
-            # Validate (only the main process needs to do this)
-            validation_eer = None
-            if validation_fingerprints is not None and is_main_process():
-                print("\nValidation:")
-                validation_eer = _validate(
-                    unwrap_model(model), validation_fingerprints, validation_benchmark
-                )
-                print(f"Equal Error Rate: {validation_eer}\n")
-
-            # Log and determine if new model is best model (main process only)
-            should_stop = False
-            if is_main_process():
+                # The log entry is written together with model.pyt, before
+                # the validation, so that the two always describe the same
+                # epoch. A run that is stopped during a long validation then
+                # resumes with the next epoch, not with this one again.
                 entry = TrainingLogEntry(
                     epoch,
                     train_loss,
                     loss_stats,
                     accuracy,
-                    validation_eer,
+                    None,
                     optimizer.param_groups[0]["lr"],
                     alignment_stats,
                 )
                 log.add_entry(entry)
-                print(entry)
 
-                # The new epoch is the best one if nothing before it was as good
-                if log.best_entry is entry:
-                    shutil.copyfile(model_path, best_model_path)
-                    print(
-                        f"Saved epoch {epoch} as best model "
-                        f"(lowest {log.selection_metric} so far)"
+            # Validate (only the main process needs to do this), log the
+            # result and determine if the new model is the best model
+            should_stop = False
+            if is_main_process():
+                validation_eer = None
+                if validation_fingerprints is not None:
+                    print("\nValidation:")
+                    validation_eer = _validate(
+                        unwrap_model(model),
+                        validation_fingerprints,
+                        validation_benchmark,
                     )
+                    print(f"Equal Error Rate: {validation_eer}\n")
+                _record_validation(
+                    log, entry, validation_eer, model_path, best_model_path
+                )
+                print(entry)
 
                 # Early stopping check
                 if validation_fingerprints is not None and patience > 0:

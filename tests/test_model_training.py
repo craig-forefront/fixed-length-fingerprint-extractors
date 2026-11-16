@@ -160,7 +160,12 @@ class _NoLoss(torch.nn.Module):
 
 
 def _run_scripted_training(
-    monkeypatch, out_dir, epochs: list[tuple], validation: bool, patience: int = 0
+    monkeypatch,
+    out_dir,
+    epochs: list[tuple],
+    validation: bool,
+    patience: int = 0,
+    already_trained: int = 0,
 ) -> tuple[list[int], int]:
     """
     Runs train_model with the given results per epoch instead of real training:
@@ -168,7 +173,7 @@ def _run_scripted_training(
 
     Returns the epochs that were trained and the epoch stored as best model.
     """
-    trained = []
+    trained = list(range(already_trained))
 
     def fake_train(*args, **kwargs):
         trained.append(len(trained))
@@ -176,7 +181,10 @@ def _run_scripted_training(
         return loss, {}, accuracy
 
     def fake_validate(*args, **kwargs):
-        return epochs[trained[-1]][2]
+        result = epochs[trained[-1]][2]
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     def fake_save(path, model, loss, optimizer):
         with open(path, "w") as file:
@@ -204,7 +212,35 @@ def _run_scripted_training(
     )
     with open(join(out_dir, "best_model.pyt")) as file:
         best = int(file.read())
-    return [t + 1 for t in trained], best
+    return [t + 1 for t in trained[already_trained:]], best
+
+
+def test_run_stopped_during_validation_resumes_with_the_next_epoch(
+    monkeypatch, tmp_path
+):
+    # The run is stopped while epoch 2 is validated. model.pyt already holds
+    # epoch 2, so the log must hold it too: the next run must not train
+    # epoch 2 again on parameters that are already one epoch further.
+    stopped = [(5.0, 0.1, 0.30), (4.0, 0.5, KeyboardInterrupt())]
+    with pytest.raises(KeyboardInterrupt):
+        _run_scripted_training(monkeypatch, tmp_path, stopped, True)
+    with open(join(tmp_path, "log.json")) as file:
+        entries = json.load(file)["entries"]
+    assert [e["epoch"] for e in entries] == [1, 2]
+    assert entries[1]["validation_equal_error_rate"] is None
+    with open(join(tmp_path, "model.pyt")) as file:
+        assert file.read() == "2"
+
+    # The next run first validates epoch 2 (the best so far), then trains 3
+    epochs = [(5.0, 0.1, 0.30), (4.0, 0.5, 0.10), (3.0, 0.9, 0.20)]
+    trained, best = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, True, already_trained=2
+    )
+    assert trained == [3]
+    assert best == 2
+    with open(join(tmp_path, "log.json")) as file:
+        entries = json.load(file)["entries"]
+    assert [e["validation_equal_error_rate"] for e in entries] == [0.30, 0.10, 0.20]
 
 
 def test_training_without_validation_keeps_the_epoch_with_the_lowest_loss(
@@ -253,10 +289,44 @@ def test_training_stops_after_patience_epochs_without_a_lower_error_rate(
     assert best == 2
 
 
+def test_training_that_stopped_early_is_not_continued_by_the_same_command(
+    monkeypatch, tmp_path, capsys
+):
+    epochs = [(5.0, 0.1, 0.10), (4.0, 0.5, 0.20), (3.0, 0.9, 0.05)]
+    trained, best = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, True, patience=1
+    )
+    assert trained == [1, 2]
+    # The same call again: epoch 3 would be the best, but the training ended
+    trained, best = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, True, patience=1, already_trained=2
+    )
+    assert trained == []
+    assert best == 1
+    assert "nothing more is trained" in capsys.readouterr().out
+    # With more patience the same directory is continued
+    trained, best = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, True, patience=2, already_trained=2
+    )
+    assert trained == [3]
+    assert best == 3
+
+
+def test_finished_training_says_that_nothing_is_trained(monkeypatch, tmp_path, capsys):
+    epochs = [(5.0, 0.1, None), (4.0, 0.5, None)]
+    _run_scripted_training(monkeypatch, tmp_path, epochs, False)
+    capsys.readouterr()
+    trained, _ = _run_scripted_training(
+        monkeypatch, tmp_path, epochs, False, already_trained=2
+    )
+    assert trained == []
+    assert "already has 2 of 2 epochs" in capsys.readouterr().out
+
+
 def test_validation_set_and_benchmark_must_come_together(tmp_path):
     ids = IdentifierSet([Identifier(0, 0)])
     data = Dataset(ConstantDataLoader(0), ids)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be given together"):
         train_model(
             fingerprints=data,
             minutia_maps=data,
@@ -268,7 +338,10 @@ def test_validation_set_and_benchmark_must_come_together(tmp_path):
             num_epochs=1,
             out_dir=str(tmp_path),
         )
+    # Refused at once: nothing was trained or written
     assert not exists(join(tmp_path, "best_model.pyt"))
+    assert not exists(join(tmp_path, "model.pyt"))
+    assert not exists(join(tmp_path, "log.json"))
 
 
 # --- _train -------------------------------------------------------------------

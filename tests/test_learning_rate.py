@@ -339,6 +339,20 @@ def test_exploding_loss_stops_the_training_and_keeps_the_last_epoch(
     assert exists(join(tmp_path, "model.pyt"))
 
 
+def test_resumed_training_compares_the_loss_with_the_logged_epoch_loss(
+    batches_of_two, tmp_path
+):
+    # Epoch 1 has a loss near 100. In the resumed epoch 2 the first batch is
+    # at 5 and the second at 60: twelve times the first batch of this run,
+    # but below the loss the training started with, so it is not an explosion.
+    lr = LearningRateConfig(learning_rate=1e-6, warmup_steps=0, schedule="constant")
+    _train_tiny_model(tmp_path, [1.0], num_epochs=1, learning_rate=lr)
+    _train_tiny_model(tmp_path, [0.05, 0.6], num_epochs=2, learning_rate=lr)
+    with open(join(tmp_path, "log.json")) as file:
+        entries = json.load(file)["entries"]
+    assert [e["epoch"] for e in entries] == [1, 2]
+
+
 def test_training_log_holds_the_learning_rate_of_each_epoch(batches_of_two, tmp_path):
     # 2 epochs of 2 steps. The cosine decay from 1e-3 to 5e-4 over the steps
     # 0 .. 3 is at 8.75e-4 in step 1 (the end of epoch 1).
