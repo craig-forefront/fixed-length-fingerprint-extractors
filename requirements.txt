@@ -5,6 +5,7 @@
 matplotlib
 numpy
 opencv-python
+pillow
 scipy
 scikit-learn
 torch>=2.9.0
