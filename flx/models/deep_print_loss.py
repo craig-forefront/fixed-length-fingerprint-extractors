@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -74,6 +75,87 @@ def _compute_minutia_map_loss(
     # Without any map both sums are 0; the lower limit avoids 0 / 0
     loss = (mm_sse * weights).sum() / torch.clamp(weight_sum, min=1e-12)
     return loss, float(weight_sum.detach().item())
+
+
+def align_minutia_maps(
+    minutia_maps: torch.Tensor, matrices: torch.Tensor
+) -> torch.Tensor:
+    """
+    Moves target minutia maps into the frame of the aligned images.
+
+    The localization network of the Loc* variants rotates and shifts the
+    image before the model sees it, so the model draws its minutia map for
+    the aligned image. The target map is made from the minutiae of the image
+    before the alignment and must be moved in the same way; otherwise a
+    rotation of more than about 5 degrees or a shift of more than about 5
+    pixels makes the target worse than an empty map.
+
+    The map is resampled, the minutiae are not drawn again:
+
+    - Position: the map is resampled with the same affine matrices as the
+      image (bilinear).
+    - Direction: a minutia direction phi becomes phi - rotation. Channel k of
+      the map stands for the direction k * 360 / n degrees, so the channels
+      are shifted by rotation / (360 / n) channels around the circle, with
+      linear interpolation between the two neighbouring channels.
+
+    Drawing the minutiae again from their transformed coordinates would be
+    exact, but the data loaders deliver finished maps, not minutiae, and a
+    batch of minutia lists of different lengths would change every loader
+    and the batch format. Against maps drawn again, the resampled maps had a
+    correlation of 0.94 to 0.97 on real minutiae (see "Learned alignment" in
+    TRAINING_PIPELINE_GUIDE.md). With a scale other than 1 the resampled
+    minutiae also change their size, which drawn ones would not.
+
+    The result carries no gradient: the alignment must not be rewarded for
+    moving or blurring its own target.
+
+    @param minutia_maps : Shape (batch, channels, height, width)
+    @param matrices : Shape (batch, 2, 3), Alignment.matrices
+    @returns : The moved maps, 32-bit, same shape
+    """
+    with torch.no_grad():
+        maps = minutia_maps.float()
+        matrices = matrices.detach().float()
+        grid = torch.nn.functional.affine_grid(matrices, maps.shape, align_corners=False)
+        moved = torch.nn.functional.grid_sample(maps, grid, align_corners=False)
+        n_channels = maps.shape[1]
+        rotation = torch.atan2(matrices[:, 1, 0], matrices[:, 0, 0])
+        # New channel k holds what was in channel k + channel_shift
+        channel_shift = rotation / (2 * math.pi / n_channels)
+        whole = torch.floor(channel_shift)
+        fraction = (channel_shift - whole).view(-1, 1, 1, 1)
+        channels = torch.arange(n_channels, device=maps.device).unsqueeze(0)
+        lower = (channels + whole.long().unsqueeze(1)) % n_channels
+        upper = (lower + 1) % n_channels
+
+        def pick(index: torch.Tensor) -> torch.Tensor:
+            return moved.gather(1, index.view(-1, n_channels, 1, 1).expand_as(moved))
+
+        return (1 - fraction) * pick(lower) + fraction * pick(upper)
+
+
+def _target_in_aligned_frame(
+    output: DeepPrintTrainingOutput,
+    minutia_maps: torch.Tensor,
+    minutia_map_weights: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    The target maps and their weights as the minutia map loss must see them.
+
+    Without alignment (variants without localization network) both are
+    returned unchanged. With alignment the maps are moved with it (see
+    align_minutia_maps), and a sample whose minutiae all left the frame
+    (less than 1 % of its map is left) gets the weight 0, like a sample
+    without minutiae.
+    """
+    if output.alignment is None or minutia_maps.numel() == 0:
+        return minutia_maps, minutia_map_weights
+    moved = align_minutia_maps(minutia_maps, output.alignment.matrices)
+    before = minutia_maps.float().flatten(1).sum(dim=1)
+    after = moved.flatten(1).sum(dim=1)
+    kept = (after > 0.01 * before).to(dtype=minutia_map_weights.dtype)
+    return moved, minutia_map_weights * kept
 
 
 class _DeepPrint_Embedding_Loss(nn.Module):
@@ -219,6 +301,10 @@ class DeepPrintLoss_Minu(nn.Module):
         minutia_loss = self.minu_loss_fun(
             output.minutia_embeddings, output.minutia_logits, labels
         )
+        # Loc* variants: the target follows the learned alignment
+        minutia_maps, minutia_map_weights = _target_in_aligned_frame(
+            output, minutia_maps, minutia_map_weights
+        )
         mm_loss, n_with_map = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights
         )
@@ -292,6 +378,10 @@ class DeepPrintLoss_TexMinu(nn.Module):
         )
         texture_loss = self.texture_loss_fun(
             output.texture_embeddings, output.texture_logits, labels
+        )
+        # Loc* variants: the target follows the learned alignment
+        minutia_maps, minutia_map_weights = _target_in_aligned_frame(
+            output, minutia_maps, minutia_map_weights
         )
         mm_loss, n_with_map = _compute_minutia_map_loss(
             output.minutia_maps, minutia_maps, minutia_map_weights

@@ -86,8 +86,9 @@ class PoseTransformedMinutiaMapLoader(MinutiaMapLoader):
     After the pose transform, the images must either be resized with
     pad_and_resize_to_deepprint_input_size (without roi) or already have the input size.
 
-    The alignment of the localization network is not applied to the minutia maps,
-    with and without pose transform.
+    The alignment of the localization network (Loc* variants) is not applied here,
+    because it is only known inside the model. The loss moves the minutia map with
+    it, see align_minutia_maps in flx/models/deep_print_loss.py.
     """
 
     def __init__(self, minutia_maps: MinutiaMapLoader, images: TransformedImageLoader):
