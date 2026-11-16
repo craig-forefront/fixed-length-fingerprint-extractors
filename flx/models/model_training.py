@@ -84,11 +84,14 @@ class TrainingLog:
         with open(self._path, "r") as file:
             obj = json.load(file)
             self._entries = [TrainingLogEntry(**dct) for dct in obj["entries"]]
-        for e in self._entries:
-            # Older versions stored the training accuracy in this field when
-            # there was no validation set. Such a value is not an error rate.
-            if e.validation_equal_error_rate == e.training_accuracy:
-                e.validation_equal_error_rate = None
+        # Logs written before the learning rate was recorded stored the
+        # training accuracy in the error rate field when there was no
+        # validation set. Such a value is not an error rate. Newer logs store
+        # None in that case, so in them equal values are a real result.
+        if all(e.learning_rate is None for e in self._entries):
+            for e in self._entries:
+                if e.validation_equal_error_rate == e.training_accuracy:
+                    e.validation_equal_error_rate = None
 
     @property
     def selection_metric(self) -> str:

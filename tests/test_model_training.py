@@ -65,6 +65,24 @@ def test_best_entry_is_never_an_epoch_with_a_loss_that_is_not_a_number(tmp_path)
     assert log.best_entry.epoch == 1
 
 
+def test_an_epoch_that_is_not_a_number_loses_also_when_it_comes_first(tmp_path):
+    # min() keeps the first of two values that do not compare, so the order
+    # of the entries must not decide
+    log = _log(
+        join(tmp_path),
+        [TrainingLogEntry(1, math.nan, {}, 0.0), TrainingLogEntry(2, 5.0, {}, 0.1)],
+    )
+    assert log.best_entry.epoch == 2
+    log = _log(
+        join(tmp_path),
+        [
+            TrainingLogEntry(3, 4.0, {}, 0.2, math.nan),
+            TrainingLogEntry(4, 4.0, {}, 0.2, 0.4),
+        ],
+    )
+    assert log.best_entry.epoch == 4
+
+
 def test_epochs_without_validation_lose_against_validated_epochs(tmp_path):
     log = _log(
         tmp_path,
@@ -115,6 +133,23 @@ def test_old_log_with_accuracy_stored_as_error_rate_is_read_as_no_validation(tmp
     log = TrainingLog(join(tmp_path, "log.json"))
     assert log.selection_metric == "training_loss"
     assert log.best_entry.epoch == 3
+
+
+def test_equal_error_rate_and_accuracy_in_a_new_log_are_a_real_result(tmp_path):
+    # A training accuracy of exactly 0 is normal in the first epoch with many
+    # classes, and a small validation set can give an error rate of exactly 0.
+    # Logs that record the learning rate never hold the accuracy in the error
+    # rate field, so the value must be kept.
+    _log(
+        tmp_path,
+        [
+            TrainingLogEntry(1, 5.0, {}, 0.0, 0.0, 1e-4),
+            TrainingLogEntry(2, 4.0, {}, 0.5, 0.3, 1e-4),
+        ],
+    )
+    log = TrainingLog(join(tmp_path, "log.json"))
+    assert log.best_entry.epoch == 1
+    assert log._entries[0].validation_equal_error_rate == 0.0
 
 
 # --- train_model with scripted epochs -----------------------------------------
