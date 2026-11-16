@@ -96,6 +96,9 @@ once it is merged, `main` works and the `git checkout` line is not needed. To ch
 grep -c "classify_net_path is not None" minutiae_extractor/src/fingerflow/extractor/extractor.py   # must print 1
 ```
 
+If it prints 0, the checkout does not hold that commit: the branch on the server may not have been updated yet.
+Ask for the commit before you build the bundle; nothing in the air-gapped environment can replace it.
+
 An older checkout and the `fingerflow` release on PyPI do not work. With them `scripts/extract_minutiae.py` stops
 at the first image with exit status 2 and a message that names this branch.
 

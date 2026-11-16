@@ -1659,9 +1659,9 @@ then tries anyway.
 - **Lists that do not fit in memory.** Identifiers are Python objects, held in every GPU process and compared as
   sets when the datasets are built. Every process walks the image directory once and the minutiae directory
   twice. There is no manifest of the dataset on disk and no shard format; every sample is two small files.
-- **Checkpoints inside an epoch.** `model.pyt` is written once per epoch, directly onto the old file. A crash
-  loses up to one epoch, which is days at this size, and a crash while the file is written leaves no usable
-  `model.pyt`.
+- **Checkpoints inside an epoch.** `model.pyt` is written once per epoch (under a temporary name and then
+  renamed, so a crash during the write keeps the file of the epoch before). A crash loses up to one epoch, which
+  is days at this size. The step inside the epoch and the state of mixed precision are not saved.
 - **A classifier or centers that are shared between GPUs.** See above; the centers are per process.
 - **Balanced sampling.** Images are drawn uniformly, so fingers with many images would dominate if the grid
   did not force equal numbers.
@@ -1806,7 +1806,7 @@ All on one machine with 4 CPU cores and no GPU.
 | Step 7 on a second set: the same command with another learning rate; with `--localization off`; with `--num_epochs 3` and another learning rate | 32 prints of 8 fingers as 500, 1000 and 385 ppi files and 1000 ppi negatives | nothing trained; refused with exit status 2; one more epoch |
 | The log snippets of Step 8 | the model of the 12 prints | ran |
 | Steps 9 and 10 and the snippet under "What to watch" in the alignment section | the same model, embedding its own 12 training and validation prints | 12 embeddings of 512 values, saved and loaded again; the error rates of a model after 4 training steps mean nothing |
-| `python -m pytest -q` | | 351 passed |
+| `python -m pytest -q` | | 352 passed |
 | The offline `pip install ... -e .` of AIRGAP_INSTALLATION.md | a fresh environment with only setuptools and wheel from a local directory | installs with `--no-deps`; without it, it names the first missing dependency, as that guide says |
 
 The commands were started from another directory than the repository root, with the script paths adjusted.
