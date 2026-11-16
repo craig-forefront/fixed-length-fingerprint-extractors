@@ -94,7 +94,7 @@ Furthermore, the impact of rotation and translation of fingerprint images on the
 ![Conceptual overview of fixed-length fingerprint representation extraction](figures/conceptual-overview-deepprint.png)
 
 The full DeepPrint model consists of the following components:
- - Localization network: Localizes the fingerprint in the image and crops it to a fixed size. (Not shown in the figure)
+ - Localization network: Proposes a rotation and a shift for the fingerprint image, with which the image is resampled before the other components see it (learned alignment). (Not shown in the figure) The rotation is bounded to 60 degrees and the shift to half the image side, the network has its own, smaller learning rate, and the training stops when the aligned images are mostly empty; `scripts/train_500k.py --localization on|off` trains with or without it. See "Learned alignment" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#learned-alignment).
  - Inception v4 stem: Processes the fingerprint image and extracts a feature map.
  - Texture-branch: Processes the feature map and extracts a fixed-length fingerprint representation.
  - Minutiae-branch: Processes the feature map and extracts a fixed-length minutiae representation as well as a minutia map. The minutia map is used during training to focus the training on the minutiae regions of the fingerprint. It is not used to create the fixed-length fingerprint representation.

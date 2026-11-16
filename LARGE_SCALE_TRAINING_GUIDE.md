@@ -282,6 +282,13 @@ python scripts/train_500k.py \
     --lr_schedule cosine
 ```
 
+`scripts/train_500k.py` trains with a learned alignment of the image (the
+localization network) by default; `--localization off` trains the same model
+without it. Whether the alignment makes matching more accurate on your data
+has to be measured by training both ways:
+["Learned alignment" in TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#learned-alignment)
+has the recipe.
+
 ### Class Balancing
 
 With 50K-150K subjects (classes), ensure balanced sampling:

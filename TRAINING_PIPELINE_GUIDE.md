@@ -14,9 +14,10 @@ This guide provides step-by-step instructions for setting up a complete training
 6. [Training the Model](#training-the-model)
 7. [Choosing the learning rate](#choosing-the-learning-rate)
 8. [Loss weights](#loss-weights)
-9. [Validation and Testing](#validation-and-testing)
-10. [Multi-GPU Training](#multi-gpu-training)
-11. [Troubleshooting](#troubleshooting)
+9. [Learned alignment](#learned-alignment)
+10. [Validation and Testing](#validation-and-testing)
+11. [Multi-GPU Training](#multi-gpu-training)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -437,7 +438,10 @@ The FLX package provides several DeepPrint variants:
 **Recommendations:**
 - **Start with `Tex`**: Simplest, fastest training, no minutiae needed
 - **Use `TexMinu`**: Best performance when minutiae available
-- **Use `LocTex` or `LocTexMinu`**: When training data has rotation/translation variations
+- **`LocTex` or `LocTexMinu`** add a learned alignment of the image. Whether
+  it makes matching more accurate depends on the data and has to be measured:
+  see [Learned alignment](#learned-alignment) for how it works, what keeps it
+  stable and how to compare a training with and without it.
 
 **Embedding sizes:**
 - Common sizes: 128, 256, 512, 1024
@@ -796,6 +800,7 @@ After the warm-up there are two choices (the *schedule*):
 | Schedule after the warm-up | `--lr_schedule constant` or `cosine` | `LEARNING_RATE_SCHEDULE = "constant"` |
 | Upper limit for the gradient (see below) | `--gradient_clip_norm` | `GRADIENT_CLIP_NORM = None` (no limit) |
 | Stop when the loss is this many times the starting loss | (config only) | `LOSS_EXPLOSION_FACTOR = 10.0` |
+| Factor of the learning rate of the localization network (`Loc` variants only, see [Learned alignment](#learned-alignment)) | `--localization_lr_factor` | `LOCALIZATION_LEARNING_RATE_FACTOR = 0.035` |
 
 In your own training script, pass the settings to `fit`:
 
@@ -853,7 +858,10 @@ python scripts/find_learning_rate.py \
   subset with at least that many images is enough.
 - `--batch_size` must be the batch size of the planned training.
 - `--variant` chooses the model (`LocTexMinu`, `TexMinu`, `LocTex`, `Tex`).
-  Without it the script tests what `train_500k.py` would train.
+  Without it the script tests what `train_500k.py` trains by default. For a
+  training with `--localization off`, test `TexMinu` or `Tex`.
+- `--localization_lr_factor` must be the value of the planned training
+  (`Loc` variants only).
 - `--gradient_clip_norm` must be the value of the planned training.
 - `--seed` changes the subset, the starting model and the order of the
   images. Run the test with two or three seeds; if the suggestions differ by
@@ -1262,6 +1270,326 @@ because the weights change the size of the loss and of its gradient.
 
 ---
 
+## Learned alignment
+
+### What the localization network is
+
+Two impressions of the same finger are rarely placed on the sensor in the
+same way: one is rotated or shifted against the other. *Alignment* means
+bringing every image into a similar pose before the model compares them.
+
+The variants whose name starts with `Loc` (`DeepPrint_LocTex`,
+`DeepPrint_LocMinu`, `DeepPrint_LocTexMinu`) do this with a *localization
+network*: a small network in front of the model that looks at a reduced copy
+of the image and proposes a rotation and a shift. The image is resampled with
+them, and the rest of the model only sees the result, the *aligned image*.
+Nobody tells the localization network which pose is the right one. It is
+trained together with the model, by the same loss, so it learns whatever
+alignment makes the fingers easiest to tell apart. This is the design of the
+DeepPrint paper (Engelsma, Cao and Jain, 2019, section 3.2).
+
+The variants without `Loc` have no alignment step. The paper that this
+repository belongs to states that it did not consider the alignment step.
+
+### What keeps it stable
+
+A localization network can ruin a training without any sign in the loss: if
+it moves the prints out of the frame, the model trains on empty images. In
+earlier runs with this code and the former learning rate that happened
+within four steps, and in one of them the loss fell while every image was
+empty. The following settings now prevent it:
+
+| Measure | What it does | Setting in `flx/setup/config.py` | `scripts/train_500k.py` |
+|---------|--------------|----------------------------------|-------------------------|
+| Bounds | The network cannot rotate by more than 60 degrees or shift by more than half the image side, whatever its weights are. These are the bounds of the DeepPrint paper (224 pixels of its 448 pixel images). The raw outputs pass through `tanh`, a smooth function that never leaves -1 to 1, and are multiplied by the bound. A fresh network proposes no rotation and no shift (the *identity*). | `LOCALIZATION_MAX_ROTATION_DEGREES = 60.0`, `LOCALIZATION_MAX_SHIFT = 0.5` | not an option |
+| Scale | The scale is fixed, as in the paper. A value above 1.0 lets the network also enlarge or reduce the print by up to that factor; this adds an output to the network, so parameter files of the two kinds do not fit each other. No training was run with it. | `LOCALIZATION_MAX_SCALE_FACTOR = 1.0` | not an option |
+| Own learning rate | The localization network uses the learning rate of the other parameters times a factor, in every step. The paper states that its network did not converge properly without this and gives 0.035. The alignment decides what the whole model sees, so it should change more slowly than the model that learns from it. | `LOCALIZATION_LEARNING_RATE_FACTOR = 0.035` | `--localization_lr_factor` |
+| Check for empty images | In every step, before the parameters change, the training counts the aligned images that are *mostly empty*: less than half of the frame shows the input image, or less than half of the print is still in the frame. It prints a warning (once per epoch) when more than 10 % of a batch is mostly empty and stops with an error when more than 50 % is. The check costs two sums over the batch. | `ALIGNMENT_EMPTY_BELOW = 0.5`, `ALIGNMENT_WARN_SHARE = 0.1`, `ALIGNMENT_STOP_SHARE = 0.5` | not an option |
+
+"Share of the print" means the sum of the pixel values of the aligned image
+divided by that of the input. This works for images with background 0 and
+bright ridges, which is what the binarization step of the training pipeline
+delivers. If you feed images with a bright background, only the share of the
+frame is meaningful.
+
+One more change concerns the variants with minutiae. The model draws its
+minutia map for the aligned image, so the target map must be in the frame of
+the aligned image too. The loss now moves the target map with the rotation
+and shift that the localization network predicted for each image. The moved
+target is cut off from the gradient, so the localization network cannot
+lower the loss by moving or blurring its own target. A sample whose minutiae
+all left the frame does not count in the map loss.
+
+The target map is resampled, not drawn again from the transformed minutiae.
+Drawing again would be exact, but the data loaders deliver finished maps, and
+passing minutia lists of different lengths through the batches would change
+every loader. Measured against maps drawn again from the transformed
+minutiae, on the examiner minutiae of 200 real prints per row with random
+transforms:
+
+| Rotation up to | Shift up to (share of the image side) | Correlation with the map drawn again: mean (lowest) |
+|----------------|----------------------------------------|------------------------------------------------------|
+| 10 degrees | 0.05 | 0.968 (0.950) |
+| 30 degrees | 0.15 | 0.957 (0.926) |
+| 60 degrees | 0.25 | 0.947 (0.905) |
+| 60 degrees | 0.5 | 0.942 (0.694) |
+
+The unmoved target, by comparison, is unrelated to what the model should
+draw once the alignment is more than a few degrees.
+
+### Switching it on and off
+
+`scripts/train_500k.py` trains with the localization network by default and
+without it on request. Nothing else differs between the two:
+
+```bash
+# With learned alignment (the default): DeepPrint_LocTexMinu,
+# or DeepPrint_LocTex without --minutiae_dir
+python scripts/train_500k.py --localization on  ...
+
+# Without: DeepPrint_TexMinu, or DeepPrint_Tex without --minutiae_dir
+python scripts/train_500k.py --localization off ...
+```
+
+A parameter file must be loaded into the variant it was trained with: a model
+trained with `--localization on` and minutiae is loaded with
+`get_DeepPrint_LocTexMinu`, one trained with `--localization off` with
+`get_DeepPrint_TexMinu`.
+
+In your own training script the choice is the constructor
+(`get_DeepPrint_LocTexMinu` or `get_DeepPrint_TexMinu`), and the factor is
+`LearningRateConfig(localization_factor=...)`.
+
+Parameter files of `Loc` variants from before these changes still load, but
+they should not be used: they were trained while the localization network
+mixed up the images of a batch, and the same raw output now means a different
+rotation and shift.
+
+### What to watch
+
+For `Loc` variants the training prints a line after every epoch and stores
+the same numbers in the field `alignment` of `log.json`:
+
+```
+Learned alignment: mean rotation 3.10 degrees (largest 14.20), mean shift
+0.021 of the image side (largest 0.090), share of the print kept in the frame
+98.7% on average (lowest 81.3%), 0.0% of the aligned images mostly empty
+```
+
+(The numbers in this example are made up to show the format.)
+
+- **Rotation and shift near 0 in every epoch** mean that the localization
+  network does nothing. The model then behaves like the variant without it.
+  This is what a short training looks like (see the measurements below). If
+  it stays like this to the end of a long training, the network has not
+  learned an alignment; try a larger `--localization_lr_factor`.
+- **Largest rotation at 60 degrees or largest shift at 0.5** means that the
+  network runs into its bounds. Look at aligned images of such samples.
+- **A falling share of the print kept in the frame, or warnings about mostly
+  empty images,** mean that the network pushes prints out of the frame. Lower
+  `--localization_lr_factor`, or tighten `LOCALIZATION_MAX_SHIFT`.
+- **The training stops with `AlignmentCollapsedError`:** more than half of a
+  batch was mostly empty. The parameters of that epoch were not saved. Start
+  again with a lower factor or tighter bounds, or train without localization.
+
+To look at aligned images yourself:
+
+```python
+model.eval()
+aligned, alignment = model.localization.align(images)   # images: (n, 1, 299, 299)
+print(alignment.rotation, alignment.shift, alignment.kept_content)
+```
+
+### What was measured about the alignment, and what was not
+
+All runs used the real data described under
+[What was measured here, and what was not](#what-was-measured-here-and-what-was-not)
+in the learning rate section: 400 images of 200 fingers for training and 40
+images of 20 further fingers that the training never saw. They ran through the
+real training loop on a CPU with `DeepPrint_LocTexMinu`, 8 images per step,
+the default learning rate 0.0001 with warm-up, the default loss weights and
+the random rotation (up to 30 degrees) and shift (up to 40 pixels of the
+original image) of `scripts/train_500k.py`. Each line is one run; only the
+factor of the learning rate of the localization network differs.
+
+| Factor | Steps | Loss: first step, then mean of the last 10 steps | Loss always finite | Largest rotation | Largest shift (share of the side) | Lowest share of the print kept | Mostly empty images | How it ended |
+|--------|-------|--------------------------------------------------|--------------------|------------------|-----------------------------------|--------------------------------|---------------------|--------------|
+| 0.035 (default) | 300 | 131.7, then 54.2 | yes | 0.0011 degrees | 0.00002 | 100 % | 0 of 2,400 | finished |
+| 1 | 50 | 131.7, then 64.8 | yes | 0.05 degrees | 0.0002 | 100 % | 0 of 400 | stopped by hand after 50 recorded steps, to free the processor |
+| 5 | 150 | 131.7, then 56.1 | yes | 1.7 degrees | 0.046 | 100 % | 0 of 1,200 | finished |
+| 30 | 23 | 131.7, then 72.6 | yes | 55.7 degrees | 0.496 | 0 % | 9 of 184 | stopped by the check in step 23 |
+
+What these runs show:
+
+- **With the default factor the training is stable.** In 300 steps the loss
+  stayed finite and fell, the predicted rotation and shift stayed far inside
+  the bounds, and no aligned image lost any part of its print. The fall of
+  the loss came from the minutia map loss (41.6 in the first 50 steps, 20.7
+  in the last 50) and the center loss (15.7 to 12.2 per embedding); the cross
+  entropy stayed at 5.30, the value of a model that guesses among 200
+  fingers.
+- **The bounds hold, and the check catches a collapse that the loss does
+  not show.** With the factor 30 the rotation jumped from 2.3 to 18.0 to 55.7
+  degrees and the shift to 0.496 of the image side within three steps, both
+  still inside the bounds of 60 degrees and 0.5. The check warned in step 22
+  (1 of 8 images mostly empty) and stopped the training in step 23 (8 of 8).
+  The loss was falling the whole time (56.7 in the last step). Bounds as wide
+  as those of the paper do not keep the print in the frame by themselves.
+- **The factor matters.** 5 was stable for 150 steps, 30 collapsed after 23.
+  Nothing between them was tried.
+
+Whether the alignment brings differently placed copies of the same print
+closer together was measured as follows. Each test image was given two random
+poses (rotation and shift as in the training), which gives a pair of copies of
+the same print. Five points of the print (the centre and four points around
+it) were followed through the pose and through the alignment that the trained
+localization network proposed for each copy. The number below is the mean
+distance between the same point in the two copies, in pixels of the 299 pixel
+input image; a working alignment makes it smaller.
+
+| Factor | After steps | Pairs | Distance without alignment | Distance with alignment | Pairs that got closer / further |
+|--------|-------------|-------|----------------------------|-------------------------|---------------------------------|
+| 0.035 (default) | 300 | 40 (unseen fingers) | 24.466 | 24.466 (change -0.00003, standard deviation 0.0001) | 23 / 17 |
+| 0.035 (default) | 300 | 80 (training fingers) | 24.186 | 24.186 (change -0.00003, standard deviation 0.0001) | 51 / 29 |
+| 5 | 150 | 40 (unseen fingers) | 24.466 | 24.467 (change +0.002, standard deviation 0.034) | 19 / 21 |
+| 5 | 150 | 80 (training fingers) | 24.186 | 24.179 (change -0.006, standard deviation 0.042) | 46 / 34 |
+
+**The alignment did not bring the copies closer together in these runs.**
+The copies were 24 pixels apart before and after. With the default factor the
+localization network had not moved away from the identity after 300 steps
+(largest rotation 0.001 degrees), so the model was in effect the variant
+without it. With the factor 5 it rotated every image by about the same 0.5
+degrees, whatever the pose of the image, which is not an alignment. A few
+hundred steps on 200 fingers are too short for the model to learn to tell
+fingers apart (the cross entropy did not move), and the alignment can only
+learn from that.
+
+A warning about a simpler measure: the mean pixel difference between the two
+copies did fall in every pair (for the factor 5 from 0.155 to 0.137 on the 40
+unseen pairs), although the points did not move closer. Resampling smooths
+the thin ridges of the binarized image, and smoother images differ less from
+any other image. A falling pixel difference is therefore no evidence of
+alignment.
+
+What was not measured:
+
+- **Whether the localization network learns a useful alignment at all** with
+  this code, with any factor, in a training long enough for the model to
+  learn. The paper reports that it does in its setting.
+- **Whether it makes matching more accurate.** No equal error rate was
+  measured. This is the question of the next section, and only a training on
+  your data can answer it.
+- **Stability over a long training.** 300 steps show that the default factor
+  does not break the start of a training. The check for empty images is
+  there for what may happen later.
+- **A batch of 64, a GPU, mixed precision, several GPUs,** a scale factor
+  above 1.0, and the variants `LocTex` and `LocMinu` in a run of this length
+  (`LocTex` is covered by tests and by short runs of the script only).
+
+`scripts/train_500k.py` keeps the localization network on by default,
+because it was the behaviour of the script before, the default settings were
+stable in these runs, and a collapse now stops the training instead of
+passing unnoticed. This is not a statement that it helps.
+
+### How to find out whether it helps on your data
+
+Train the same model twice, once with and once without the localization
+network, and compare the error rates on fingers that neither training has
+seen. This is called an A/B run. The recipe:
+
+1. **Choose a subset that you can afford to train several times**, for
+   example 20,000 to 50,000 fingers with all their impressions, drawn at
+   random from all sensor types. Both runs must use exactly the same images.
+   The answer from a subset is an indication for the full training, not a
+   guarantee.
+2. **Choose the learning rate for each variant** with the range test (see
+   [Choosing the learning rate](#choosing-the-learning-rate)), with the batch
+   size of the planned runs:
+
+   ```bash
+   python scripts/find_learning_rate.py --variant LocTexMinu --output_dir lr_with    ...
+   python scripts/find_learning_rate.py --variant TexMinu    --output_dir lr_without ...
+   ```
+
+   If the two suggestions differ by less than a factor of 2, use the lower
+   one for both runs. Otherwise give each variant its own rate, and write
+   down that you did.
+3. **Run both trainings with the same options.** Only `--localization` and
+   `--output_dir` differ:
+
+   ```bash
+   COMMON="--dataset_dir /data/subset --minutiae_dir /data/subset_minutiae \
+           --num_subjects 20000 --num_impressions 10 \
+           --validation_split 0.1 --max_validation_subjects 2000 --validation_seed 42 \
+           --num_epochs 10 --patience 3 --learning_rate 0.0001"
+
+   torchrun --nproc_per_node=4 scripts/train_500k.py $COMMON \
+       --localization on  --output_dir /models/ab_with_1
+   torchrun --nproc_per_node=4 scripts/train_500k.py $COMMON \
+       --localization off --output_dir /models/ab_without_1
+   ```
+
+   The same `--validation_seed`, `--validation_split` and
+   `--max_validation_subjects` give both runs the same held-out subjects and
+   the same comparison pairs. Use the same number of GPUs for both, because
+   the number of GPUs changes the effective batch size.
+4. **Repeat each run at least once more** (`ab_with_2`, `ab_without_2`;
+   three of each is better). The script does not fix the random numbers of
+   the model initialisation and of the batch order, so two runs of the same
+   command give slightly different error rates. Without repeats you cannot
+   tell a real difference from this noise.
+5. **Check that the localization network did something.** In `log.json` of
+   the runs with localization, the field `alignment` should show a mean
+   rotation or shift clearly above 0 in the later epochs, and no mostly empty
+   images. If it stays near 0, the two variants were the same model in
+   effect, and the comparison says nothing about alignment; raise
+   `--localization_lr_factor` step by step (for example to 0.1, then 0.3,
+   then 1) and repeat the runs with localization. In the short runs above, 5
+   was still stable and 30 pushed the prints out of the frame within 23
+   steps.
+6. **Compare the validation equal error rate of the best epoch.** The equal
+   error rate (EER) is the error rate at the decision threshold where false
+   matches and false non-matches are equally frequent; lower is better.
+
+   ```python
+   from flx.models.model_training import TrainingLog
+
+   for name in ["ab_with_1", "ab_with_2", "ab_without_1", "ab_without_2"]:
+       best = TrainingLog(f"/models/{name}/log.json").best_entry
+       print(name, best.epoch, best.validation_equal_error_rate)
+   ```
+
+   The localization network helps on this data if every run with it has a
+   lower EER than every run without it, and the gap between the two groups
+   is clearly larger than the spread inside each group. If the groups
+   overlap, the data do not show a difference at this size.
+7. **Also compare on the pairs you care about.** The validation images of
+   `train_500k.py` are in the pose in which they were captured (the random
+   rotation and shift are applied to training images only). If your prints
+   are placed consistently, for example rolled prints on a card or a guided
+   sensor, there is little pose variation for the alignment to remove, and
+   it can only show its value on pairs with different placement: a rolled
+   print against a slap print, or prints from different sensor types. Build
+   a test set of such pairs from the held-out subjects, extract the
+   embeddings with the best model of each run
+   ([Step 13](#step-13-extract-embeddings)) and run the verification
+   benchmark ([Step 14](#step-14-run-verification-benchmark)) on it.
+8. **Decide.** Keep the localization network if it wins in steps 6 and 7.
+   If it makes no difference, the variant without it is the simpler model.
+   If it is worse, train without it.
+
+How many comparisons the validation set needs: an error rate *e* measured on
+*n* independent comparisons is uncertain by about the square root of
+*e* (1 - *e*) / *n*. For an EER of 1 % measured on 20,000 non-mated pairs
+(2,000 validation subjects, 10 pairs each) that is 0.07 percentage points, so
+differences below about 0.2 percentage points cannot be seen with that set.
+
+Whether the localization network improves matching on your data cannot be
+said from the measurements in this guide. It has to be measured with this
+A/B run.
+
+---
+
 ## Validation and Testing
 
 ### Step 12: Monitor Training Progress
@@ -1295,6 +1623,11 @@ The fields of an entry are:
   not in the training set.
 - `learning_rate`: the learning rate of the last step of the epoch (see
   [Choosing the learning rate](#choosing-the-learning-rate)).
+- `alignment`: for the variants with localization network, what the learned
+  alignment did in the epoch: mean and largest rotation and shift, the share
+  of the print that stayed in the frame, and the share of aligned images
+  that were mostly empty (see [Learned alignment](#learned-alignment)). It is
+  `null` for the other variants.
 - `validation_equal_error_rate` (EER): measured on the validation set. The
   equal error rate is the error rate at the decision threshold where false
   matches and false non-matches are equally frequent. Lower is better. It is
