@@ -867,7 +867,8 @@ draws `lr_range_test.png` and prints a suggested rate.
 ![Range test of DeepPrint_TexMinu on 440 real fingerprint images](figures/lr_range_test_example.png)
 
 The picture is the range test of `DeepPrint_TexMinu` on 440 real images with
-8 images per step (see "What was measured here" below). The fall is shallow
+8 images per step, made with the former loss weights (see "What was measured
+here" below). The fall is shallow
 because the test is short and the data set is tiny.
 
 The horizontal axis is the learning rate; each tick is ten times the one
@@ -1109,7 +1110,11 @@ during training. A training that is resumed from `model.pyt` continues with
 the new loss unless you pass the former weights:
 `--loss_weight_center` 0.125 x batch size and
 `--loss_weight_minutia_map 0.00000305`. Points 3 and 4 cannot be switched
-back.
+back. If you resume with the new weights, the `training_loss` of the new
+epochs is much larger than that of the old ones, mainly because of the map
+part, and the two cannot be compared. This matters for a training without a
+validation set, where the epoch with the lowest training loss becomes
+`best_model.pyt`: an old epoch would stay the best one.
 
 ### Why the weight of the minutia map loss was raised
 
@@ -1133,14 +1138,14 @@ Database 302, minutiae marked by examiners), 8 images per step, Adam with
 learning rate 0.0001, center weight 8.0. Each column is one run of 40 or 50
 steps with that map weight and the same random seed; the gradients were
 measured every 10 steps (5 or 6 measurements per run), and the table gives the
-lowest and the highest value. The column 0.095 also contains a second run of
-150 steps with 7 measurements.
+lowest and the highest value. The column 0.095 also contains two longer runs
+of 150 and 281 steps, 19 measurements in all.
 
 | | Former loss (0.00000305) | 0.01 | **0.095** | 1.0 |
 |---|---|---|---|---|
-| Share of the map loss on the stem | 0.0006 % to 0.002 % | 0.2 % to 0.6 % | 1.5 % to 4.6 % | 17 % to 26 % |
+| Share of the map loss on the stem | 0.0006 % to 0.002 % | 0.2 % to 0.6 % | 1.0 % to 5.3 % | 17 % to 26 % |
 | Share of the map loss on the minutia stem | 0.07 % to 1.2 % | 24 % to 83 % | 75 % to 99 % | 97 % to 100 % |
-| Map gradient on the stem, relative to the gradient of the texture cross entropy | 0.00002 to 0.00008 | 0.06 to 0.18 | 0.4 to 1.2 | 4.8 to 10 |
+| Map gradient on the stem, relative to the gradient of the texture cross entropy | 0.00002 to 0.00008 | 0.06 to 0.18 | 0.25 to 1.5 | 4.8 to 10 |
 
 The column "Former loss" is the loss before these changes at 8 images per
 step (center loss 0.125 x sum); that run ended after 38 steps when the
@@ -1167,9 +1172,13 @@ was therefore: on the stem, the map loss should pull about as strongly as the
 cross entropy of the texture branch (a ratio near 1, between one half and
 two), and its share of the whole gradient should stay well below one half, so
 that it does not decide alone what the stem learns. The weight 0.095 of the
-paper meets this (ratio 0.4 to 1.2, share 1.5 % to 4.6 %). With 0.01 the map
+paper meets this (ratio 0.25 to 1.5, in 16 of 19 measurements between 0.4
+and 1.25; share 1.0 % to 5.3 %). With 0.01 the map
 loss is a fifth of the cross entropy or less; with 1.0 it is 5 to 10 times
-the cross entropy. The share of 1.5 % to 4.6 % is small because the center
+the cross entropy. In the longest run the ratio and the share rose slowly
+(ratio 0.7 at the start, 1.5 after 250 steps), because the gradient of the
+cross entropy shrank faster than that of the map loss; how they develop in a
+full training was not measured. The share of 1.0 % to 5.3 % is small because the center
 loss with its weight 8.0 dominates the stem; with a lower center weight the
 same map weight has a larger share. On the minutia stem the map loss
 dominates with 0.095 (75 % to 99 %); this is accepted, because almost no
@@ -1194,29 +1203,38 @@ images of 20 fingers that were not trained on, with the same runs as above:
 
 An empty map has the error 190 on these 16 images.
 
-One more run with the weight 0.095 went on for 150 steps, which is three
-passes over the 400 images:
+Two more runs with the weight 0.095 went on for longer. The longer one had
+281 steps, which is more than five passes over the 400 images. The last two
+columns are the mean value that the model draws in the cells where the target
+map is above 0.5 (minutiae; the target there is 0.60 on average) and in the
+cells where the target map is below 0.01 (no minutia nearby):
 
-| Steps | Map error on the training batches | Error of an empty map on the same batches | Correlation |
-|---|---|---|---|
-| 0 to 9 | 709 | 310 | 0.03 |
-| 40 to 49 | 255 | 301 | 0.33 |
-| 90 to 99 | 215 | 275 | 0.40 |
-| 140 to 149 | 215 | 284 | 0.43 |
+| Steps | Map error on the training batches | Error of an empty map on the same batches | Correlation | Drawn on minutiae | Drawn elsewhere |
+|---|---|---|---|---|---|
+| 0 to 9 | 805 | 310 | 0.00 | 0.03 | 0.029 |
+| 50 to 59 | 256 | 288 | 0.31 | 0.06 | 0.009 |
+| 100 to 109 | 228 | 293 | 0.40 | 0.07 | 0.009 |
+| 150 to 159 | 238 | 311 | 0.43 | 0.08 | 0.009 |
+| 200 to 209 | 222 | 298 | 0.43 | 0.09 | 0.009 |
+| 250 to 259 | 211 | 292 | 0.45 | 0.09 | 0.008 |
 
-On the 16 images that were not trained on, the error fell from 905 to 158
-(empty map: 190) and the correlation rose to 0.34.
+On the 16 images that were not trained on, the error fell from 905 to 154
+after 250 steps (empty map: 190), the correlation rose to 0.36, and the model
+drew 0.093 on minutiae against 0.007 elsewhere (at the start: 0.020 against
+0.034). The run of 150 steps ended at an error of 158 and a correlation of
+0.34 on these images.
 
 What this shows: the map branch learns where the minutiae are. Its error
-falls below that of an empty map, also for fingers it has not seen, and it
-falls faster when the map loss reaches the shared layers (0.095 against the
-former loss in the table above).
+falls below that of an empty map, also for fingers it has not seen, it draws
+about 13 times more on minutiae than elsewhere, and the error falls faster
+when the map loss reaches the shared layers (0.095 against the former loss in
+the table above).
 
-What it does not show: maps with minutiae at full height. At the cell where
-the target map is highest (0.73 to 0.87) the predicted value rose from 0.03
-to only 0.08 in these 150 steps. The model first learned to draw a nearly
-empty map and then began to raise it where the minutiae are. Whether the
-peaks reach the height of the target in a full training was not measured.
+What it does not show: maps with minutiae at full height. After 250 steps the
+model drew 0.09 where the target is 0.60 on average, about a sixth of the
+height. The model first learned to draw a nearly empty map and then raised it
+slowly where the minutiae are. Whether the peaks reach the height of the
+target in a full training was not measured.
 
 ### What was not measured
 

@@ -72,8 +72,8 @@ LOSS_WEIGHT_CENTER = 8.0
 #
 # 0.095 is the value of the DeepPrint paper (Engelsma et al. 2019, equation
 # 8). In short runs on real images it made the gradient of the map loss on the
-# shared first layers about as long as that of the texture cross entropy (0.4
-# to 1.2 times) and 1.5 % to 4.6 % of the whole gradient there. Until this
+# shared first layers about as long as that of the texture cross entropy (0.25
+# to 1.5 times) and 1.0 % to 5.3 % of the whole gradient there. Until this
 # value was introduced the map loss was the mean over the cells with the
 # factor 0.3, which equals 0.3 / 98,304 = 0.00000305 here; with it the map
 # loss made up about 0.001 % of the gradient on these layers, so the minutia
