@@ -1,23 +1,33 @@
 # Training Pipeline Setup Guide for Air-Gapped Networks
 
-This guide provides step-by-step instructions for setting up a complete training pipeline with your own fingerprint data in an air-gapped environment.
+This guide takes you from a directory of fingerprint images to a trained DeepPrint model and its embeddings, with
+your own data in an air-gapped environment. The route it describes uses three scripts of this repository:
 
-**IMPORTANT:** If you have a large dataset (500K+ fingerprints), also read [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md) for specific optimizations, multi-GPU setup, and performance tuning.
+1. `scripts/extract_minutiae.py` writes one minutiae file per image (optional, for the model variants with a
+   minutia branch),
+2. `scripts/find_learning_rate.py` suggests a learning rate,
+3. `scripts/train_500k.py` trains the model.
+
+Every command in this guide was run at least once on a small set of real prints on a CPU (12 and 32 images from
+three or four kinds of image files; see [What was run for this guide](#what-was-run-for-this-guide)). Nothing in it
+was run on a GPU or on a large dataset. For large datasets read
+[Above about one million subjects](#above-about-one-million-subjects) before you plan anything, and
+[LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
 
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
 2. [Dataset Preparation](#dataset-preparation)
-3. [Implementing Your Custom Data Loader](#implementing-your-custom-data-loader)
-4. [Configuring Your Dataset](#configuring-your-dataset)
-5. [Model Selection and Configuration](#model-selection-and-configuration)
-6. [Training the Model](#training-the-model)
-7. [Choosing the learning rate](#choosing-the-learning-rate)
-8. [Loss weights](#loss-weights)
-9. [Learned alignment](#learned-alignment)
-10. [Validation and Testing](#validation-and-testing)
-11. [Multi-GPU Training](#multi-gpu-training)
-12. [Troubleshooting](#troubleshooting)
+3. [Training the Model](#training-the-model)
+4. [Choosing the learning rate](#choosing-the-learning-rate)
+5. [Loss weights](#loss-weights)
+6. [Learned alignment](#learned-alignment)
+7. [Validation and Testing](#validation-and-testing)
+8. [Multi-GPU Training](#multi-gpu-training)
+9. [Above about one million subjects](#above-about-one-million-subjects)
+10. [Your own loader or training script](#your-own-loader-or-training-script)
+11. [Troubleshooting](#troubleshooting)
+12. [Quick Reference](#quick-reference)
 
 ---
 
@@ -28,64 +38,77 @@ Before starting, ensure you have:
 1. Completed the air-gapped installation from [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md)
 2. Your fingerprint dataset transferred to the air-gapped environment
 3. Python environment activated: `source venv/bin/activate`
-4. Basic understanding of your dataset structure and naming conventions
+4. For each image file: which finger it shows, and at which resolution (pixels per inch) it was captured
+
+Run the commands of this guide from the root directory of the repository.
 
 ---
 
 ## Dataset Preparation
 
-### Step 1: Organize Your Dataset
+### Step 1: Lay out the files as `scripts/train_500k.py` reads them
 
-Organize your fingerprint images in a directory structure. The exact structure doesn't matter as long as you can extract subject and impression IDs from the file paths.
-
-**Recommended structure:**
+`scripts/train_500k.py` finds the finger and the capture of an image in its file name:
 
 ```
 data/fingerprints/my-dataset/
-├── subject_001/
-│   ├── impression_01.png
-│   ├── impression_02.png
-│   ├── impression_03.png
+├── optical_500/
+│   ├── 1_1.png        <- subject 1, impression 1
+│   ├── 2_1.png
 │   └── ...
-├── subject_002/
-│   ├── impression_01.png
+├── optical_1000/
+│   ├── 1_2.png        <- subject 1, impression 2
 │   └── ...
-└── ...
+└── capacitive_light/
+    ├── 1_3.png
+    └── ...
 ```
 
-**Alternative flat structure:**
+- The name is `<subject>_<impression>.png`, both whole numbers from 1.
+- A **subject** is one finger. Two fingers of one person are two subjects, and all images of one finger have the
+  same subject number, whatever sensor they come from. An **impression** is one image of that finger.
+- Subjects are numbered 1 to `--num_subjects` **without gaps**, impressions 1 to `--num_impressions`, and **every
+  subject needs all its impressions**. The script reads exactly these files.
+- The files may be directly in the directory or in any subdirectories. Subdirectories per sensor, as above, make
+  the resolution manifest short (see [Images from different sensors](#images-from-different-sensors)). The
+  subdirectory is not part of the identity of a file: `optical_500/1_1.png` and `optical_1000/1_1.png` are the same
+  subject and impression, and the script stops when it finds both.
+- Files must be single fingers, 8-bit grayscale, as the sensor delivered them (not resized or enhanced).
 
-```
-data/fingerprints/my-dataset/
-├── 001_01.png
-├── 001_02.png
-├── 002_01.png
-└── ...
-```
+Before it trains, the script compares the files with the two options. It stops with a message that names the first
+missing files if some are not there, and it prints how many image files it does not use (subject number above
+`--num_subjects` or impression number above `--num_impressions`).
+
+If your data does not fit this layout:
+
+- **Other names or another image format:** rename or link the files (a symbolic link per image is enough), or
+  change `_extension` and `_file_to_id_fun` of `CustomFingerprintLoader` in `scripts/train_500k.py`.
+- **A different number of images per finger:** the script cannot express that. Either choose `--num_impressions`
+  as the smallest number that every finger has and number the images of each finger from 1 (the others are not
+  used), or leave out fingers with fewer images and renumber the subjects without gaps. Fingers with a single
+  image cannot be used for validation and cannot be used by this script at all.
+- **Multi-finger images** (four-finger slaps) must be cut into single fingers first.
 
 ### Step 2: Understand the Identifier System
 
-The FLX package uses a simple identifier system:
+Inside the `flx` package a sample is named by an `Identifier`:
 
-- **Subject**: Represents a distinct finger (treated as a unique class during training)
-- **Impression**: Represents a single capture/sample of that finger
+- **Subject**: a distinct finger (one class during training)
+- **Impression**: a single capture of that finger
 
-**Important Notes:**
-- Subject and impression IDs are **zero-indexed** (start from 0)
-- Each unique finger should have a unique subject ID
-- Multiple impressions of the same finger share the same subject ID
+Both are **zero-indexed** in the code, one less than the numbers in the file names: `17_3.png` is
+`Identifier(subject=16, impression=2)`.
 
-**Example:**
 ```python
 from flx.data.dataset import Identifier
 
-# First subject (finger), second impression (sample)
+# First subject (finger), second impression: the file 1_2.png
 my_id = Identifier(subject=0, impression=1)
 ```
 
 ### Step 3: Prepare Minutiae Data (Optional)
 
-Minutiae data is required for training models with the minutia branch (`TexMinu`, `LocTexMinu`, `Minu`, `LocMinu`).
+Minutiae data is required for training the variants with a minutia branch (`TexMinu`, `LocTexMinu`).
 
 #### Option A: Extract Minutiae Using FingerFlow
 
@@ -103,11 +126,13 @@ python scripts/extract_minutiae.py \
 ```
 
 This creates one `.mnt` file with minutiae coordinates and angles per image, in the same directory structure as the
-images. The script needs the `fingerflow` package of a minutiae_extractor revision whose `Extractor` has the
-`image_dpi` option and accepts `None` for the ClassifyNet and CoreNet paths (see
-[AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) for where to get it); the `fingerflow` release on PyPI has neither.
-Without it the script stops with an error at the first image. It needs Pillow, and it does not need torch, so it runs
-in the environment of the extractor.
+images. The script needs the `fingerflow` package of the minutiae_extractor repository
+(https://github.com/craig-forefront/minutiae_extractor) in a revision whose `Extractor` has the `image_dpi` option
+and accepts `None` for the ClassifyNet and CoreNet paths: its branch `claude/serene-albattani-s6ehsj` (commit
+"Make ClassifyNet and CoreNet optional in the Extractor" or later), or its `main` once that branch is merged. The
+`fingerflow` release on PyPI and older checkouts do not work: the script then stops at the first image with exit
+status 2 and a message that names the branch. [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) says how to get it.
+The script needs Pillow, and it does not need torch, so it runs in the environment of the extractor.
 
 The next section, "Images from different sensors", explains the options for resolution and ridge polarity, which you
 must set, and how to run the extraction over a very large number of files. The rest of this section describes the
@@ -123,7 +148,8 @@ output.
   confidences in both runs. CoreNet is never run, because the script never wrote its result (`--core_net` is accepted
   and ignored).
 - `--image_dpi` is only used to find the direction of the minutiae, and it refers to the image after the resampling.
-  Leave it at 500. (If you give the script a resolution that is not the true one, for example `--assume_ppi 500` for
+  Leave it at 500; it is not the option for the resolution of the files (that is `--ppi`), and the script prints a
+  warning when it is not 500. (If you give the script a resolution that is not the true one, for example `--assume_ppi 500` for
   the 292x392 SFinGe example images of this repository, whose ridge period of about 8 px corresponds to about 420 ppi,
   the ridge period of the resampled image is off, and `--image_dpi` can correct the direction step for it: roughly
   `500 * period_px / 9.5`. The setting is tolerant: values up to 50 below or above the suitable one gave the same
@@ -182,6 +208,19 @@ If none of the four gives a value, the file fails with a message that names thes
 resolution. With `--assume_ppi` you take the responsibility that the files without a value really have that
 resolution.
 
+**`--assume_ppi` does not override the metadata of a file.** A file that states a value between 200 and 2100 ppi is
+resampled by that value, also when `--assume_ppi` is given. Image programs do not only write 72 or 96: a 500 ppi
+print that was saved with a 300 or 600 ppi stamp is enlarged or shrunk, in the extraction and in the training
+alike, so nothing else notices. Measured on one 300x400 file with `--assume_ppi 500`: with a stamp of 300 it was
+resampled to 500x667, with 600 to 250x333, with 96 it was left unchanged. Therefore:
+
+- For a dataset of **one known resolution**, use `--ppi`. It wins over the metadata.
+- For mixed sensors, use the manifest. A manifest row also wins over the metadata.
+- Read the counts that the scripts print. The extraction ends with "Resolution of the files extracted in this
+  run", the training starts with "Resolution of ... training images" (up to 1,000 files spread over the set): one
+  line per source and value, and a note when files took their resolution from metadata although `--assume_ppi`
+  was given.
+
 The manifest has a header line and the columns `path`, `ppi` and optionally `ridges`. Paths are relative to the image
 directory (`--input_dir` of the extraction, `--dataset_dir` of the training). A row for a directory applies to all
 files below it; the row of a file wins over that of its directory. If the files of each sensor are in their own
@@ -211,8 +250,9 @@ wrong for 11. Without a decision, `auto` takes the image as dark-ridged.
 
 The extraction checks every image with the same estimate, whatever the setting. An image that looks different from
 what it was declared to be is still extracted, and it is listed with the reason in `extraction_warnings.txt` in the
-output directory. Read that file after the first shard: many entries from one sensor mean that its polarity is
-declared wrongly.
+output directory (with shards: `extraction_warnings.shard-00000-of-00064.txt`, one file per shard; a run without
+warnings leaves no file). Read that file after the first shard: many entries from one sensor mean that its
+polarity is declared wrongly.
 
 **Different image sizes.** The sensors may deliver images of different sizes; every `.mnt` file carries the size of
 its own image. By default the training pads every 500 ppi image to a square of its own longer side and scales that to
@@ -233,9 +273,11 @@ the minutiae are moved with it. Things to know before you choose N:
   learned alignment in "How to find out whether it helps on your data".
 - The default is 0 (no canvas), which is the behaviour before this option existed.
 
-The training writes its preparation settings to `data_preparation.json` in the output directory. When the trained
-model is used later, the images must be prepared in the same way; `create_validation_image_loader` in
-`scripts/train_500k.py` builds that loader.
+The training writes its preparation settings to `training_settings.json` (and, alone, to `data_preparation.json`)
+in the output directory. When the trained model is used later, the images must be prepared in the same way;
+`load_trained_model` in `scripts/train_500k.py` builds the loader from that file, see
+[Step 9](#step-9-extract-embeddings). A training that is continued with another preparation stops, see
+[Step 7](#step-7-continue-a-training-or-start-again).
 
 **A check against mixed-up data.** The training compares the image size in the header of each `.mnt` file with the
 size of the image that it loaded. If they do not fit (the image file was replaced, or extraction and training were
@@ -243,7 +285,8 @@ given different options), it stops with a message that names the sample and both
 only a different shape (ratio of width to height) is an error, because image and minutiae are both scaled by the
 longer side, so the same picture at another resolution still fits. With `--canvas_size` the sizes must be equal.
 
-**If you write your own image loader** (Step 4 below) instead of using `scripts/train_500k.py`, load the files with
+**If you write your own image loader** instead of using `scripts/train_500k.py` (see
+[Your own loader or training script](#your-own-loader-or-training-script)), load the files with
 `SensorNormalizer.load` there as well, as `CustomFingerprintLoader` in that script does. A loader that reads the
 files directly gets images in other pixels than the `.mnt` files for every sensor that is not at 500 ppi.
 
@@ -291,7 +334,7 @@ interrupted and is continued.
    `extraction_errors.shard-00000-of-00064.txt` (`extraction_errors.txt` without shards) in the output directory:
    the path, a tab, and the reason, for example an unreadable file, an unknown resolution or an error inside the
    extractor. The exit status of the process is 1 if any file of its run failed, 0 if none did, and 2 if the run did
-   not start (settings differ from those stored in the output directory). Every run starts its log anew; with
+   not start (settings differ from those stored in the output directory, or the minutiae extractor is too old). Every run starts its log anew; with
    `--skip_existing` the log then lists exactly the files of the shard that still have no `.mnt` file. If a worker
    process dies (for example because the machine runs out of memory), the files that were being worked on are logged
    as failed and the run goes on with new processes; this happened once in the runs for the table above. Remove the
@@ -299,7 +342,9 @@ interrupted and is continued.
 
 5. **Check that it is complete** before the training: run every shard once more with `--skip_existing`. Each should
    end with "Successful: 0", "Failed: 0" and exit status 0. The training needs a `.mnt` file for every image that it
-   uses; files that can not be extracted must be taken out of the dataset. A print for which the extractor finds no
+   trains on, and stops before the first epoch with the names of the first missing ones. Images that can not be
+   extracted must be taken out of the dataset; because the subjects must be numbered without gaps (Step 1), that
+   means renumbering, or replacing the image. A print for which the extractor finds no
    minutia gets a `.mnt` file with 0 minutiae; the training leaves it out of the minutia map loss and uses it for
    the rest (see "Loss weights"). The script prints how many there were.
 
@@ -309,612 +354,155 @@ adapt the loader. Multi-finger images must be cut into single fingers before bot
 
 #### Option B: Use Texture-Only Models
 
-If you don't have minutiae data, use texture-only variants (`Tex`, `LocTex`) which don't require minutiae.
-
----
-
-## Implementing Your Custom Data Loader
-
-### Step 4: Create Your ImageLoader Class
-
-Create a new Python file for your dataset loader: `flx/data/my_dataset_loader.py`
-
-```python
-from flx.data.image_loader import ImageLoader
-from flx.data.dataset import Identifier
-import torch
-import torchvision.transforms.functional as VTF
-import cv2
-from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
-
-
-class MyDatasetLoader(ImageLoader):
-    """
-    Custom loader for your fingerprint dataset.
-
-    Adapt the methods below to match your dataset structure and naming convention.
-    """
-
-    @staticmethod
-    def _extension() -> str:
-        """
-        Return the file extension of your images.
-
-        Examples: ".png", ".jpg", ".bmp", ".tif"
-        """
-        return ".png"
-
-    @staticmethod
-    def _file_to_id_fun(subdir: str, filename: str) -> Identifier:
-        """
-        Parse the subdirectory and filename to extract subject and impression IDs.
-
-        Args:
-            subdir: Relative subdirectory path from root (e.g., "subject_001" or "")
-            filename: Filename without extension (e.g., "impression_01")
-
-        Returns:
-            Identifier with zero-indexed subject and impression
-
-        Examples:
-
-        # Example 1: Flat structure with pattern "subjectID_impressionID.png"
-        # File: "042_03.png" -> Subject 42, Impression 3
-        subject_id, impression_id = filename.split("_")
-        return Identifier(int(subject_id), int(impression_id))
-
-        # Example 2: Nested structure "subject_XXX/impression_YY.png"
-        # Directory: "subject_042", File: "impression_03.png"
-        subject_id = int(subdir.split("_")[1])  # Extract from "subject_042"
-        impression_id = int(filename.split("_")[1])  # Extract from "impression_03"
-        return Identifier(subject_id, impression_id)
-
-        # Example 3: Complex pattern "person_012_finger_04_sample_02.png"
-        parts = filename.split("_")
-        person_id = int(parts[1])
-        finger_id = int(parts[3])
-        impression_id = int(parts[5])
-        # Treat each finger as separate subject (person has 10 fingers)
-        subject_id = (person_id * 10) + finger_id
-        return Identifier(subject_id, impression_id)
-        """
-
-        # TODO: Implement your parsing logic here
-        # This example assumes flat structure: "SUBJ_IMP.png"
-        subject_id, impression_id = filename.split("_")
-        return Identifier(int(subject_id), int(impression_id))
-
-    @staticmethod
-    def _load_image(filepath: str) -> torch.Tensor:
-        """
-        Load and preprocess a single image.
-
-        Args:
-            filepath: Absolute path to the image file
-
-        Returns:
-            torch.Tensor of shape (1, height, width) with values in [0, 1]
-
-        Notes:
-            - Images must be grayscale
-            - DeepPrint expects 299x299 input size
-            - Use pad_and_resize_to_deepprint_input_size for resizing
-        """
-        # Load as grayscale
-        img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
-
-        # Only option 2 keeps the minutia maps of FingerFlowMinutiaMapLoader aligned
-        # with the images: it scales the minutiae for the padded, complete image.
-
-        # Option 1: Simple resize to 299x299 (may distort aspect ratio)
-        # img = cv2.resize(img, (299, 299))
-        # return VTF.to_tensor(img)
-
-        # Option 2: Pad and resize (preserves aspect ratio, recommended)
-        # The fill value determines padding color (0.0=black, 1.0=white)
-        return pad_and_resize_to_deepprint_input_size(
-            VTF.to_tensor(img),
-            fill=1.0  # White padding
-        )
-
-        # Option 3: Crop specific region then resize (e.g., for images with borders)
-        # roi = (height, width)  # Size of the center crop
-        # return pad_and_resize_to_deepprint_input_size(
-        #     VTF.to_tensor(img),
-        #     roi=roi,
-        #     fill=1.0
-        # )
-```
-
-**Testing Your Loader:**
-
-```python
-# Test in Python or Jupyter notebook
-from flx.data.my_dataset_loader import MyDatasetLoader
-
-loader = MyDatasetLoader("/path/to/data/fingerprints/my-dataset")
-
-# Check what identifiers were found
-print(f"Found {loader.ids.num_subjects} subjects")
-print(f"Found {len(loader.ids)} total samples")
-print(f"First 5 identifiers: {list(loader.ids)[:5]}")
-
-# Test loading an image
-test_id = list(loader.ids)[0]
-img = loader.get(test_id)
-print(f"Image shape: {img.shape}")  # Should be (1, H, W)
-print(f"Value range: [{img.min():.3f}, {img.max():.3f}]")  # Should be [0, 1]
-
-# Visualize (optional)
-import matplotlib.pyplot as plt
-plt.imshow(img.squeeze(), cmap='gray')
-plt.title(f"Subject {test_id.subject}, Impression {test_id.impression}")
-plt.show()
-```
-
-### Step 5: Create Minutiae Loader (Optional)
-
-If you extracted minutiae using the FingerFlow script, create a minutiae map loader. The `.mnt` files are in the
-same structure as your images, just in a different root directory:
-
-```python
-# In the same file: flx/data/my_dataset_loader.py
-
-from flx.data.fingerflow_minutia_loader import FingerFlowMinutiaMapLoaderCustomNaming
-
-class MyDatasetMinutiaMapLoader(FingerFlowMinutiaMapLoaderCustomNaming):
-    """
-    Loader for minutiae extracted by FingerFlow.
-    """
-
-    def __init__(self, root_dir: str):
-        super().__init__(root_dir, self._file_to_id_fun)
-
-    @staticmethod
-    def _file_to_id_fun(subdir: str, filename: str) -> Identifier:
-        # Should match your image loader's logic exactly
-        subject_id, impression_id = filename.split("_")
-        return Identifier(int(subject_id), int(impression_id))
-```
-
----
-
-## Configuring Your Dataset
-
-### Step 6: Create Dataset Configuration
-
-Create a function in `flx/setup/datasets.py` or in your own training script:
-
-```python
-from flx.data.dataset import Dataset, IdentifierSet, Identifier
-from flx.data.transformed_image_loader import TransformedImageLoader
-from flx.data.label_index import LabelIndex
-from flx.data.my_dataset_loader import MyDatasetLoader, MyDatasetMinutiaMapLoader
-from flx.data.minutia_map_loader import PoseTransformedMinutiaMapLoader
-from flx.image_processing.binarization import LazilyAllocatedBinarizer
-from flx.image_processing.augmentation import RandomPoseTransform, RandomQualityTransform
-from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
-
-
-def get_my_dataset_training(root_dir: str) -> tuple[Dataset, Dataset, Dataset]:
-    """
-    Load training dataset with augmentation.
-
-    Args:
-        root_dir: Root directory containing fingerprint images
-
-    Returns:
-        tuple of (images, minutia_maps, labels)
-    """
-
-    # 1. Load raw images
-    raw_loader = MyDatasetLoader(root_dir)
-
-    # 2. Configure augmentation
-    # Pose augmentation: random rotation and translation during training
-    pose_augmentation = RandomPoseTransform(
-        pad=0,
-        angle_min=-15,      # Rotate up to ±15 degrees
-        angle_max=15,
-        shift_horizontal_min=-25,  # Shift up to ±25 pixels
-        shift_horizontal_max=25,
-        shift_vertical_min=-25,
-        shift_vertical_max=25,
-    )
-
-    # Quality augmentation: random contrast and gain adjustments
-    quality_augmentation = RandomQualityTransform(
-        contrast_min=1.3,
-        contrast_max=2.0,
-        gain_min=0.95,
-        gain_max=1.05,
-    )
-
-    # Binarization: Gabor filtering for ridge enhancement
-    # The ridge_width parameter depends on your sensor resolution
-    # Typical values: 3.0-6.0 (lower for higher DPI sensors)
-    binarization = LazilyAllocatedBinarizer(ridge_width=5.0)
-
-    # 3. Create transformed image loader
-    transformed_images = TransformedImageLoader(
-        images=raw_loader,
-        poses=pose_augmentation,  # Set to None for no augmentation
-        transforms=[
-            quality_augmentation,
-            binarization,
-            pad_and_resize_to_deepprint_input_size,
-        ],
-    )
-
-    # 4. Create image dataset
-    image_dataset = Dataset(transformed_images, raw_loader.ids)
-
-    # 5. Load minutiae (if available)
-    # The pose augmentation only transforms the image. PoseTransformedMinutiaMapLoader
-    # applies the random pose of each image to its minutiae as well, so that the
-    # minutia map still matches the image.
-    try:
-        minutia_loader = MyDatasetMinutiaMapLoader(root_dir.replace("fingerprints", "poses"))
-        minutia_loader = PoseTransformedMinutiaMapLoader(minutia_loader, transformed_images)
-        minutia_dataset = Dataset(minutia_loader, raw_loader.ids)
-    except Exception as e:
-        print(f"Warning: Could not load minutiae: {e}")
-        print("Using empty minutiae maps (only texture-based training supported)")
-        from flx.data.dataset import ConstantDataLoader
-        import torch
-        minutia_dataset = Dataset(
-            ConstantDataLoader((torch.tensor([]), 0.0)),
-            raw_loader.ids
-        )
-
-    # 6. Create labels for classification
-    label_dataset = Dataset(LabelIndex(raw_loader.ids), raw_loader.ids)
-
-    return image_dataset, minutia_dataset, label_dataset
-
-
-def get_my_dataset_validation(root_dir: str) -> Dataset:
-    """
-    Load validation dataset WITHOUT augmentation.
-
-    Args:
-        root_dir: Root directory containing fingerprint images
-
-    Returns:
-        Dataset of validation images
-    """
-
-    raw_loader = MyDatasetLoader(root_dir)
-
-    # No pose augmentation for validation
-    transformed_images = TransformedImageLoader(
-        images=raw_loader,
-        poses=None,  # No augmentation
-        transforms=[
-            LazilyAllocatedBinarizer(ridge_width=5.0),
-            pad_and_resize_to_deepprint_input_size,
-        ],
-    )
-
-    return Dataset(transformed_images, raw_loader.ids)
-```
-
----
-
-## Model Selection and Configuration
-
-### Step 7: Choose a Model Architecture
-
-The FLX package provides several DeepPrint variants:
-
-| Model Variant | Localization | Texture Branch | Minutia Branch | Minutiae Required |
-|---------------|--------------|----------------|----------------|-------------------|
-| `Tex` | ❌ | ✅ | ❌ | No |
-| `Minu` | ❌ | ❌ | ✅ | Yes |
-| `TexMinu` | ❌ | ✅ | ✅ | Yes |
-| `LocTex` | ✅ | ✅ | ❌ | No |
-| `LocMinu` | ✅ | ❌ | ✅ | Yes |
-| `LocTexMinu` | ✅ | ✅ | ✅ | Yes |
-
-**Recommendations:**
-- **Start with `Tex`**: Simplest, fastest training, no minutiae needed
-- **Use `TexMinu`**: Best performance when minutiae available
-- **`LocTex` or `LocTexMinu`** add a learned alignment of the image. Whether
-  it makes matching more accurate depends on the data and has to be measured:
-  see [Learned alignment](#learned-alignment) for how it works, what keeps it
-  stable and how to compare a training with and without it.
-
-**Embedding sizes:**
-- Common sizes: 128, 256, 512, 1024
-- Paper recommendation: **512** provides optimal performance
-- Smaller sizes train faster but may have lower accuracy
-
-### Step 8: Split Your Dataset
-
-Split your data into training and validation sets:
-
-```python
-from flx.data.dataset import IdentifierSet, Identifier
-
-# Example: 80% training, 20% validation
-total_subjects = 1000  # Your total number of subjects
-impressions_per_subject = 10  # Your impressions per subject
-
-# Split by subject (recommended)
-train_subjects = list(range(800))  # First 800 subjects
-val_subjects = list(range(800, 1000))  # Last 200 subjects
-
-# Create identifier sets
-train_ids = IdentifierSet([
-    Identifier(s, i)
-    for s in train_subjects
-    for i in range(impressions_per_subject)
-])
-
-val_ids = IdentifierSet([
-    Identifier(s, i)
-    for s in val_subjects
-    for i in range(impressions_per_subject)
-])
-
-print(f"Training: {train_ids.num_subjects} subjects, {len(train_ids)} samples")
-print(f"Validation: {val_ids.num_subjects} subjects, {len(val_ids)} samples")
-```
-
-**Important**: Filter your datasets to only include the split identifiers:
-
-```python
-# Apply splits to your datasets
-train_images = train_images.ids.filter_by_identifiers(train_ids)
-val_images = val_images.ids.filter_by_identifiers(val_ids)
-```
+If you don't have minutiae data, leave `--minutiae_dir` out of the training command. The script then trains a
+texture-only variant (`LocTex`, or `Tex` with `--localization off`), which does not need minutiae.
 
 ---
 
 ## Training the Model
 
-### Step 9: Create Validation Benchmark
+### Step 4: Choose the model variant and the embedding size
 
-The validation benchmark defines which fingerprint pairs to compare for computing the Equal Error Rate (EER):
+`scripts/train_500k.py` trains one of four DeepPrint variants. Two options choose it:
 
-```python
-from flx.benchmarks.verification import VerificationBenchmark
-from flx.benchmarks.biometric_comparison import BiometricComparison
+| Variant | `--minutiae_dir` | `--localization` | Minutiae needed |
+|---------|------------------|------------------|-----------------|
+| `DeepPrint_LocTexMinu` | given | `on` (the default) | yes |
+| `DeepPrint_TexMinu` | given | `off` | yes |
+| `DeepPrint_LocTex` | not given | `on` (the default) | no |
+| `DeepPrint_Tex` | not given | `off` | no |
 
-def create_validation_benchmark(identifier_set: IdentifierSet) -> VerificationBenchmark:
-    """
-    Create a verification benchmark from an identifier set.
+- `Tex` is the texture branch, `Minu` the minutia branch, `Loc` the localization network (a learned alignment of
+  the image).
+- Without `--minutiae_dir` the script trains a texture-only variant and says so in its first lines. If you
+  extracted minutiae, give the option.
+- Whether the localization network makes matching more accurate depends on the data and has to be measured: see
+  [Learned alignment](#learned-alignment) for how it works, what keeps it stable and how to compare a training
+  with and without it.
 
-    Creates:
-    - Mated comparisons: same subject, different impressions
-    - Non-mated comparisons: different subjects
-    """
-    comparisons = []
-    subjects = sorted(set(id.subject for id in identifier_set))
+**Embedding size.** `--embedding_dim` is the number of values **per branch** (default 256). A variant with
+minutiae has two branches, so the embedding of a print has twice that many values: 512 with the default. A
+texture-only variant has 256 with the default. The paper behind this repository found 512 values best for the
+texture-only variant on its data; what is best on your data was not measured here. Smaller embeddings need less
+memory in the classifier (see [Above about one million subjects](#above-about-one-million-subjects)) and in the
+gallery.
 
-    # Mated comparisons: all pairs within same subject
-    for subject in subjects:
-        subject_impressions = [
-            id.impression for id in identifier_set
-            if id.subject == subject
-        ]
-        # Compare each impression with every other impression
-        for i, imp1 in enumerate(subject_impressions):
-            for imp2 in subject_impressions[i+1:]:
-                comparisons.append(BiometricComparison(
-                    Identifier(subject, imp1),
-                    Identifier(subject, imp2)
-                ))
+### Step 5: Find a learning rate
 
-    # Non-mated comparisons: different subjects
-    # To keep it manageable, compare each subject with next N subjects
-    N_NON_MATED_SUBJECTS = min(20, len(subjects) - 1)
+Run `scripts/find_learning_rate.py` with the options of the planned training, as described under
+[Choosing the learning rate](#choosing-the-learning-rate). The default of 0.0001 did not diverge in the short
+runs made here; it is not known to be the best rate for your data.
 
-    for i, subject1 in enumerate(subjects):
-        for subject2 in subjects[i+1:i+1+N_NON_MATED_SUBJECTS]:
-            # Use first impression from each subject
-            impressions1 = [id.impression for id in identifier_set if id.subject == subject1]
-            impressions2 = [id.impression for id in identifier_set if id.subject == subject2]
+### Step 6: Run the training
 
-            if impressions1 and impressions2:
-                comparisons.append(BiometricComparison(
-                    Identifier(subject1, impressions1[0]),
-                    Identifier(subject2, impressions2[0])
-                ))
-
-    print(f"Created benchmark with {len(comparisons)} comparisons")
-    return VerificationBenchmark(comparisons)
-
-# Create the benchmark
-validation_benchmark = create_validation_benchmark(val_ids)
-```
-
-### Step 10: Create Training Script
-
-Create `train_my_model.py`:
-
-```python
-#!/usr/bin/env python3
-"""
-Training script for custom dataset in air-gapped environment.
-"""
-
-import os
-from flx.extractor.fixed_length_extractor import (
-    get_DeepPrint_Tex,
-    get_DeepPrint_TexMinu,
-    get_DeepPrint_LocTexMinu,
-)
-from flx.data.dataset import IdentifierSet, Identifier
-
-# Import your dataset functions
-from flx.setup.datasets import (  # Or from your own module
-    get_my_dataset_training,
-    get_my_dataset_validation,
-)
-
-# Configuration
-DATASET_ROOT = "/path/to/data/fingerprints/my-dataset"
-MODEL_OUTPUT_DIR = "/path/to/models/my-model-v1"
-NUM_EPOCHS = 100
-PATIENCE = 10  # Early stopping after 10 epochs without improvement
-
-# Model configuration
-MODEL_TYPE = "Tex"  # Options: "Tex", "TexMinu", "LocTexMinu", etc.
-EMBEDDING_SIZE = 512
-
-# Dataset split
-TOTAL_SUBJECTS = 1000
-TRAIN_SUBJECTS = 800
-IMPRESSIONS_PER_SUBJECT = 10
-
-def main():
-    print("="*80)
-    print("Training Configuration")
-    print("="*80)
-    print(f"Dataset: {DATASET_ROOT}")
-    print(f"Model type: {MODEL_TYPE}")
-    print(f"Embedding size: {EMBEDDING_SIZE}")
-    print(f"Training subjects: {TRAIN_SUBJECTS}")
-    print(f"Validation subjects: {TOTAL_SUBJECTS - TRAIN_SUBJECTS}")
-    print(f"Output directory: {MODEL_OUTPUT_DIR}")
-    print("="*80)
-
-    # Create output directory
-    os.makedirs(MODEL_OUTPUT_DIR, exist_ok=True)
-
-    # Load datasets
-    print("\nLoading training dataset...")
-    train_images, train_minutiae, train_labels = get_my_dataset_training(DATASET_ROOT)
-
-    print(f"Loaded {train_images.ids.num_subjects} training subjects, {len(train_images)} samples")
-
-    # Filter to training split
-    train_ids = IdentifierSet([
-        Identifier(s, i)
-        for s in range(TRAIN_SUBJECTS)
-        for i in range(IMPRESSIONS_PER_SUBJECT)
-    ])
-
-    train_images = train_images.filter_by_identifiers(train_ids)
-    train_minutiae = train_minutiae.filter_by_identifiers(train_ids)
-    train_labels = train_labels.filter_by_identifiers(train_ids)
-
-    print(f"Filtered to {len(train_images)} training samples")
-
-    # Load validation dataset
-    print("\nLoading validation dataset...")
-    val_images = get_my_dataset_validation(DATASET_ROOT)
-
-    val_ids = IdentifierSet([
-        Identifier(s, i)
-        for s in range(TRAIN_SUBJECTS, TOTAL_SUBJECTS)
-        for i in range(IMPRESSIONS_PER_SUBJECT)
-    ])
-
-    val_images = val_images.filter_by_identifiers(val_ids)
-    print(f"Loaded {len(val_images)} validation samples")
-
-    # Create validation benchmark
-    print("\nCreating validation benchmark...")
-    from train_my_model import create_validation_benchmark  # From Step 9
-    validation_benchmark = create_validation_benchmark(val_ids)
-
-    # Initialize model
-    print(f"\nInitializing {MODEL_TYPE} model...")
-    if MODEL_TYPE == "Tex":
-        extractor = get_DeepPrint_Tex(
-            num_training_subjects=TRAIN_SUBJECTS,
-            num_texture_dims=EMBEDDING_SIZE
-        )
-    elif MODEL_TYPE == "TexMinu":
-        extractor = get_DeepPrint_TexMinu(
-            num_training_subjects=TRAIN_SUBJECTS,
-            num_dims=EMBEDDING_SIZE
-        )
-    elif MODEL_TYPE == "LocTexMinu":
-        extractor = get_DeepPrint_LocTexMinu(
-            num_training_subjects=TRAIN_SUBJECTS,
-            num_dims=EMBEDDING_SIZE
-        )
-    else:
-        raise ValueError(f"Unknown model type: {MODEL_TYPE}")
-
-    # Train
-    print("\nStarting training...")
-    print(f"Training for up to {NUM_EPOCHS} epochs (early stopping patience: {PATIENCE})")
-
-    extractor.fit(
-        fingerprints=train_images,
-        minutia_maps=train_minutiae,
-        labels=train_labels,
-        validation_fingerprints=val_images,
-        validation_benchmark=validation_benchmark,
-        num_epochs=NUM_EPOCHS,
-        out_dir=MODEL_OUTPUT_DIR,
-        patience=PATIENCE,
-    )
-
-    print("\n" + "="*80)
-    print("Training complete!")
-    print(f"Model saved to: {MODEL_OUTPUT_DIR}")
-    print("="*80)
-
-    # Print best validation result
-    from flx.models.model_training import TrainingLog
-    log = TrainingLog(os.path.join(MODEL_OUTPUT_DIR, "log.json"))
-    best = log.best_entry
-    print(f"\nBest epoch: {best.epoch} (lowest {log.selection_metric})")
-    print(f"Validation EER of that epoch: {best.validation_equal_error_rate}")
-
-
-if __name__ == "__main__":
-    main()
-```
-
-### Step 11: Run Training
+One complete command for a dataset of 50,000 fingers with 10 images each, with minutiae and a resolution manifest:
 
 ```bash
-# Activate virtual environment
-source venv/bin/activate
-
-# Run training
-python train_my_model.py
+python scripts/train_500k.py \
+  --dataset_dir data/fingerprints/my-dataset \
+  --minutiae_dir data/poses/my-dataset \
+  --num_subjects 50000 --num_impressions 10 \
+  --ppi_manifest data/fingerprints/my-dataset-resolutions.csv \
+  --learning_rate 0.0001 --lr_schedule cosine \
+  --num_epochs 10 \
+  --output_dir models/my-model-v1
 ```
 
-**Expected output:**
+- `--num_subjects` and `--num_impressions` must be what the directory holds (Step 1). They have defaults
+  (50,000 and 10), but always give them.
+- `--ppi_manifest` (or `--ppi`, `--assume_ppi`, `--ridges`) must be exactly what the minutiae extraction was
+  given, see [Images from different sensors](#images-from-different-sensors). Without any of them a file that
+  does not state its resolution stops the script.
+- `--learning_rate` is the value from Step 5. All learning rate options are explained under
+  [Choosing the learning rate](#choosing-the-learning-rate).
+- `--batch_size` is the number of images per step on each GPU (default 64). Lower it if the GPU runs out of
+  memory. The range test of Step 5 must use the batch size of the training.
+- Validation is on by default: 10 % of the subjects, at most 5,000, are held out (see
+  [Which epoch becomes `best_model.pyt`](#which-epoch-becomes-best_modelpyt)). `--validation_split 0` trains
+  without validation.
+- On several GPUs, put `torchrun --nproc_per_node=NUM_GPUS` in place of `python` (see
+  [Multi-GPU Training](#multi-gpu-training)).
+- `python scripts/train_500k.py --help` lists all options; the docstring at the top of the script describes them.
+
+**How many epochs.** `--num_epochs` is an upper limit (default 10); with validation the training stops earlier
+when the validation error rate has not fallen for `--patience` epochs (default 3). How many epochs a large
+dataset needs was not measured here. The trainings of the paper, on 60,000 synthetic images, ran for up to 100
+epochs; with far more images per epoch fewer are needed. With `--lr_schedule cosine` the learning rate falls over
+exactly `--num_epochs` epochs, so set the number once and do not change it in a running training.
+
+**What the script prints first** (shortened; from the run on 12 images of 4 fingers that is listed at the end of
+this guide):
+
 ```
-================================================================================
-Training Configuration
-================================================================================
-Dataset: /path/to/data/fingerprints/my-dataset
-Model type: Tex
-Embedding size: 512
-Training subjects: 800
-Validation subjects: 200
-Output directory: /path/to/models/my-model-v1
-================================================================================
-
-Loading training dataset...
-Loaded 800 training subjects, 8000 samples
-
- --- Starting Epoch 1 of 100 ---
-
-Training:
-100%|██████████| 125/125 [02:15<00:00,  1.08s/it]
-Average Loss: 4.234
-Multiclass accuracy: 0.342
-
-Validation:
-Equal Error Rate: 0.2453
-
+============================================================
+Training DeepPrint with Learned Alignment (LocTexMinu (texture + minutiae))
+============================================================
+Dataset:      data/fingerprints/my-dataset
+Minutiae:     data/poses/my-dataset
+Images:       resampled to 500 ppi; resolution from manifest (3 rows), file metadata, else the file fails; ridges dark
+Canvas:       square of the longer side of each image
+Batch size:   4 images per step and GPU
+Subjects:     4 total
+  Training:   2 subjects
+  Validation: 2 subjects held out (seed 42)
+Impressions:  3
 ...
+Embedding:    256 values per branch, 512 per print
+...
+Scanning data/fingerprints/my-dataset for .png files...
+Resolution of 6 training images spread over the set:
+             4  1000 ppi from manifest (resampled to 500 ppi)
+             2  500 ppi from manifest
 ```
 
-**Training time estimates (NVIDIA A100):**
-- 10-15 minutes per epoch for 8,000 samples
-- 50-100 epochs typical for convergence
-- Total: 8-25 hours depending on complexity
+Read these lines before you let a long training run: the variant, the number of training subjects, and where the
+resolution of the images comes from. The last block looks at up to 1,000 training images. If it shows files that
+took a resolution "from metadata of the file" which you did not expect, see
+[Images from different sensors](#images-from-different-sensors).
+
+**What the script writes** to `--output_dir`:
+
+| File | Content |
+|------|---------|
+| `model.pyt` | The model, the loss and the optimizer after the newest epoch. The training continues from it |
+| `best_model.pyt` | A copy of `model.pyt` of the best epoch so far |
+| `log.json` | One entry per epoch, see [Step 8](#step-8-monitor-training-progress) |
+| `training_settings.json` | The settings of the training. Needed to continue it and to load the model later |
+| `data_preparation.json` | The image preparation settings alone (also part of `training_settings.json`) |
+
+### Step 7: Continue a training, or start again
+
+**The same command continues.** If `--output_dir` holds a `model.pyt`, the script loads it and trains the next
+epoch. This is how you continue after an interruption: run the same command again. A training that was stopped
+in the middle of an epoch starts that epoch again from the end of the one before; if it was stopped while an epoch
+was being validated, that epoch is validated first.
+
+**To start again from nothing, use a new `--output_dir`** (or delete the old directory). There is no option
+that overwrites a training.
+
+**A continued training must be the same training.** The script compares its options with
+`training_settings.json`:
+
+- It **stops** (exit status 2, with the list of differences) if one of these differs: the variant
+  (`--localization`, `--minutiae_dir` given or not), `--embedding_dim`, `--num_subjects`, `--num_impressions`,
+  the validation options, `--batch_size`, `--canvas_size`, or the image preparation (`--ppi`, the content of the
+  manifest, `--assume_ppi`, `--ridges`). Train with such a change in a new `--output_dir`.
+  `--allow_changed_settings` continues anyway; use it only if you know that the change is harmless (for example a
+  smaller `--batch_size` after the GPU ran out of memory).
+- It **continues and lists the changes** if only these differ: the learning rate options, the loss weights,
+  `--num_epochs`, `--patience`. They hold from the next epoch on. `--localization_lr_factor` is one of them: a
+  continued training uses the factor of the new command.
+- **If nothing is left to train**, the script says "Nothing was trained in this run". That is the case when the
+  log already has `--num_epochs` epochs, or when the training ended by early stopping. A changed learning rate
+  has no effect on a finished training: raise `--num_epochs` to train further epochs with it, or use a new
+  `--output_dir` to train again from the start.
+
+So "divide the learning rate by 3 and start again", as the sections below sometimes advise, means: a new
+`--output_dir` if you want a new training, the same one if you want to continue from the last saved epoch with
+the lower rate.
+
+A directory that was written before `training_settings.json` existed is continued with a note; only its image
+preparation can be compared.
 
 ---
 
@@ -983,7 +571,7 @@ After the warm-up there are two choices (the *schedule*):
 | Stop when the loss is this many times the starting loss | (config only) | `LOSS_EXPLOSION_FACTOR = 10.0` |
 | Factor of the learning rate of the localization network (`Loc` variants only, see [Learned alignment](#learned-alignment)) | `--localization_lr_factor` | `LOCALIZATION_LEARNING_RATE_FACTOR = 0.035` |
 
-In your own training script, pass the settings to `fit`:
+`scripts/train_500k.py` passes these options on. If you call `fit` yourself, pass the settings to it:
 
 ```python
 from flx.models.learning_rate import LearningRateConfig
@@ -1010,11 +598,13 @@ few hundred near 0.001, so a limit such as 1.0 from other projects would
 shrink every single step.
 
 The training follows the schedule by counting steps, so it continues
-correctly when you resume a training from `model.pyt`, as long as the number
-of epochs, the training set and the batch size are the same as before. If you
-resume with a larger number of epochs, the `cosine` schedule is stretched to
-the new length and the rate jumps back up; prefer to set the number of epochs
-once. In a multi-GPU training all processes use the same rate.
+correctly when you continue a training from `model.pyt`
+([Step 7](#step-7-continue-a-training-or-start-again)), as long as the number
+of epochs, the training set, the batch size and the number of GPUs are the
+same as before. If you continue with a larger number of epochs, the `cosine`
+schedule is stretched to the new length and the rate jumps back up; prefer to
+set the number of epochs once. `scripts/train_500k.py` points this out when
+it happens. In a multi-GPU training all processes use the same rate.
 
 ### How to run the range test
 
@@ -1026,13 +616,13 @@ same directory layout as `scripts/train_500k.py` and saves no model.
 
 ```bash
 python scripts/find_learning_rate.py \
-    --dataset_dir /path/to/fingerprints \
-    --minutiae_dir /path/to/minutiae \
+    --dataset_dir data/fingerprints/my-dataset \
+    --minutiae_dir data/poses/my-dataset \
     --num_subjects 50000 --num_impressions 10 \
     --max_subjects 2000 \
     --batch_size 64 \
-    --ppi_manifest /path/to/resolutions.csv \
-    --output_dir /path/to/lr_range_test
+    --ppi_manifest data/fingerprints/my-dataset-resolutions.csv \
+    --output_dir models/lr_range_test
 ```
 
 - `--ppi_manifest` (or `--ppi`, `--assume_ppi`, `--ridges`, `--canvas_size`) must be what the minutiae extraction
@@ -1041,7 +631,9 @@ python scripts/find_learning_rate.py \
 - `--max_subjects 2000` uses a random 2,000 of the subjects. The test needs
   `--num_steps` times `--batch_size` images (19,200 with the defaults); a
   subset with at least that many images is enough.
-- `--batch_size` must be the batch size of the planned training.
+- `--batch_size` must be the `--batch_size` of the planned training (both
+  scripts default to 64). The script reads the same file layout as the
+  training and stops with the same message when files are missing.
 - `--variant` chooses the model (`LocTexMinu`, `TexMinu`, `LocTex`, `Tex`).
   Without it the script tests what `train_500k.py` trains by default. For a
   training with `--localization off`, test `TexMinu` or `Tex`.
@@ -1196,11 +788,11 @@ thousand steps as described below.
 
 ### How the rate changes with the batch size and the number of GPUs
 
-`train_model` uses a batch of 64 images per GPU (`get_dataloader_args` in
-`flx/models/torch_helpers.py`). With `torchrun` on several GPUs every GPU
-processes its own batch of 64 and the results are averaged, so one step sees
-**64 times the number of GPUs** images. That product is the *effective batch
-size*, and it is the batch size that matters for the learning rate.
+The training uses a batch of `--batch_size` images per GPU (default 64). With
+`torchrun` on several GPUs every GPU processes its own batch and the results
+are averaged, so one step sees **`--batch_size` times the number of GPUs**
+images. That product is the *effective batch size*, and it is the batch size
+that matters for the learning rate.
 
 - A larger effective batch gives a more reliable direction per step, so it
   usually tolerates a higher rate. There is no exact rule for Adam. A
@@ -1225,8 +817,11 @@ size*, and it is the batch size that matters for the learning rate.
 The progress bar shows the loss and the learning rate of every step:
 
 ```
-  3%|▎         | 212/7032 [02:41<1:26:35,  1.31it/s, loss=21.3, lr=4.24e-05]
+  3%|▎         | 212/7032 [02:41<1:26:35,  1.31it/s, loss=131.7, lr=4.24e-05]
 ```
+
+(The line shows the format; its numbers are made up. The loss is the one of
+a variant with minutiae shortly after the start, see the next point.)
 
 - **The starting loss.** A fresh model guesses, so each of its classifiers
   starts with a loss near the natural logarithm of the number of training
@@ -1258,7 +853,12 @@ The progress bar shows the loss and the learning rate of every step:
   loss is not a number or more than ten times its starting value, before the
   broken model is saved. The last completed epoch stays in `model.pyt`.
 - **If the training stops this way:** divide the learning rate by 3, double
-  the warm-up steps, and consider a limit for the gradient. Then start again.
+  the warm-up steps, and consider a limit for the gradient. Then start again
+  in a new `--output_dir`. (The same `--output_dir` would continue from the
+  last completed epoch with the new rate, see
+  [Step 7](#step-7-continue-a-training-or-start-again); if the training
+  broke in its first epoch there is no such epoch and it starts from
+  nothing there too.)
 - **If the loss does not move at all for the first thousand steps after the
   warm-up,** the rate is too low (multiply it by 3), or the labels are wrong.
 
@@ -1607,12 +1207,22 @@ Learned alignment: mean rotation 3.10 degrees (largest 14.20), mean shift
 - **The training stops with `AlignmentCollapsedError`:** more than half of a
   batch was mostly empty. The parameters of that epoch were not saved. Start
   again with a lower factor or tighter bounds, or train without localization.
+  A lower `--localization_lr_factor` can be given to the same `--output_dir`:
+  the training then continues from the last completed epoch with the new
+  factor (an earlier version silently kept the old one). Training without
+  localization is another model variant and needs a new `--output_dir`.
 
 To look at aligned images yourself:
 
 ```python
+import torch
+
+# extractor and image_loader as in Step 9 (load_trained_model), for a Loc variant
+model = extractor.model
 model.eval()
-aligned, alignment = model.localization.align(images)   # images: (n, 1, 299, 299)
+images = torch.stack([image_loader.get(i) for i in image_loader.ids[:8]])   # (8, 1, 299, 299)
+with torch.no_grad():
+    aligned, alignment = model.localization.align(images)
 print(alignment.rotation, alignment.shift, alignment.kept_content)
 ```
 
@@ -1790,8 +1400,8 @@ seen. This is called an A/B run. The recipe:
    print against a slap print, or prints from different sensor types. Build
    a test set of such pairs from the held-out subjects, extract the
    embeddings with the best model of each run
-   ([Step 13](#step-13-extract-embeddings)) and run the verification
-   benchmark ([Step 14](#step-14-run-verification-benchmark)) on it.
+   ([Step 9](#step-9-extract-embeddings)) and run the verification
+   benchmark ([Step 10](#step-10-run-a-verification-benchmark)) on it.
 8. **Decide.** Keep the localization network if it wins in steps 6 and 7.
    If it makes no difference, the variant without it is the simpler model.
    If it is worse, train without it.
@@ -1810,15 +1420,15 @@ A/B run.
 
 ## Validation and Testing
 
-### Step 12: Monitor Training Progress
+### Step 8: Monitor Training Progress
 
-Training logs are saved to `<MODEL_OUTPUT_DIR>/log.json`:
+The training writes one entry per epoch to `log.json` in `--output_dir`:
 
 ```python
 import json
 
 # Load training log
-with open("/path/to/models/my-model-v1/log.json", "r") as f:
+with open("models/my-model-v1/log.json", "r") as f:
     log = json.load(f)
 
 # Print epoch results
@@ -1838,7 +1448,8 @@ The fields of an entry are:
   minutia map loss is averaged over the samples that have a minutia map.
 - `training_accuracy`: the share of training samples whose subject the model
   named correctly. Higher is better. It says nothing about fingers that are
-  not in the training set.
+  not in the training set. (Logs of earlier versions hold the mean over the
+  subjects of the share per subject, which is not the same number.)
 - `learning_rate`: the learning rate of the last step of the epoch (see
   [Choosing the learning rate](#choosing-the-learning-rate)).
 - `alignment`: for the variants with localization network, what the learned
@@ -1849,7 +1460,9 @@ The fields of an entry are:
 - `validation_equal_error_rate` (EER): measured on the validation set. The
   equal error rate is the error rate at the decision threshold where false
   matches and false non-matches are equally frequent. Lower is better. It is
-  `null` if the epoch was trained without a validation set.
+  `null` if the epoch was trained without a validation set, and for the
+  newest epoch while its validation is still running: the entry is written
+  together with `model.pyt`, before the validation.
 
 #### Which epoch becomes `best_model.pyt`
 
@@ -1868,9 +1481,12 @@ After every epoch the model is saved as `model.pyt`, and copied to
 subjects (`--validation_split 0.1`), chosen at random with a fixed seed
 (`--validation_seed 42`), with all their impressions. Subjects are held out,
 not single images, because an image of a finger that is also in the training
-set would make the error rate look better than it is for new fingers. For a
-large training set, `--max_validation_subjects` (for example 5000) limits the
-number of held-out subjects, so that validation after every epoch stays short.
+set would make the error rate look better than it is for new fingers.
+`--max_validation_subjects` limits the number of held-out subjects (default
+5,000; 0 removes the limit), so that validation after every epoch stays
+short; the subjects above the limit stay in the training set. The reasons
+for the limit are under
+[Above about one million subjects](#above-about-one-million-subjects).
 `--validation_split 0` switches validation off.
 
 `TrainingLog.selection_metric` names the field that was used, and
@@ -1879,7 +1495,7 @@ number of held-out subjects, so that validation after every epoch stays short.
 ```python
 from flx.models.model_training import TrainingLog
 
-log = TrainingLog("/path/to/models/my-model-v1/log.json")
+log = TrainingLog("models/my-model-v1/log.json")
 best = log.best_entry
 print(f"Best: epoch {best.epoch}, selected on {log.selection_metric}")
 ```
@@ -1890,266 +1506,312 @@ which was the epoch with the lowest accuracy. A `best_model.pyt` from such a
 run should not be used; `model.pyt` of the same run holds the last epoch.
 `TrainingLog` reads such old entries as entries without validation.
 
-### Step 13: Extract Embeddings
+### Step 9: Extract Embeddings
 
-After training, extract embeddings for your test set:
+`load_trained_model` in `scripts/train_500k.py` reads `training_settings.json` of a training and returns the model
+and an image loader that prepares images exactly as the training did (resolution, ridge polarity, canvas, no
+augmentation). The images to embed must be in the layout of Step 1.
 
 ```python
-from flx.extractor.fixed_length_extractor import get_DeepPrint_Tex
+import sys
+
+sys.path.insert(0, "scripts")  # the scripts directory of the repository
+import train_500k
 from flx.data.dataset import Dataset
-
-# Load the trained model
-extractor = get_DeepPrint_Tex(
-    num_training_subjects=800,
-    num_texture_dims=512
-)
-extractor.load_best_model("/path/to/models/my-model-v1")
-
-# Load test dataset
-test_images = get_my_dataset_validation("/path/to/test-dataset")
-
-# Extract embeddings
-print("Extracting embeddings...")
-texture_embeddings, minutia_embeddings = extractor.extract(test_images)
-
-# Combine if both exist
 from flx.data.embedding_loader import EmbeddingLoader
-embeddings = EmbeddingLoader.combine_if_both_exist(
-    texture_embeddings, minutia_embeddings
-)
 
-# Save embeddings
-embeddings.save("/path/to/embeddings/my-test-embeddings.npz")
-print(f"Saved {len(embeddings.ids)} embeddings")
+extractor, image_loader = train_500k.load_trained_model(
+    "models/my-model-v1",              # the --output_dir of the training
+    "data/fingerprints/my-test-set",   # images named <subject>_<impression>.png
+    ppi_manifest="data/fingerprints/my-test-set-resolutions.csv",
+)
+dataset = Dataset(image_loader, image_loader.ids)
+texture_embeddings, minutia_embeddings = extractor.extract(dataset)
+
+# One vector per print: texture and minutia embedding side by side
+embeddings = EmbeddingLoader.combine_if_both_exist(texture_embeddings, minutia_embeddings)
+embeddings.save("data/embeddings/my-test-set")
+print(f"{len(embeddings.ids)} embeddings of {embeddings.embedding_size} values")
 ```
 
-### Step 14: Run Verification Benchmark
+- Leave `ppi_manifest` out if the training used none. If it is left out although the training used one, the path
+  that the training was given is used, which only fits the training directory itself.
+- `best_model.pyt` is loaded; `best=False` loads `model.pyt`, the newest epoch.
+- The model has one class per **training** subject: the subjects of the dataset minus the held-out validation
+  subjects (45,000 for 50,000 subjects with the default split). `load_trained_model` takes the number from
+  `training_settings.json`. If you build the model by hand (`get_DeepPrint_...(num_training_subjects=...)`), it
+  must be this number, the "Training:" line of the training output, or loading the parameters fails.
+- A texture-only variant returns `None` as minutia embeddings; `combine_if_both_exist` then returns the texture
+  embeddings.
+- `save` writes `embeddings.npy` and `ids.json` into the directory; `EmbeddingLoader.load` reads them.
 
-Evaluate your model's biometric performance:
+### Step 10: Run a Verification Benchmark
+
+Continuing from Step 9. The benchmark compares pairs of prints of the same finger (mated) and of different
+fingers (non-mated) by the cosine similarity of their embeddings:
 
 ```python
 from flx.benchmarks.matchers import CosineSimilarityMatcher
-from flx.benchmarks.verification import VerificationBenchmark
-from flx.benchmarks.biometric_comparison import BiometricComparison
 
-# Create test benchmark
-test_benchmark = create_validation_benchmark(test_ids)
+# The pairs: all pairs of impressions per subject, and 10 non-mated pairs per subject
+benchmark = train_500k.create_validation_benchmark(image_loader.ids, num_impressions=3)
+result = benchmark.run(CosineSimilarityMatcher(embeddings))
 
-# Create matcher
-matcher = CosineSimilarityMatcher(embeddings)
-
-# Run benchmark
-result = test_benchmark.run(matcher)
-
-# Print results
-print(f"Equal Error Rate (EER): {result.get_equal_error_rate():.4f}")
-print(f"False Match Rate at FMR=0.01: {result.get_fnmr_at_fmr(0.01):.4f}")
-print(f"False Match Rate at FMR=0.001: {result.get_fnmr_at_fmr(0.001):.4f}")
-
-# Save results
-result.save("/path/to/results/test-verification-results.json")
+print(f"Equal error rate: {result.get_equal_error_rate():.4f}")
+threshold = result.threshold_for_fmr(0.001)
+print(f"False non-match rate at a false match rate of 0.1 %: "
+      f"{result.false_non_match_rate([threshold])[0]:.4f}")
 ```
+
+- `num_impressions` is the number of impressions per subject of the test set.
+- Use fingers that were neither in the training nor in the validation set. An error rate on the validation
+  subjects is too optimistic, because the best epoch was chosen on them.
+- With 10 non-mated pairs per subject, a false match rate of 0.1 % rests on very few pairs unless the test set has
+  many thousands of subjects. For rates that matter in a large gallery, compare all pairs of the test set.
 
 ---
 
 ## Multi-GPU Training
 
-### Step 15: Distributed Training Setup
+### Step 11: Distributed Training
 
-For faster training with multiple GPUs, use PyTorch's distributed training:
-
-**Modify your training script:**
-
-```python
-# No code changes needed! The training function automatically detects
-# distributed mode when launched with torchrun
-```
-
-**Launch with torchrun:**
+`scripts/train_500k.py` needs no change for several GPUs. Start it with `torchrun` and the same options:
 
 ```bash
-# Train on 4 GPUs
-torchrun --nproc_per_node=4 train_my_model.py
-
-# Train on 2 nodes with 4 GPUs each
-torchrun \
-  --nproc_per_node=4 \
-  --nnodes=2 \
-  --node_rank=0 \
-  --master_addr=node1.example.com \
-  --master_port=29500 \
-  train_my_model.py
+# 4 GPUs of one machine
+torchrun --nproc_per_node=4 scripts/train_500k.py \
+  --dataset_dir data/fingerprints/my-dataset \
+  --minutiae_dir data/poses/my-dataset \
+  --num_subjects 50000 --num_impressions 10 \
+  --ppi_manifest data/fingerprints/my-dataset-resolutions.csv \
+  --learning_rate 0.0001 --lr_schedule cosine \
+  --num_epochs 10 \
+  --output_dir models/my-model-v1
 ```
 
-**Expected speedup:**
-- 2 GPUs: ~1.8x faster
-- 4 GPUs: ~3.5x faster
-- 8 GPUs: ~6.5x faster
+For several machines, `torchrun` takes `--nnodes`, `--node_rank`, `--master_addr` and `--master_port` (see the
+PyTorch documentation of `torchrun`); the options after the script name stay the same on every machine.
 
-**Notes:**
-- Every GPU processes its own batch of 64 images, so one training step sees 64 times the number of GPUs images. The learning rate must be chosen for that number, see [Choosing the learning rate](#choosing-the-learning-rate)
-- Only rank 0 process saves models and logs
-- All processes participate in training
+**None of this was run for this guide: the machine it was written on has no GPU.** The multi-GPU path exists in
+the code (`flx/models/torch_helpers.py`, `train_model`) and is read as follows:
+
+- Every GPU processes its own batch of `--batch_size` images, so one training step sees `--batch_size` times the
+  number of GPUs images. The learning rate must be chosen for that number, see
+  [Choosing the learning rate](#choosing-the-learning-rate).
+- Only the first process validates and writes `model.pyt`, `best_model.pyt` and the log.
+- The centers of the center loss are kept per process and are not synchronised; the copy of the first process is
+  saved.
+- Every process scans the dataset directory and builds the identifier lists itself, see
+  [Above about one million subjects](#above-about-one-million-subjects).
+
+Time one epoch on a subset on your hardware before you plan a long run. This guide gives no speed figures,
+because none were measured.
+
+---
+
+## Above about one million subjects
+
+The scripts were written for hundreds of thousands of images. This section says what is known about larger
+datasets, up to the 100 million images and more of a national-scale collection. **Nothing here was run at that
+size.** Each figure is marked as *measured* (on the machine this guide was written on: 4 CPU cores, no GPU,
+other jobs running, so times are on the high side), *calculated* (arithmetic on measured numbers) or *read* (from
+the code, not run).
+
+A "subject" is one finger. 100 million images are about 10 million subjects with 10 images per finger, or about
+50 million with 2.
+
+**What grows with the number of training subjects**
+
+| What | Size | Source |
+|------|------|--------|
+| Classifier and center loss of a variant with two branches of 256 values | 514 trainable parameters and 512 center values per subject | measured (models with 1,000 and 2,000 subjects) |
+| The same in `model.pyt` | 4,108 bytes per subject and branch, so 8.2 kB per subject | measured (10,000, 20,000 and 100,000 subjects) |
+| `model.pyt` without any subject | 0.8 GB (the 67.7 million other parameters with the optimizer state) | measured (814 MB for 6 subjects) |
+| GPU memory of classifier, gradient, the two running averages of Adam, and centers | about 10 kB per subject, in every GPU process | calculated |
+| ... at 1 million subjects | about 10 GB per GPU; `model.pyt` about 9 GB, and as much again for `best_model.pyt` | calculated |
+| ... at 10 million subjects | about 100 GB per GPU, more than an 80 GB GPU has; `model.pyt` about 83 GB | calculated |
+| ... at 50 million subjects | about 500 GB per GPU | calculated |
+
+This is where "about one million" comes from: up to there the classifier fits on a large GPU next to the rest of
+the model, by calculation. Above it, it does not. **The code has no way around this today**: the classifier is one
+full layer per branch with one row per subject, and the center loss keeps one center per subject. There is no
+sampled or partial classifier, no margin-based loss without centers, and no way to split the classifier over the
+GPUs. `scripts/train_500k.py` prints a warning with the calculated memory above one million training subjects and
+then tries anyway.
+
+**What grows with the number of images**
+
+| What | Size | Source |
+|------|------|--------|
+| Start of `scripts/train_500k.py` (directory scans, identifier lists, datasets) | 22 seconds and 1.6 GB peak for 1 million images and 1 million `.mnt` files on a warm local disk | measured (one run, empty files, an earlier version that scanned the image directory twice) |
+| The same at 100 million images | about 37 minutes and 110 GB, in every GPU process | calculated (linear) |
+| The identifier lists alone | 1.0 GB and 5.8 seconds for 3.95 million identifiers | measured |
+| A data-loader worker process that has touched every identifier | 95 MB per million images | measured |
+| Resolution manifest with one row per file | 186 bytes per row in every process | measured (1 million rows) |
+| Image preparation in the data-loader workers | 1.0 second per rolled 800x750 print per CPU core, 98 % of it the binarisation; 0.15 to 0.17 seconds per slap finger of about 285x440 | measured (60 rolled prints, 33 slap fingers) |
+| One epoch of 100 million rolled prints | about 28,000 CPU-core-hours for the image preparation alone, whatever the GPUs can do | calculated |
+| Minutiae extraction | 60 seconds per print on one CPU thread (439 prints, mostly rolled); about 190 CPU-core-years for 100 million | measured, total calculated |
+
+**What the code cannot do today** (read from the code)
+
+- **Sets that are not a complete grid.** Every subject needs the same number of impressions, numbered without gaps
+  (Step 1). Fingers with different numbers of images, and fingers with one image, cannot be expressed.
+- **Lists that do not fit in memory.** Identifiers are Python objects, held in every GPU process and compared as
+  sets when the datasets are built. Every process walks the image directory once and the minutiae directory
+  twice. There is no manifest of the dataset on disk and no shard format; every sample is two small files.
+- **Checkpoints inside an epoch.** `model.pyt` is written once per epoch, directly onto the old file. A crash
+  loses up to one epoch, which is days at this size, and a crash while the file is written leaves no usable
+  `model.pyt`.
+- **A classifier or centers that are shared between GPUs.** See above; the centers are per process.
+- **Balanced sampling.** Images are drawn uniformly, so fingers with many images would dominate if the grid
+  did not force equal numbers.
+
+**Validation**
+
+- The held-out subjects are fingers, not people. Other fingers of a validation person can be in the training
+  set. If that matters to you, number the subjects so that you can hold out people yourself.
+- All impressions of the held-out subjects are prepared and embedded after every epoch, and the list of pairs is
+  built in a time that grows with the square of the number of subjects: 0.8 seconds for 2,500 subjects, 1.8 for
+  5,000 and 4.3 for 10,000 (measured), so about 4 hours for 1 million (calculated).
+- Therefore `--max_validation_subjects` defaults to **5,000**. With 10 impressions each that is 275,000 pairs,
+  scored in under a second (measured), and about 50,000 images to prepare per validation, roughly 50 minutes on
+  16 CPU cores for rolled prints (calculated). `--max_validation_subjects 0` removes the limit; the script warns
+  above 5,000.
+- Each subject gets 10 non-mated pairs. That is enough to choose the best epoch, not to measure the low false
+  match rates that matter in a gallery of millions.
+
+**What to do with a dataset of this size, with the code as it is**
+
+1. Train on a subset first: up to about one million subjects, chosen at random across all sensors, with a
+   complete grid of impressions. Everything in this guide applies to it.
+2. On the first GPU run, measure what this section could only calculate: the memory per GPU, the time of one
+   step, and how many CPU cores one GPU needs to stay busy. Time 200 steps before you start an epoch.
+3. Ask whether the collection already has minutiae from its capture or matching system. That would replace the
+   largest single cost. (`flx/data/iso_encoder_decoder` reads ISO 19794-2 templates; converting them to `.mnt`
+   files is not written.)
+4. Training on all subjects of a collection with more than a few million fingers needs changes to the model and
+   the data pipeline that are not in this repository: a classifier that scores a sample of the subjects in each
+   step and is split over the GPUs (with a loss that needs no centers), a manifest of the dataset on disk with
+   shards instead of two files per sample, binarising the images once instead of in every epoch, and
+   checkpoints inside an epoch. None of them has been built or measured here, and what they do to accuracy is
+   not known.
+
+---
+
+## Your own loader or training script
+
+`scripts/train_500k.py` is the route that is documented and tested. If your data cannot be brought into its
+layout, the smallest change is inside that script:
+
+- `CustomFingerprintLoader._extension` returns the file extension, and `CustomFingerprintLoader._file_to_id_fun`
+  turns the subdirectory and the file name (without extension) into an `Identifier`. Subjects must still be
+  numbered from 0 without gaps, because the subject number is the class of the classifier.
+- `create_training_and_validation_ids` builds the identifiers as a grid of subjects and impressions. For an
+  uneven set, build the `IdentifierSet`s from the files that exist instead.
+- Keep `SensorNormalizer.load` in the loader. A loader that reads the files directly with OpenCV gets images in
+  other pixels than the `.mnt` files for every sensor that is not at 500 ppi with dark ridges, and the check of
+  the `.mnt` header against the image size is skipped when the loader resizes the image itself.
+- The minutiae files are read by `FingerFlowMinutiaMapLoader` (`<subject>_<impression>.mnt`) or, for other names,
+  `FingerFlowMinutiaMapLoaderCustomNaming` in `flx/data/fingerflow_minutia_loader.py`.
+
+The notebooks [dataset_tutorial.ipynb](notebooks/dataset_tutorial.ipynb) and
+[model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb) show the classes underneath on the SFinGe
+example data. They were not run for this guide. An earlier version of this guide had a hand-written training
+script in ten steps; it called functions that do not exist and was removed.
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
+#### 1. "... files that are needed are missing"
 
-#### 1. FileNotFoundError: Image files not found
+The files below `--dataset_dir` (or `--minutiae_dir`) are not what `--num_subjects` and `--num_impressions` ask
+for. The message names the first missing files and what was found. See Step 1.
 
-**Problem:** ImageLoader cannot find your image files.
+#### 2. "... holds a training with other settings"
 
-**Solutions:**
-- Check that `_extension()` returns correct extension (include the dot: ".png")
-- Verify `_file_to_id_fun()` doesn't throw exceptions
-- Check file paths and permissions
-- Test with: `os.path.exists("/path/to/your/image.png")`
+`--output_dir` already holds a training, and the command differs from it. See
+[Step 7](#step-7-continue-a-training-or-start-again).
 
-#### 2. RuntimeError: CUDA out of memory
+#### 3. "Resolution unknown"
 
-**Problem:** GPU memory exhausted during training.
+A file states no resolution and no option gives one. See
+[Images from different sensors](#images-from-different-sensors).
 
-**Solutions:**
-- Reduce batch size (edit [flx/models/torch_helpers.py](flx/models/torch_helpers.py) `BATCH_SIZE`)
-- Use smaller embedding size (256 instead of 512)
-- Use gradient accumulation
-- Close other GPU processes
+#### 4. The minutiae do not fit the image
 
-#### 3. ValueError: Identifier mismatch
+The size in the header of a `.mnt` file differs from the image that was loaded. The extraction and the training
+were given different resolution options, or the image file was replaced after the extraction.
 
-**Problem:** Images and minutiae have different identifiers.
+#### 5. `RuntimeError: CUDA out of memory`
 
-**Solutions:**
-- Ensure `_file_to_id_fun()` is identical in both loaders
-- Check that minutiae files match image files exactly
-- Verify file naming consistency
+- Lower `--batch_size` (and repeat the range test with it).
+- Use a smaller `--embedding_dim`.
+- With very many subjects the classifier itself is the problem, see
+  [Above about one million subjects](#above-about-one-million-subjects).
 
-#### 4. Training loss not decreasing
+#### 6. The loss does not fall, or the training stops with "diverged"
 
-**Problem:** Model not learning.
+See [What to watch in the first thousand steps](#what-to-watch-in-the-first-thousand-steps).
 
-**Solutions:**
-- Check the learning rate (default: 0.0001 in [flx/setup/config.py](flx/setup/config.py)); see [Choosing the learning rate](#choosing-the-learning-rate)
-- Verify data augmentation isn't too aggressive
-- Ensure images are properly normalized [0, 1]
-- Check that labels are correct (consecutive 0-indexed integers)
+#### 7. The validation error rate stays high
 
-#### 5. High validation EER (>0.3)
-
-**Problem:** Poor biometric performance.
-
-**Solutions:**
-- Train for more epochs
-- Increase dataset size (minimum ~500 subjects recommended)
-- Check data quality (resolution, noise, alignment)
-- Try different model variant (TexMinu usually best)
-- Adjust binarization ridge_width parameter
-
-#### 6. Import errors for custom loader
-
-**Problem:** Cannot import your custom dataset loader.
-
-**Solutions:**
-- Ensure `flx` package is installed: `pip install -e .`
-- Check Python path includes project root
-- Verify file is in `flx/data/` directory
-- No syntax errors in your loader code
-
----
-
-## Performance Benchmarks
-
-### Expected Training Metrics
-
-The loss values below are from an earlier version of this guide and were not
-measured with the current loss, whose total also contains the weighted center
-loss and minutia map loss (see [Loss weights](#loss-weights)): a
-`DeepPrint_LocTexMinu` training on 220 fingers started near 145 here. Follow
-the cross entropy in `loss_statistics` and the accuracy instead of the total.
-
-**Good training progress:**
-- Epoch 1: Loss ~4-5, Accuracy ~0.3-0.4
-- Epoch 10: Loss ~2-3, Accuracy ~0.6-0.7
-- Epoch 50: Loss ~1-2, Accuracy ~0.8-0.9
-- Converged: Loss <1.0, Accuracy >0.9
-
-**Good validation EER:**
-- High-quality dataset: EER < 0.05 (5%)
-- Medium-quality dataset: EER < 0.10 (10%)
-- Low-quality dataset: EER < 0.20 (20%)
-
-### Hardware Requirements
-
-**Minimum (CPU-only):**
-- Training: Very slow (~2-4 hours/epoch)
-- Inference: Acceptable (~50-100 samples/sec)
-
-**Recommended (Single GPU):**
-- NVIDIA GPU with 8GB+ VRAM
-- Training: ~10-15 min/epoch on A100
-- Inference: Fast (~500-1000 samples/sec)
-
-**Optimal (Multi-GPU):**
-- 4x NVIDIA A100 GPUs
-- Training: ~3-4 min/epoch
-- Inference: Very fast (~2000+ samples/sec)
-
----
-
-## Next Steps
-
-After successful training:
-
-1. **Evaluate on test set**: Use held-out data not seen during training
-2. **Compare sensor types**: Test on different fingerprint sensors
-3. **Test pose robustness**: Evaluate with rotated/translated images
-4. **Optimize inference**: Convert model for production deployment
-5. **Generate embeddings**: Create embedding databases for enrollment
-6. **Run identification**: Test 1-to-N matching performance
-
-For more details, see:
-- [notebooks/embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb)
-- [Paper results](README.md) for performance comparisons
+No error rate was measured for this guide on a dataset of useful size, so it has no reference value. Things to
+check, in this order: the starting loss and its parts (same section as above), the resolution sources printed at
+the start, the polarity warnings of the extraction, and whether the training accuracy rises at all.
 
 ---
 
 ## Quick Reference
 
-### Common Commands
-
 ```bash
-# Activate environment
-source venv/bin/activate
+# File list for the extraction
+cd data/fingerprints/my-dataset && find . -name '*.png' | sort > ../my-dataset-files.txt && cd -
 
-# Run training
-python train_my_model.py
-
-# Multi-GPU training
-torchrun --nproc_per_node=4 train_my_model.py
-
-# Extract minutiae
+# Extract minutiae (in the environment of the minutiae extractor)
 python scripts/extract_minutiae.py --input_dir data/fingerprints/my-dataset --output_dir data/poses/my-dataset --coarse_net path/to/CoarseNet.h5 --fine_net path/to/FineNet.h5 --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --skip_existing
 
-# Run tests
-pytest tests/
+# Learning rate range test
+python scripts/find_learning_rate.py --dataset_dir data/fingerprints/my-dataset --minutiae_dir data/poses/my-dataset --num_subjects 50000 --num_impressions 10 --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --output_dir models/lr_range_test
 
-# Check GPU
-python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}')"
+# Train (the same command again continues the training)
+python scripts/train_500k.py --dataset_dir data/fingerprints/my-dataset --minutiae_dir data/poses/my-dataset --num_subjects 50000 --num_impressions 10 --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --learning_rate 0.0001 --lr_schedule cosine --num_epochs 10 --output_dir models/my-model-v1
+
+# Run the tests
+python -m pytest -q
 ```
 
-### File Locations
+Files:
 
-- **Training scripts**: Project root
-- **Model configs**: [flx/setup/config.py](flx/setup/config.py)
-- **Dataset loaders**: [flx/data/](flx/data/)
-- **Model architectures**: [flx/models/deep_print_arch.py](flx/models/deep_print_arch.py)
-- **Training logs**: `<MODEL_OUTPUT_DIR>/log.json`
-- **Model checkpoints**: `<MODEL_OUTPUT_DIR>/model.pyt` (latest), `<MODEL_OUTPUT_DIR>/model-best.pyt` (best)
+- Settings and their defaults: [flx/setup/config.py](flx/setup/config.py)
+- Training script: [scripts/train_500k.py](scripts/train_500k.py); training loop:
+  [flx/models/model_training.py](flx/models/model_training.py)
+- Model: [flx/models/deep_print_arch.py](flx/models/deep_print_arch.py)
+- In the output directory of a training: `model.pyt` (newest epoch), `best_model.pyt` (best epoch), `log.json`,
+  `training_settings.json`
 
----
+### What was run for this guide
 
-**Document Version**: 1.0
-**Last Updated**: 2026-01-14
-**For questions or issues**: See [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) and project [README.md](README.md)
+All on one machine with 4 CPU cores and no GPU.
+
+| Command or snippet | Run on | Result |
+|--------------------|--------|--------|
+| File list with `find ... \| sort` (Step 3) | 12 prints of 4 fingers in three sensor directories (500 ppi, 1000 ppi, 1000 ppi with light ridges) | 12 lines |
+| `scripts/extract_minutiae.py` with `--file_list`, `--ppi_manifest`, `--num_shards 2`, `--skip_existing`, shard 0 and shard 1 (Step 3), with the minutiae extractor of the branch named there | the same 12 prints | 6 + 6 `.mnt` files, exit status 0 |
+| The same without shards and file list, as the completeness check | the same | "Successful: 0", "Skipped: 12", exit status 0 |
+| `scripts/extract_minutiae.py` with the minutiae extractor of its `main` branch as it was when this was written (too old) | 4 prints | stopped before the first image, exit status 2, message names the branch |
+| `scripts/find_learning_rate.py`, the command of "How to run the range test" with `--num_subjects 4 --num_impressions 3 --batch_size 4 --num_steps 30 --min_lr 1e-6 --max_lr 0.1` | the same 12 prints | ended after 23 steps, suggested 0.000085 |
+| `scripts/train_500k.py`, the command of Step 6 with `--num_subjects 4 --num_impressions 3 --num_epochs 2 --validation_split 0.5 --batch_size 4` | the same 12 prints | 2 epochs, `DeepPrint_LocTexMinu`, exit status 0 |
+| The same command again (Step 7) | the same | "Nothing was trained in this run" |
+| Step 7 on a second set: the same command with another learning rate; with `--localization off`; with `--num_epochs 3` and another learning rate | 32 prints of 8 fingers as 500, 1000 and 385 ppi files and 1000 ppi negatives | nothing trained; refused with exit status 2; one more epoch |
+| The log snippets of Step 8 | the model of the 12 prints | ran |
+| Steps 9 and 10 and the snippet under "What to watch" in the alignment section | the same model, embedding its own 12 training and validation prints | 12 embeddings of 512 values, saved and loaded again; the error rates of a model after 4 training steps mean nothing |
+| `python -m pytest -q` | | 351 passed |
+| The offline `pip install ... -e .` of AIRGAP_INSTALLATION.md | a fresh environment with only setuptools and wheel from a local directory | installs with `--no-deps`; without it, it names the first missing dependency, as that guide says |
+
+The commands were started from another directory than the repository root, with the script paths adjusted.
+
+Not run: anything on a GPU, `torchrun`, the `pip download` and the other install commands of
+AIRGAP_INSTALLATION.md, the notebooks, and any dataset larger than 440 images. The measurement
+sections (learning rate, loss weights, learned alignment, sensors) say for each number how many images it rests
+on.
