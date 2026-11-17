@@ -1,463 +1,385 @@
-# Air-Gapped Installation Guide for Fixed-Length Fingerprint Extractors
+# Installation
 
-This guide provides instructions for installing and running the fingerprint model training system in an air-gapped (offline) environment.
+This document sets up what [training-guide.md](training-guide.md) needs. There are two ways: with network
+access (Part A), or for a machine without network access, an "air-gapped" machine (Part B).
 
-## Overview
+## The two environments
 
-Training DeepPrint models in an air-gapped environment requires pre-downloading all dependencies, Python packages, and optional pre-trained models before transferring to the isolated network.
+The route from images to a trained model uses two separate Python environments. An *environment* here is a
+directory with its own Python packages (a "virtual environment"), so that the packages of one do not disturb
+the other.
 
-## Prerequisites
+| Environment | Used for | Needs | Where this document puts it |
+|-------------|----------|-------|------------------------------|
+| **Training environment** | `scripts/find_learning_rate.py`, `scripts/train_500k.py`, the embeddings, the tests, the notebooks | PyTorch and the `flx` package of this repository | `venv/` in this repository |
+| **Extraction environment** | `scripts/extract_minutiae.py` only | TensorFlow, the minutiae extractor (next section), Pillow, tqdm, and two model files | Part A: `.venv/` in the clone of the extractor. Part B: `venv-extractor/` next to this repository |
 
-### System Requirements
-- **Python**: 3.11 or higher (3.12 also supported)
-- **Operating System**: Linux (RHEL 9, Ubuntu, or compatible)
-- **GPU**: NVIDIA GPU with CUDA 12.8 support (recommended for training)
-- **CPU, RAM and storage**: no figures that hold in general. They depend on the number of images and subjects;
-  see [Storage Requirements](#storage-requirements) below for what was measured and what was not. The numbers
-  that were in this list before (8 cores, 16 GB of RAM, 10 GB of storage) were not measured and are far too small
-  for a large corpus.
+The two are kept apart because the minutiae extractor pins its own versions of numpy and other packages. The
+extraction environment does not need PyTorch, and `flx` does not need to be installed in it: the script finds
+`flx` in this repository.
 
----
+If you only train the texture-only variants (without minutiae, see Step 3 of the training guide), you need
+the training environment only.
 
-## Part 1: Preparation (On Internet-Connected Machine)
+Requirements for both: Python 3.11 or higher (`requires-python` in `pyproject.toml`). What was tried of this
+document was tried on Linux x86_64 with Python 3.11, on a machine without a GPU; other systems were not tried. For
+training on a GPU the machine needs an NVIDIA driver that fits the PyTorch build; this was not tried.
 
-### Step 1: Download Python Packages
+## The minutiae extractor
 
-Create a directory for all offline packages. All commands of Step 1 run inside it; the last command of Step 1
-leaves it again.
+The *minutiae extractor* is a separate repository,
+[craig-forefront/minutiae_extractor](https://github.com/craig-forefront/minutiae_extractor). Its Python package
+is called `fingerflow`. Three things carry that name, and only one works here:
 
-```bash
-mkdir -p airgap-packages
-cd airgap-packages
-```
+| What | Works with `scripts/extract_minutiae.py` |
+|------|-------------------------------------------|
+| The `main` branch of **craig-forefront/minutiae_extractor**, commit `420b6e5` ("Merge pull request #3") or later | **yes** |
+| A clone of that repository from before that commit, or the upstream repository `tourmii/minutiae_extractor` | no |
+| The package `fingerflow` on PyPI (`pip install fingerflow`) | no |
 
-#### Download Core Dependencies
+The script needs an `Extractor` that has the `image_dpi` option and accepts `None` for two of its four
+networks. With the other two it stops before the first image with exit status 2 and a message that says "too
+old" and shows where the package was imported from.
 
-```bash
-# Core dependencies
-pip download \
-  matplotlib \
-  numpy \
-  opencv-python \
-  pillow \
-  scipy \
-  scikit-learn \
-  "torch>=2.9.0" \
-  "torchvision>=0.20.0" \
-  torchmetrics \
-  tqdm \
-  setuptools \
-  wheel \
-  --dest ./packages
-```
-
-#### Download CUDA-Enabled PyTorch (Recommended for GPU Training)
-
-```bash
-# PyTorch with CUDA 12.8 support
-pip download \
-  "torch>=2.9.0" \
-  "torchvision>=0.20.0" \
-  torchaudio \
-  --index-url https://download.pytorch.org/whl/cu128 \
-  --dest ./packages-cuda
-```
-
-#### Download Development Dependencies (Optional)
-
-```bash
-# Development and testing tools
-pip download \
-  black \
-  jupyter \
-  pytest \
-  seaborn \
-  tikzplotlib \
-  --dest ./packages-dev
-```
-
-#### Download FingerFlow for Minutiae Extraction (Optional)
-
-If you plan to use the FingerFlow minutiae extractor ([scripts/extract_minutiae.py](../scripts/extract_minutiae.py)):
-
-```bash
-git clone https://github.com/craig-forefront/minutiae_extractor.git
-cd minutiae_extractor
-git checkout claude/serene-albattani-s6ehsj
-cd ..
-```
-
-This is a fork of https://github.com/tourmii/minutiae_extractor. `scripts/extract_minutiae.py` needs a revision
-of it whose `Extractor` has the `image_dpi` option (direction refinement, file
-`src/fingerflow/extractor/direction_sense.py`) and accepts `None` for the ClassifyNet and CoreNet paths. That is
-the branch `claude/serene-albattani-s6ehsj` from its commit "Make ClassifyNet and CoreNet optional in the
-Extractor" on. When this was written the branch was on the server with that commit, and pull request #3 of that
-repository was open to bring it into `main`; `main` itself did not have it yet. Once the pull request is merged,
-`main` works and the `git checkout` line is not needed. To check a checkout:
+To check a clone, run this in the directory that holds it:
 
 ```bash
 grep -c "classify_net_path is not None" minutiae_extractor/src/fingerflow/extractor/extractor.py   # must print 1
 ```
 
-If it prints 0, the checkout does not hold that commit: it is most likely `main` from before the merge, or the
-`git checkout` line was left out. Check out the branch before you build the bundle; nothing in the air-gapped
-environment can replace it.
+If it prints 0, the clone is older than that commit or is the upstream repository: update it (`git pull` on
+`main` of the craig-forefront repository).
 
-The clone must stay where these commands put it, in `airgap-packages/minutiae_extractor`: Part 2 sets
-`PYTHONPATH` to `airgap-packages/minutiae_extractor/src`.
-
-An older checkout and the `fingerflow` release on PyPI do not work. With them `scripts/extract_minutiae.py` stops
-at the first image with exit status 2 and a message that names this branch.
-
-The extractor has its own dependencies (TensorFlow, pandas, scikit-image, ...), listed in its `pyproject.toml`.
-Download them as its own guide describes (`AIR_GAPPED_DEPLOYMENT_GUIDE.md` in that repository, "Download All
-Python Dependencies") and put them into `./packages-fingerflow`. Add Pillow and tqdm, which
-`scripts/extract_minutiae.py` needs in the same environment:
-
-```bash
-pip download pillow tqdm --dest ./packages-fingerflow
-```
-
-**Note**: FingerFlow requires pre-trained model weights. `scripts/extract_minutiae.py` needs CoarseNet.h5 and FineNet.h5; ClassifyNet_6_classes.h5 is optional for it and CoreNet.weights is not used by it. See Step 2 below.
-
-#### Leave the Package Directory
-
-Steps 2 to 4 run in the directory that holds `airgap-packages`, not inside it:
-
-```bash
-cd ..
-```
-
-### Step 2: Download Pre-trained Models (Optional)
-
-#### DeepPrint Pre-trained Model
-
-The authors provide a pre-trained DeepPrint model (512-dimensional embeddings):
-
-1. Download from Google Drive: https://drive.google.com/drive/folders/1vV2skXApZMhqWTlF2j_qgXDxRYan5U1f?usp=drive_link
-2. Save the model files to `pretrained-models/deepprint-512/` (next to `airgap-packages`, not inside it; create
-   `pretrained-models` also if you download no models, because Step 4 moves it)
-
-#### FingerFlow Minutiae Extraction Models
-
-If using the FingerFlow minutiae extractor, download the required model weights:
-
-1. In the minutiae_extractor checkout (`airgap-packages/minutiae_extractor`), run `python scripts/install_model.py` as described in its README. It downloads
-   the model files to its `models/` directory:
-   - `CoarseNet.h5`
-   - `FineNet.h5`
-   - `ClassifyNet_6_classes.h5`
-   - `CoreNet.weights`
-2. Copy them to `pretrained-models/fingerflow/`
-
-### Step 3: Download Project Source Code
-
-```bash
-# Clone the repository
-git clone https://github.com/craig-forefront/fixed-length-fingerprint-extractors.git
-cd fixed-length-fingerprint-extractors
-
-# Create a tarball with the source code
-cd ..
-tar -czf flx-source.tar.gz fixed-length-fingerprint-extractors/
-```
-
-### Step 4: Package Everything for Transfer
-
-```bash
-# Create final package directory (in the directory that holds airgap-packages)
-mkdir flx-airgap-bundle
-mv airgap-packages flx-airgap-bundle/
-mkdir -p pretrained-models
-mv pretrained-models flx-airgap-bundle/
-mv flx-source.tar.gz flx-airgap-bundle/
-
-# Create the transfer archive
-tar -czf flx-airgap-bundle.tar.gz flx-airgap-bundle/
-```
-
-The bundle must now hold `airgap-packages/packages` (and `packages-cuda`, `packages-dev`, `packages-fingerflow`,
-`minutiae_extractor` if you downloaded them), `pretrained-models` and `flx-source.tar.gz`. Check it before the
-transfer:
-
-```bash
-ls flx-airgap-bundle flx-airgap-bundle/airgap-packages
-```
-
-Transfer `flx-airgap-bundle.tar.gz` to your air-gapped environment via approved media (USB drive, approved file transfer, etc.).
+You never run a script of the extractor repository for the training route; this repository's
+`scripts/extract_minutiae.py` calls it. The extractor's own documentation is needed only for what its output
+means and for its options.
 
 ---
 
-## Part 2: Installation (On Air-Gapped Machine)
+## Part A: With network access
 
-### Step 1: Extract the Bundle
+### A1. Training environment
+
+```bash
+git clone https://github.com/craig-forefront/fixed-length-fingerprint-extractors.git
+cd fixed-length-fingerprint-extractors
+python3.11 -m venv venv
+source venv/bin/activate
+```
+
+On a machine **without a GPU**, install the CPU build of PyTorch first; otherwise the next step downloads the
+much larger build with GPU libraries:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
+Then install the `flx` package with its dependencies (they are listed in `pyproject.toml`):
+
+```bash
+pip install -e .
+```
+
+Optional, for the tests and the notebooks (pytest, jupyter, black, seaborn, tikzplotlib):
+
+```bash
+pip install -e ".[dev]"
+```
+
+`pip install -r requirements.txt` does the same as the last two commands together; you do not need it after
+them.
+
+Check the installation:
+
+```bash
+python -c "import torch; print('PyTorch', torch.__version__, 'CUDA available:', torch.cuda.is_available())"
+python -c "import flx; print('flx imported')"
+python -m pytest -q          # only if you installed the optional tools
+```
+
+"CUDA available: False" means that PyTorch found no usable GPU. The tests take a few minutes on a CPU. Here
+they ended with "357 passed, 1 skipped" in this environment; the skipped test needs the package
+`scikit-image`, which is not a dependency of this repository.
+
+### A2. Extraction environment
+
+Only needed for the model variants with minutiae. Clone the extractor **next to** this repository, so that
+both directories have the same parent directory:
+
+```bash
+cd ..
+git clone https://github.com/craig-forefront/minutiae_extractor.git
+grep -c "classify_net_path is not None" minutiae_extractor/src/fingerflow/extractor/extractor.py   # must print 1
+cd minutiae_extractor
+uv sync                                  # creates .venv and installs the dependencies
+uv pip install -e .                      # makes the package importable as "fingerflow"
+uv run python scripts/install_model.py   # downloads the model files into models/
+cd ../fixed-length-fingerprint-extractors
+```
+
+`uv` is the package tool that the extractor uses; its README says how to get it. Use the clone line above:
+the README of the extractor at commit `420b6e5` still names the upstream repository in its own clone command.
+Expect a large environment (the extractor's documentation gives 6.4 GB, most of it GPU libraries that are
+installed on a machine without a GPU as well) and 1.6 GB of model files. Pillow and tqdm, which
+`scripts/extract_minutiae.py` needs, are part of that environment (they are in the extractor's `uv.lock`).
+
+Of the four model files in `minutiae_extractor/models`, the extraction needs `CoarseNet.h5` (81 MB) and
+`FineNet.h5` (654 MB). `ClassifyNet_6_classes.h5` (619 MB) is optional (`--classify_net`; DeepPrint does not
+use its result), and `CoreNet.weights` (256 MB) is not used.
+
+Check, from the root directory of this repository:
+
+```bash
+source ../minutiae_extractor/.venv/bin/activate
+python -c "from fingerflow.extractor import Extractor, direction_sense; print('minutiae extractor found')"
+ls -l ../minutiae_extractor/models
+deactivate
+```
+
+Next: [training-guide.md](training-guide.md).
+
+---
+
+## Part B: Air-gapped
+
+You build a bundle on a machine with network access (B1), carry it to the air-gapped machine and install from
+it (B2).
+
+**The machine that builds the bundle must have the same operating system, the same processor architecture and
+the same Python version as the air-gapped machine** (the commands below use `python3.11` on both). `pip
+download` fetches the package files for the machine it runs on; files for another system do not install.
+
+### B1. On the machine with network access: build the bundle
+
+Start in an empty working directory.
+
+**Packages for the training environment.**
+
+```bash
+mkdir -p airgap-packages
+cd airgap-packages
+
+# Everything except PyTorch
+python3.11 -m pip download \
+  matplotlib numpy opencv-python pillow scipy scikit-learn torchmetrics tqdm setuptools wheel \
+  --dest ./packages
+```
+
+PyTorch, in **one** of two builds. For training on an NVIDIA GPU (CUDA 12.8):
+
+```bash
+python3.11 -m pip download "torch>=2.9.0" "torchvision>=0.20.0" \
+  --index-url https://download.pytorch.org/whl/cu128 \
+  --dest ./packages-torch
+```
+
+For a machine without a GPU:
+
+```bash
+python3.11 -m pip download "torch>=2.9.0" "torchvision>=0.20.0" \
+  --index-url https://download.pytorch.org/whl/cpu \
+  --dest ./packages-torch
+```
+
+(`./packages` also receives a copy of PyTorch, because `torchmetrics` depends on it. Part B2 installs PyTorch
+from `./packages-torch` first, so that copy is not used.)
+
+Optional, for the tests and the notebooks:
+
+```bash
+python3.11 -m pip download black jupyter pytest seaborn tikzplotlib --dest ./packages-dev
+```
+
+**The minutiae extractor and its packages** (only for the model variants with minutiae). Use these commands,
+not the clone and download steps of the extractor's own guides:
+
+```bash
+git clone https://github.com/craig-forefront/minutiae_extractor.git
+grep -c "classify_net_path is not None" minutiae_extractor/src/fingerflow/extractor/extractor.py   # must print 1
+
+# The exact package versions that the extractor was tested with, as a list for pip
+(cd minutiae_extractor && uv export --frozen --no-hashes --no-emit-project -o ../requirements-extractor.txt)
+python3.11 -m pip download -r requirements-extractor.txt --dest ./packages-extractor
+```
+
+The `uv export` line writes the versions recorded in the extractor's `uv.lock`. The list has about 320
+lines and contains TensorFlow, Pillow and tqdm. The clone must stay where these commands put it, in
+`airgap-packages/minutiae_extractor`: Part B2 points Python to `airgap-packages/minutiae_extractor/src`.
+
+**The model files of the minutiae extractor.** The extractor's script downloads them from Hugging Face into
+`minutiae_extractor/models`; it needs the package `huggingface-hub`:
+
+```bash
+python3.11 -m pip install huggingface-hub
+(cd minutiae_extractor && python3.11 scripts/install_model.py)
+
+cd ..                                  # leave airgap-packages
+mkdir -p pretrained-models/minutiae-extractor
+mv airgap-packages/minutiae_extractor/models/CoarseNet.h5 \
+   airgap-packages/minutiae_extractor/models/FineNet.h5 \
+   pretrained-models/minutiae-extractor/
+```
+
+`CoarseNet.h5` (81 MB) and `FineNet.h5` (654 MB) are the two files that the extraction needs. Move
+`ClassifyNet_6_classes.h5` (619 MB) too only if you want the minutia type in the `.mnt` files; DeepPrint does
+not use it. `CoreNet.weights` (256 MB) is not used; you can delete it from the clone before you pack.
+
+If you skipped the extractor, leave `airgap-packages` now with `cd ..`.
+
+**The source code of this repository, and the bundle.** In the directory that holds `airgap-packages`:
+
+```bash
+git clone https://github.com/craig-forefront/fixed-length-fingerprint-extractors.git
+tar -czf flx-source.tar.gz fixed-length-fingerprint-extractors/
+
+mkdir flx-airgap-bundle
+mkdir -p pretrained-models
+mv airgap-packages pretrained-models flx-source.tar.gz flx-airgap-bundle/
+tar -czf flx-airgap-bundle.tar.gz flx-airgap-bundle/
+```
+
+Check the bundle before the transfer:
+
+```bash
+ls flx-airgap-bundle flx-airgap-bundle/airgap-packages flx-airgap-bundle/pretrained-models
+```
+
+It must show `airgap-packages`, `pretrained-models` and `flx-source.tar.gz`; inside `airgap-packages` the
+directories `packages` and `packages-torch`, and, if you chose them, `packages-dev`, `packages-extractor`,
+`minutiae_extractor` and the file `requirements-extractor.txt`; inside `pretrained-models` the directory
+`minutiae-extractor` with the two `.h5` files.
+
+Transfer `flx-airgap-bundle.tar.gz` to the air-gapped machine on approved media.
+
+### B2. On the air-gapped machine: install
 
 ```bash
 tar -xzf flx-airgap-bundle.tar.gz
 cd flx-airgap-bundle
-```
-
-### Step 2: Extract Source Code
-
-```bash
 tar -xzf flx-source.tar.gz
 cd fixed-length-fingerprint-extractors
 ```
 
-### Step 3: Create Python Virtual Environment
+**Training environment.** PyTorch first, from its own directory, then the rest:
 
 ```bash
-# Create virtual environment
 python3.11 -m venv venv
-
-# Activate virtual environment
 source venv/bin/activate
-```
 
-### Step 4: Install Dependencies
+pip install --no-index --find-links=../airgap-packages/packages-torch torch torchvision
 
-#### Install Core Dependencies
-
-```bash
-# Install from offline packages
 pip install --no-index --find-links=../airgap-packages/packages \
-  matplotlib \
-  numpy \
-  opencv-python \
-  pillow \
-  scipy \
-  scikit-learn \
-  torchmetrics \
-  tqdm \
-  setuptools \
-  wheel
+  matplotlib numpy opencv-python pillow scipy scikit-learn torchmetrics tqdm setuptools wheel
 ```
 
-#### Install PyTorch (Choose GPU or CPU)
+The order matters: `torchmetrics` needs PyTorch, and pip keeps a PyTorch that is already installed instead
+of taking the copy in `packages`.
 
-For GPU training (CUDA 12.8):
+Optional, for the tests and the notebooks:
+
 ```bash
-pip install --no-index --find-links=../airgap-packages/packages-cuda \
-  torch \
-  torchvision \
-  torchaudio
+pip install --no-index --find-links=../airgap-packages/packages-dev black jupyter pytest seaborn tikzplotlib
 ```
 
-For CPU-only:
-```bash
-pip install --no-index --find-links=../airgap-packages/packages \
-  torch \
-  torchvision
-```
-
-#### Install Development Tools (Optional)
+Then the `flx` package itself, without looking for anything online:
 
 ```bash
-pip install --no-index --find-links=../airgap-packages/packages-dev \
-  black \
-  jupyter \
-  pytest \
-  seaborn \
-  tikzplotlib
-```
-
-#### Install FingerFlow (Optional)
-
-The minutiae extraction runs in an environment that has the dependencies of the minutiae_extractor repository
-(install them from `../airgap-packages/packages-fingerflow` as its `AIR_GAPPED_DEPLOYMENT_GUIDE.md` describes,
-with `--no-index --find-links`), Pillow and tqdm, and in which its `fingerflow` package can be imported. It does
-not need torch, so it can be an environment of its own. The `flx` package does not need to be installed there:
-the script finds it in this repository.
-
-```bash
-pip install --no-index --find-links=../airgap-packages/packages-fingerflow pillow tqdm
-
-# An absolute path, so that it also works from other directories
-export PYTHONPATH="$(realpath ../airgap-packages/minutiae_extractor/src)"
-python3 -c "from fingerflow.extractor import Extractor, direction_sense"
-```
-
-### Step 5: Install the FLX Package
-
-```bash
-# Install the package in editable mode, without looking for anything online
 pip install --no-index --find-links=../airgap-packages/packages --no-build-isolation -e .
 ```
 
-The dependencies were installed in Step 4; this step only makes `import flx` work. If `pip` reports a missing
-dependency here, a package of Step 4 is missing from the bundle.
+This step only makes `import flx` work. If `pip` reports a missing dependency here, a package of the steps
+before is missing from the bundle.
 
-### Step 6: Verify Installation
+Check:
 
 ```bash
-# Test imports
-python3 -c "import torch; print(f'PyTorch: {torch.__version__}')"
-python3 -c "import flx; print('FLX package imported successfully')"
-python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
-
-# Run tests
-pytest tests/
+python -c "import torch; print('PyTorch', torch.__version__, 'CUDA available:', torch.cuda.is_available())"
+python -c "import flx; print('flx imported')"
+python -m pytest -q          # only if you installed the optional tools
+deactivate
 ```
+
+**Extraction environment** (only for the model variants with minutiae), a second environment next to the
+repository:
+
+```bash
+python3.11 -m venv ../venv-extractor
+source ../venv-extractor/bin/activate
+pip install --no-index --find-links=../airgap-packages/packages-extractor \
+  -r ../airgap-packages/requirements-extractor.txt
+
+# An absolute path, so that it also works from other directories
+export PYTHONPATH="$(realpath ../airgap-packages/minutiae_extractor/src)"
+python -c "from fingerflow.extractor import Extractor, direction_sense; print('minutiae extractor found')"
+ls -l ../pretrained-models/minutiae-extractor
+deactivate
+```
+
+The extractor is not installed into the environment; `PYTHONPATH` tells Python where its package is. The
+variable is lost when you close the shell, so Step 4 of the training guide sets it again.
+
+Next: [training-guide.md](training-guide.md).
 
 ---
 
-## Part 3: Training Models
+## What was run of this document, and what was not
 
-### Prepare Your Dataset
+On one Linux x86_64 machine with 4 CPU cores, no GPU, Python 3.11:
 
-Organize your fingerprint dataset according to the project structure:
+| Part | Run? |
+|------|------|
+| A1, in a copy of this repository instead of a new clone: `python3.11 -m venv`, the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the three check lines | **Run.** PyTorch 2.15.0+cpu was kept by the later steps; the environment was 1.9 GB; 357 tests passed, 1 skipped |
+| A1 without the CPU line (PyTorch with GPU libraries from PyPI), and `pip install -r requirements.txt` | Not run |
+| A2: `git clone`, `uv sync`, `uv pip install -e .`, `scripts/install_model.py` | Not run for this document; the four model files were already on the machine |
+| The extraction itself (Step 4 of the training guide) | **Run**, in an existing environment with TensorFlow 2.20, Pillow and tqdm, with `PYTHONPATH` set to `src` of the extractor's `main` (commit `420b6e5`) and with its `CoarseNet.h5` and `FineNet.h5`. This is the mechanism of Part B2 |
+| The `grep -c` check | **Run** on the extractor's `main`: prints 1 |
+| B1: `uv export ...` | **Run** on the extractor's `main`: 317 lines, including `tensorflow==2.20.0`, `pillow` and `tqdm` |
+| B1: every `pip download` line, `scripts/install_model.py`, the `tar` and `mv` lines | Not run. (pip accepted `requirements-extractor.txt` and began to fetch the pinned packages for Python 3.11; that run was stopped after about 1 GB) |
+| B2: every install line from the bundle | Not run. In earlier work on this repository, `pip install --no-index --find-links=... --no-build-isolation -e .` was run in a fresh environment that held only setuptools and wheel: it names the first missing dependency, as described above |
+| Anything with a GPU or CUDA | Not run |
 
-```
-data/
-├── fingerprints/
-│   └── your-dataset/
-│       ├── 1_1.png     (<subject>_<impression>.png)
-│       ├── 1_2.png
-│       ├── 2_1.png
-│       └── ...
-└── poses/
-    └── your-dataset/
-        └── ... (minutiae files, 1_1.mnt, ...)
-```
-
-`scripts/train_500k.py` and the `FingerFlowMinutiaMapLoader` read these file names as they are. The files may be
-in subdirectories (for example one per sensor); every subject needs the same number of impressions, numbered
-without gaps. "Step 1" of [training-guide.md](training-guide.md) describes the layout and what
-to do when your data does not fit it.
-
-### Extract Minutiae (Optional)
-
-If using the FingerFlow minutiae extractor:
-
-```bash
-python scripts/extract_minutiae.py \
-  --input_dir data/fingerprints/your-dataset \
-  --output_dir data/poses/your-dataset \
-  --coarse_net ../pretrained-models/fingerflow/CoarseNet.h5 \
-  --fine_net ../pretrained-models/fingerflow/FineNet.h5 \
-  --ppi_manifest data/fingerprints/your-dataset-resolutions.csv
-```
-
-The script resamples every image to 500 pixels per inch and must know the resolution of each file: from `--ppi`,
-from the manifest, from the metadata of the file or from `--assume_ppi`. See "Option A: Extract Minutiae Using
-FingerFlow" and "Images from different sensors" in [training-guide.md](training-guide.md) for
-these options, the ridge polarity and the extraction of very large datasets.
-
-### Train
-
-Follow [training-guide.md](training-guide.md). Its training command, for 50,000 fingers with 10
-images each:
-
-```bash
-python scripts/train_500k.py \
-  --dataset_dir data/fingerprints/your-dataset \
-  --minutiae_dir data/poses/your-dataset \
-  --num_subjects 50000 --num_impressions 10 \
-  --ppi_manifest data/fingerprints/your-dataset-resolutions.csv \
-  --learning_rate 0.0001 --lr_schedule cosine \
-  --num_epochs 10 \
-  --output_dir models/your-model
-```
-
-For several GPUs, put `torchrun --nproc_per_node=4` in place of `python`. The same command again continues the
-training; a new `--output_dir` starts a new one.
-
-The notebooks [model_training_tutorial.ipynb](../notebooks/model_training_tutorial.ipynb) and
-[embedding_generation_tutorial.ipynb](../notebooks/embedding_generation_tutorial.ipynb) show the classes underneath
-on the SFinGe example data. They need the development dependencies (`jupyter`; the embedding notebook also
-imports `tikzplotlib` through `flx.visualization`), so download and install "Development Dependencies" for them.
-The notebooks were not run for this guide.
+So Part B is written from the commands' documentation and from the pieces above, not from a complete run.
+Do one complete trial on a spare machine before you rely on it. The size of the bundle was not measured;
+expect several GB (TensorFlow and PyTorch with their GPU libraries, and 0.7 GB of model files).
 
 ---
 
-## Important Notes
+## Notes
 
-### CUDA and GPU Drivers
+**GPU.** The NVIDIA driver must be installed on the machine separately; it is not part of the bundle. The
+`cu128` build of PyTorch is the build for CUDA 12.8 and brings the CUDA libraries with it. Check with
+`python -c "import torch; print(torch.cuda.is_available())"` in the training environment.
 
-- CUDA drivers must be installed on the air-gapped machine separately
-- CUDA 12.8 is recommended for PyTorch 2.9.0+
-- Verify GPU availability: `python3 -c "import torch; print(torch.cuda.is_available())"`
+**Disk space, memory and time** depend on the number of images and subjects. See the storage table and the
+section "Above about one million subjects" in [large-datasets.md](large-datasets.md).
 
-### Model Training Performance
+**Notebooks.** They need `jupyter` from the optional tools. The last cell of
+`notebooks/embedding_generation_tutorial.ipynb` (a plot) does not run with the package versions that the
+optional tools install today; see the note at the top of that notebook.
 
-No training time was measured on a GPU for these guides. The image preparation runs on the CPU and took about
-1 second per rolled print per core here, so plan CPU cores per GPU; see "What limits the speed" in
-[large-datasets.md](large-datasets.md).
+**A development container.** `.devcontainer/` holds a container definition for Visual Studio Code with GPU
+support. It was not built or used for these documents.
 
-### Dataset Requirements
-
-The paper used:
-- **Training**: 6,000 synthetic subjects × 10 impressions (SFinGe generator)
-- **Validation**: 2,000 subjects × 4 impressions
-- **Testing**: MCYT330 database (optical and capacitive sensors)
-
-You'll need to prepare your own datasets in the appropriate format.
-
-### Storage Requirements
-
-What was measured, and what was not:
-- **Python packages and pre-trained models**: not measured; the download commands of this guide were not run.
-  Look at the size of `flx-airgap-bundle` after Step 4.
-- **Training images**: the size of your corpus. The 500 ppi PNG files of rolled prints that were used for the
-  guides were about 200 kB each; at that size 1 million images are about 200 GB and 100 million about 20 TB. See
-  the storage table in [large-datasets.md](large-datasets.md).
-- **Model checkpoints**: `model.pyt` and `best_model.pyt`, 0.8 GB each plus 8.2 kB per training subject (measured).
-  While one of them is written, a third file of the same size exists for a moment (`model.pyt.tmp` or
-  `best_model.pyt.tmp`).
-- **Embeddings and minutiae files**: grow with the number of images; see the same storage table.
-- **RAM and GPU memory**: grow with the number of subjects and images; see "Above about one million subjects" in
-  [training-guide.md](training-guide.md) for what was measured and what is calculated.
-
----
+**Licence.** See [LICENSE](../LICENSE). Note that `pyproject.toml` names a different licence than that file;
+which one holds is for the owner of the repository to settle.
 
 ## Troubleshooting
 
-### ImportError: No module named 'torch'
-Ensure you've activated the virtual environment: `source venv/bin/activate`
+**`ModuleNotFoundError: No module named 'torch'` or `'flx'`.** The training environment is not active:
+`source venv/bin/activate` in the root directory of the repository.
 
-### CUDA out of memory
-Lower `--batch_size` of `scripts/train_500k.py` (default 64).
+**`ModuleNotFoundError: No module named 'fingerflow'`.** The extraction environment is not active, or (Part B)
+`PYTHONPATH` is not set in this shell. See "Before you run it" in
+[Step 4 of the training guide](training-guide.md#step-4-extract-the-minutiae).
 
-### Missing dependencies during installation
-Ensure all wheel files were downloaded in Step 1. Re-download any missing packages on the internet-connected machine.
+**The extraction stops with "too old".** The `fingerflow` package that Python finds is not the one of
+[The minutiae extractor](#the-minutiae-extractor) above. The message shows where it was imported from.
 
-### FingerFlow model files not found
-`scripts/extract_minutiae.py` needs `CoarseNet.h5` and `FineNet.h5`; check the paths given to `--coarse_net` and
-`--fine_net`. `ClassifyNet_6_classes.h5` is optional (`--classify_net`), and `CoreNet.weights` is not used.
+**`pip` cannot find a package during the offline installation.** The file is missing from the bundle, or it was
+downloaded for another Python version or system. Download it again on a machine that matches the air-gapped
+one.
 
-### The extraction stops with "too old"
-The `fingerflow` package that Python finds is not the revision named under "Download FingerFlow for Minutiae
-Extraction" above. The message shows where it was imported from.
+**Model files of the minutiae extractor not found.** `scripts/extract_minutiae.py` needs `CoarseNet.h5` and
+`FineNet.h5`; check the paths given to `--coarse_net` and `--fine_net`.
 
----
-
-## Additional Resources
-
-- **Training Tutorial**: [notebooks/model_training_tutorial.ipynb](../notebooks/model_training_tutorial.ipynb)
-- **Dataset Setup**: [notebooks/dataset_tutorial.ipynb](../notebooks/dataset_tutorial.ipynb)
-- **Embedding Extraction**: [notebooks/embedding_generation_tutorial.ipynb](../notebooks/embedding_generation_tutorial.ipynb)
-  (needs `tikzplotlib` from the development dependencies)
-- **DeepPrint Paper**: https://arxiv.org/abs/1909.09901
-- **BIOSIG 2023 Paper**: Benchmarking fixed-length Fingerprint Representations
-
----
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](../LICENSE) for details.
-
----
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@inproceedings{
-    Rohwedder-FixedLengthFingerprintDNN-BIOSIG-2023,
-    author = {T. Rohwedder and D. Osorio-Roig and C. Rathgeb and C. Busch},
-    booktitle = {Intl. Conf. of the Biometrics Special Interest Group ({BIOSIG})},
-    title = {Benchmarking fixed-length Fingerprint Representations across different Embedding Sizes and Sensor Types},
-    year = {2023}
-}
-```
+**`CUDA out of memory` during training.** Lower `--batch_size` of `scripts/train_500k.py` (default 64).
