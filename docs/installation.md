@@ -78,7 +78,7 @@ pip download \
 
 #### Download FingerFlow for Minutiae Extraction (Optional)
 
-If you plan to use the FingerFlow minutiae extractor ([scripts/extract_minutiae.py](scripts/extract_minutiae.py)):
+If you plan to use the FingerFlow minutiae extractor ([scripts/extract_minutiae.py](../scripts/extract_minutiae.py)):
 
 ```bash
 git clone https://github.com/craig-forefront/minutiae_extractor.git
@@ -322,7 +322,7 @@ data/
 
 `scripts/train_500k.py` and the `FingerFlowMinutiaMapLoader` read these file names as they are. The files may be
 in subdirectories (for example one per sensor); every subject needs the same number of impressions, numbered
-without gaps. "Step 1" of [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) describes the layout and what
+without gaps. "Step 1" of [training-guide.md](training-guide.md) describes the layout and what
 to do when your data does not fit it.
 
 ### Extract Minutiae (Optional)
@@ -340,12 +340,12 @@ python scripts/extract_minutiae.py \
 
 The script resamples every image to 500 pixels per inch and must know the resolution of each file: from `--ppi`,
 from the manifest, from the metadata of the file or from `--assume_ppi`. See "Option A: Extract Minutiae Using
-FingerFlow" and "Images from different sensors" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for
+FingerFlow" and "Images from different sensors" in [training-guide.md](training-guide.md) for
 these options, the ridge polarity and the extraction of very large datasets.
 
 ### Train
 
-Follow [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md). Its training command, for 50,000 fingers with 10
+Follow [training-guide.md](training-guide.md). Its training command, for 50,000 fingers with 10
 images each:
 
 ```bash
@@ -362,8 +362,8 @@ python scripts/train_500k.py \
 For several GPUs, put `torchrun --nproc_per_node=4` in place of `python`. The same command again continues the
 training; a new `--output_dir` starts a new one.
 
-The notebooks [model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb) and
-[embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb) show the classes underneath
+The notebooks [model_training_tutorial.ipynb](../notebooks/model_training_tutorial.ipynb) and
+[embedding_generation_tutorial.ipynb](../notebooks/embedding_generation_tutorial.ipynb) show the classes underneath
 on the SFinGe example data. They need the development dependencies (`jupyter`; the embedding notebook also
 imports `tikzplotlib` through `flx.visualization`), so download and install "Development Dependencies" for them.
 The notebooks were not run for this guide.
@@ -382,7 +382,7 @@ The notebooks were not run for this guide.
 
 No training time was measured on a GPU for these guides. The image preparation runs on the CPU and took about
 1 second per rolled print per core here, so plan CPU cores per GPU; see "What limits the speed" in
-[LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
+[large-datasets.md](large-datasets.md).
 
 ### Dataset Requirements
 
@@ -400,13 +400,13 @@ What was measured, and what was not:
   Look at the size of `flx-airgap-bundle` after Step 4.
 - **Training images**: the size of your corpus. The 500 ppi PNG files of rolled prints that were used for the
   guides were about 200 kB each; at that size 1 million images are about 200 GB and 100 million about 20 TB. See
-  the storage table in [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
+  the storage table in [large-datasets.md](large-datasets.md).
 - **Model checkpoints**: `model.pyt` and `best_model.pyt`, 0.8 GB each plus 8.2 kB per training subject (measured).
   While one of them is written, a third file of the same size exists for a moment (`model.pyt.tmp` or
   `best_model.pyt.tmp`).
 - **Embeddings and minutiae files**: grow with the number of images; see the same storage table.
 - **RAM and GPU memory**: grow with the number of subjects and images; see "Above about one million subjects" in
-  [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md) for what was measured and what is calculated.
+  [training-guide.md](training-guide.md) for what was measured and what is calculated.
 
 ---
 
@@ -433,9 +433,9 @@ Extraction" above. The message shows where it was imported from.
 
 ## Additional Resources
 
-- **Training Tutorial**: [notebooks/model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb)
-- **Dataset Setup**: [notebooks/dataset_tutorial.ipynb](notebooks/dataset_tutorial.ipynb)
-- **Embedding Extraction**: [notebooks/embedding_generation_tutorial.ipynb](notebooks/embedding_generation_tutorial.ipynb)
+- **Training Tutorial**: [notebooks/model_training_tutorial.ipynb](../notebooks/model_training_tutorial.ipynb)
+- **Dataset Setup**: [notebooks/dataset_tutorial.ipynb](../notebooks/dataset_tutorial.ipynb)
+- **Embedding Extraction**: [notebooks/embedding_generation_tutorial.ipynb](../notebooks/embedding_generation_tutorial.ipynb)
   (needs `tikzplotlib` from the development dependencies)
 - **DeepPrint Paper**: https://arxiv.org/abs/1909.09901
 - **BIOSIG 2023 Paper**: Benchmarking fixed-length Fingerprint Representations
@@ -444,7 +444,7 @@ Extraction" above. The message shows where it was imported from.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License. See [LICENSE](../LICENSE) for details.
 
 ---
 

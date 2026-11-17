@@ -10,7 +10,7 @@ Prerequisites:
         pip install -e /path/to/minutiae_extractor
     in a revision whose Extractor has the image_dpi option and accepts None
     for the ClassifyNet and CoreNet paths (the `fingerflow` release on PyPI
-    has neither). See AIRGAP_INSTALLATION.md. Pillow is needed to read the
+    has neither). See docs/installation.md. Pillow is needed to read the
     resolution from the image files. torch is not needed.
 
 Usage:
@@ -95,7 +95,7 @@ program wrote a wrong 300 or 600 into it. For a corpus of one known resolution
 use --ppi. At its end the script prints how many files took their resolution
 from where.
 
-The extractor that this script needs is named in AIRGAP_INSTALLATION.md
+The extractor that this script needs is named in docs/installation.md
 (repository minutiae_extractor, branch claude/serene-albattani-s6ehsj until it
 is merged into its main). With an older one the script stops with exit status
 2 and says so.
@@ -167,7 +167,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Extract minutiae from fingerprint images using FingerFlow",
         epilog="See the docstring at the top of this script and the section "
-               "'Dataset Preparation' of TRAINING_PIPELINE_GUIDE.md.",
+               "'Dataset Preparation' of docs/training-guide.md.",
     )
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Directory containing fingerprint images")

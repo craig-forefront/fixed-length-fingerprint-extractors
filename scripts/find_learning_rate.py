@@ -21,7 +21,7 @@ Output in --output_dir:
                         smoothed_loss, gradient_norm
     lr_range_test.png   loss against learning rate
 The suggested rate is printed at the end. Pass it to train_500k.py with
---learning_rate. See "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md
+--learning_rate. See "Choosing the learning rate" in docs/training-guide.md
 for how to read the plot.
 
 The images are prepared as in train_500k.py (resampled to 500 pixels per inch,

@@ -299,7 +299,7 @@ class DivergenceGuard:
             "(scripts/find_learning_rate.py suggests a value for your data and "
             "batch size), use more warm-up steps, or switch on gradient "
             "clipping. See 'Choosing the learning rate' in "
-            "TRAINING_PIPELINE_GUIDE.md. The parameters of this epoch were not "
+            "docs/training-guide.md. The parameters of this epoch were not "
             "saved: model.pyt, if it exists, is still the end of the last "
             "completed epoch."
         )

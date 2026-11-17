@@ -104,7 +104,7 @@ def align_minutia_maps(
     batch of minutia lists of different lengths would change every loader
     and the batch format. Against maps drawn again, the resampled maps had a
     correlation of 0.94 to 0.97 on real minutiae (see "Learned alignment" in
-    TRAINING_PIPELINE_GUIDE.md). With a scale other than 1 the resampled
+    docs/training-guide.md). With a scale other than 1 the resampled
     minutiae also change their size, which drawn ones would not.
 
     The result carries no gradient: the alignment must not be rewarded for

@@ -13,7 +13,7 @@ real prints on a CPU (12 and 32 images from three or four kinds of image files; 
 [What was run for this guide](#what-was-run-for-this-guide) lists each one and with which options). Nothing in it
 was run on a GPU or on a large dataset. For large datasets read
 [Above about one million subjects](#above-about-one-million-subjects) before you plan anything, and
-[LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
+[large-datasets.md](large-datasets.md).
 
 ## Table of Contents
 
@@ -36,7 +36,7 @@ was run on a GPU or on a large dataset. For large datasets read
 
 Before starting, ensure you have:
 
-1. Completed the air-gapped installation from [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md)
+1. Completed the air-gapped installation from [installation.md](installation.md)
 2. Your fingerprint dataset transferred to the air-gapped environment
 3. Python environment activated: `source venv/bin/activate`
 4. For each image file: which finger it shows, and at which resolution (pixels per inch) it was captured
@@ -113,7 +113,7 @@ Minutiae data is required for training the variants with a minutia branch (`TexM
 
 #### Option A: Extract Minutiae Using FingerFlow
 
-If you have the FingerFlow models (see [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md)):
+If you have the FingerFlow models (see [installation.md](installation.md)):
 
 ```bash
 python scripts/extract_minutiae.py \
@@ -132,7 +132,7 @@ images. The script needs the `fingerflow` package of the minutiae_extractor repo
 and accepts `None` for the ClassifyNet and CoreNet paths: its branch `claude/serene-albattani-s6ehsj` (commit
 "Make ClassifyNet and CoreNet optional in the Extractor" or later), or its `main` once that branch is merged. The
 `fingerflow` release on PyPI and older checkouts do not work: the script then stops at the first image with exit
-status 2 and a message that names the branch. [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md) says how to get it.
+status 2 and a message that names the branch. [installation.md](installation.md) says how to get it.
 The script needs Pillow, and it does not need torch, so it runs in the environment of the extractor.
 
 The next section, "Images from different sensors", explains the options for resolution and ridge polarity, which you
@@ -551,7 +551,7 @@ parameters are smaller than 0.025 in size, so the former default of 0.025
 changed most parameters by more than their own size in the first step. On
 real fingerprint images it destroyed the training at once: the loss was 14.9 in the first step and 5,717
 in the second (one run, 8 images per step). With 0.01, the value that
-LARGE_SCALE_TRAINING_GUIDE.md used to recommend, the loss was 690 in the
+large-datasets.md used to recommend, the loss was 690 in the
 third step.
 
 ### What warm-up does
@@ -666,7 +666,7 @@ draws `lr_range_test.png` and prints a suggested rate.
 
 ### How to read the plot
 
-![Range test of DeepPrint_TexMinu on 440 real fingerprint images](figures/lr_range_test_example.png)
+![Range test of DeepPrint_TexMinu on 440 real fingerprint images](../figures/lr_range_test_example.png)
 
 The picture is the range test of `DeepPrint_TexMinu` on 440 real images with
 8 images per step, made with the former loss weights (see "What was measured
@@ -1731,8 +1731,8 @@ layout, the smallest change is inside that script:
 - The minutiae files are read by `FingerFlowMinutiaMapLoader` (`<subject>_<impression>.mnt`) or, for other names,
   `FingerFlowMinutiaMapLoaderCustomNaming` in `flx/data/fingerflow_minutia_loader.py`.
 
-The notebooks [dataset_tutorial.ipynb](notebooks/dataset_tutorial.ipynb) and
-[model_training_tutorial.ipynb](notebooks/model_training_tutorial.ipynb) show the classes underneath on the SFinGe
+The notebooks [dataset_tutorial.ipynb](../notebooks/dataset_tutorial.ipynb) and
+[model_training_tutorial.ipynb](../notebooks/model_training_tutorial.ipynb) show the classes underneath on the SFinGe
 example data. They were not run for this guide. An earlier version of this guide had a hand-written training
 script in ten steps; it called functions that do not exist and was removed.
 
@@ -1800,10 +1800,10 @@ python -m pytest -q
 
 Files:
 
-- Settings and their defaults: [flx/setup/config.py](flx/setup/config.py)
-- Training script: [scripts/train_500k.py](scripts/train_500k.py); training loop:
-  [flx/models/model_training.py](flx/models/model_training.py)
-- Model: [flx/models/deep_print_arch.py](flx/models/deep_print_arch.py)
+- Settings and their defaults: [flx/setup/config.py](../flx/setup/config.py)
+- Training script: [scripts/train_500k.py](../scripts/train_500k.py); training loop:
+  [flx/models/model_training.py](../flx/models/model_training.py)
+- Model: [flx/models/deep_print_arch.py](../flx/models/deep_print_arch.py)
 - In the output directory of a training: `model.pyt` (newest epoch), `best_model.pyt` (best epoch), `log.json`,
   `training_settings.json`
 
@@ -1824,13 +1824,13 @@ All on one machine with 4 CPU cores and no GPU.
 | The log snippets of Step 8 | the model of the 12 prints | ran |
 | Steps 9 and 10 and the snippet under "What to watch" in the alignment section | the same model, embedding its own 12 training and validation prints | 12 embeddings of 512 values, saved and loaded again; the error rates of a model after 4 training steps mean nothing |
 | `python -m pytest -q` | | 358 passed |
-| The offline `pip install ... -e .` of AIRGAP_INSTALLATION.md | a fresh environment with only setuptools and wheel from a local directory | installs with `--no-deps`; without it, it names the first missing dependency, as that guide says |
+| The offline `pip install ... -e .` of installation.md | a fresh environment with only setuptools and wheel from a local directory | installs with `--no-deps`; without it, it names the first missing dependency, as that guide says |
 
 These commands were started from another directory than the repository root, with the script paths adjusted. A
 later review of this guide reports that the commands without `torchrun` also ran from the repository root as
 written, on 12 prints.
 
 Not run: anything on a GPU, `torchrun`, the `pip download` and the other install commands of
-AIRGAP_INSTALLATION.md, the notebooks, and any dataset larger than 440 images. The measurement
+installation.md, the notebooks, and any dataset larger than 440 images. The measurement
 sections (learning rate, loss weights, learned alignment, sensors) say for each number how many images it rests
 on.

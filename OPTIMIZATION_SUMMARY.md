@@ -14,11 +14,11 @@ code are not given, because they go out of date.
 | Checkpoints | `model.pyt` after every epoch, `best_model.pyt` for the best epoch | No checkpoint inside an epoch |
 
 What was measured about speed is the image preparation on the CPU, which takes about 1 second per rolled print
-per core; see "What limits the speed" in [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md).
+per core; see "What limits the speed" in [docs/large-datasets.md](docs/large-datasets.md).
 
 Where to read on:
 
-- [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md): the route from images to a trained model.
-- [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md): what matters for large datasets.
-- ["Above about one million subjects"](TRAINING_PIPELINE_GUIDE.md#above-about-one-million-subjects): the limits
+- [docs/training-guide.md](docs/training-guide.md): the route from images to a trained model.
+- [docs/large-datasets.md](docs/large-datasets.md): what matters for large datasets.
+- ["Above about one million subjects"](docs/training-guide.md#above-about-one-million-subjects): the limits
   of the code as it is.

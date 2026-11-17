@@ -1,7 +1,7 @@
 # Large-Scale Training Guide
 
 This guide is for datasets of hundreds of thousands of images and more. It is an addition to
-[TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md), which describes the route (file layout, minutiae
+[training-guide.md](training-guide.md), which describes the route (file layout, minutiae
 extraction, learning rate, training, using the model) and which you should follow first on a small part of your
 data.
 
@@ -26,7 +26,7 @@ all; those were removed as well.
 
 ## The command
 
-The training command is the one of [Step 6 in TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#step-6-run-the-training),
+The training command is the one of [Step 6 in training-guide.md](training-guide.md#step-6-run-the-training),
 started with `torchrun` for several GPUs:
 
 ```bash
@@ -46,7 +46,7 @@ torchrun --nproc_per_node=4 scripts/train_500k.py \
 - The same command with `python` in place of `torchrun --nproc_per_node=4` was run on 12 images on a CPU. The
   `torchrun` form was not run (no GPU).
 - The same command again continues the training; a new `--output_dir` starts a new one. See
-  [Step 7](TRAINING_PIPELINE_GUIDE.md#step-7-continue-a-training-or-start-again).
+  [Step 7](training-guide.md#step-7-continue-a-training-or-start-again).
 
 ## Before a long run
 
@@ -59,7 +59,7 @@ torchrun --nproc_per_node=4 scripts/train_500k.py \
 2. **Read the first lines of the training output**: the variant, the number of training and validation subjects,
    and the block "Resolution of ... training images".
 3. **Find the learning rate for the batch size and number of GPUs of the real run**, see
-   [Choosing the learning rate](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate). Do not copy a rate from
+   [Choosing the learning rate](training-guide.md#choosing-the-learning-rate). Do not copy a rate from
    a small dataset or another batch size.
 4. **Time 200 steps** and compute the time of an epoch from it before you commit the hardware.
 5. **Decide the number of epochs once**, in particular with `--lr_schedule cosine`.
@@ -69,11 +69,11 @@ torchrun --nproc_per_node=4 scripts/train_500k.py \
 | Setting | Where | Notes |
 |---------|-------|-------|
 | Images per step and GPU | `--batch_size` (default 64) | One step sees this many images times the number of GPUs. Lower it when the GPU runs out of memory. The range test must use the same value |
-| Validation subjects | `--max_validation_subjects` (default 5,000) | All their impressions are prepared and embedded after every epoch. See the validation part of [Above about one million subjects](TRAINING_PIPELINE_GUIDE.md#above-about-one-million-subjects) |
-| Learning rate, warm-up, schedule, gradient limit | `--learning_rate`, `--warmup_steps`, `--lr_schedule`, `--gradient_clip_norm` | See [Choosing the learning rate](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate) |
+| Validation subjects | `--max_validation_subjects` (default 5,000) | All their impressions are prepared and embedded after every epoch. See the validation part of [Above about one million subjects](training-guide.md#above-about-one-million-subjects) |
+| Learning rate, warm-up, schedule, gradient limit | `--learning_rate`, `--warmup_steps`, `--lr_schedule`, `--gradient_clip_norm` | See [Choosing the learning rate](training-guide.md#choosing-the-learning-rate) |
 | Epochs and early stopping | `--num_epochs` (default 10), `--patience` (default 3) | How many epochs a large set needs was not measured |
 | Embedding size | `--embedding_dim` (default 256 **per branch**, 512 per print with minutiae) | The memory of the classifier grows with it |
-| Learned alignment | `--localization on` or `off` | Whether it helps must be measured on your data: [Learned alignment](TRAINING_PIPELINE_GUIDE.md#learned-alignment) |
+| Learned alignment | `--localization on` or `off` | Whether it helps must be measured on your data: [Learned alignment](training-guide.md#learned-alignment) |
 | Data-loader worker processes | `get_dataloader_args` in `flx/models/torch_helpers.py`: 16 per GPU process (8 if `HIGH_VRAM_GPU` is set to `False`), 4 without a GPU | Not an option of the script. Edit the function if the CPU cores do not match |
 | Mixed precision | on whenever a GPU is used (`use_amp` of `fit`) | Not an option of the script. Not run here |
 
@@ -101,7 +101,7 @@ for validation. Check this on your hardware: if the GPUs are mostly idle during 
 the limit.
 
 The minutiae extraction is a separate, slow job; see
-[Running the extraction over a very large number of files](TRAINING_PIPELINE_GUIDE.md#running-the-extraction-over-a-very-large-number-of-files).
+[Running the extraction over a very large number of files](training-guide.md#running-the-extraction-over-a-very-large-number-of-files).
 
 ## Storage
 
@@ -120,7 +120,7 @@ before you copy tens of millions of files.
 
 ## Above about one million subjects
 
-Read [the section of this name in TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#above-about-one-million-subjects)
+Read [the section of this name in training-guide.md](training-guide.md#above-about-one-million-subjects)
 before you plan a training on a collection of that size. In short: the classifier and the center loss need about
 10 kB of GPU memory per training subject in every GPU process (calculated), the identifier lists are held in
 memory by every process, every subject needs the same number of impressions, and checkpoints exist only per

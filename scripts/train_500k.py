@@ -1,7 +1,7 @@
 """
 Training script for DeepPrint on a large fingerprint dataset, with or without
 learned alignment (LocalizationNetwork). The name is historical: the script
-was first written for 500,000 images. TRAINING_PIPELINE_GUIDE.md walks
+was first written for 500,000 images. docs/training-guide.md walks
 through its use; the section "Above about one million subjects" there says
 what it cannot do today.
 
@@ -68,7 +68,7 @@ Continuing and starting again:
                                     the same differ (at your own risk)
 
 Images from different sensors (see "Dataset Preparation" in
-TRAINING_PIPELINE_GUIDE.md):
+docs/training-guide.md):
     Every image is loaded like scripts/extract_minutiae.py loads it: resampled
     to 500 pixels per inch (ppi) and brought to dark ridges. The minutiae in
     the .mnt files are in the pixels of that image. Give this script the same
@@ -96,7 +96,7 @@ TRAINING_PIPELINE_GUIDE.md):
     The settings are written to data_preparation.json in --output_dir. Images
     must be prepared in the same way when the model is used later.
 
-Learned alignment (see "Learned alignment" in TRAINING_PIPELINE_GUIDE.md):
+Learned alignment (see "Learned alignment" in docs/training-guide.md):
     The localization network is a small network in front of the model. It
     proposes a rotation and a shift for every image, and the image is
     resampled with them before the model sees it, so that the model sees every
@@ -154,7 +154,7 @@ Validation (on by default):
         --max_validation_subjects 5000 \
         --patience 3
 
-Learning rate (see "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md):
+Learning rate (see "Choosing the learning rate" in docs/training-guide.md):
     The learning rate is the size of the change that the optimizer makes to
     the model in every step (one batch). The right value depends on the data,
     the model variant and the batch size. Find it with
@@ -348,7 +348,7 @@ DEFAULT_MAX_VALIDATION_SUBJECTS = 5000
 
 # Above this number of training subjects the script prints what grows with
 # the number of subjects (see "Above about one million subjects" in
-# TRAINING_PIPELINE_GUIDE.md)
+# docs/training-guide.md)
 MANY_SUBJECTS = 1_000_000
 
 # File in --output_dir with the settings of the training
@@ -1007,7 +1007,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train DeepPrint on a large fingerprint dataset",
         epilog="See the docstring at the top of this script and "
-               "TRAINING_PIPELINE_GUIDE.md.",
+               "docs/training-guide.md.",
     )
     parser.add_argument("--dataset_dir", type=str, required=True,
                         help="Path to fingerprint images directory")
@@ -1245,7 +1245,7 @@ def main():
             f"measurement), so about {num_train_subjects * 10 / 1e6:,.0f} GB here, in "
             "every GPU process, and model.pyt grows with it. This script was never "
             "run at this size. See \"Above about one million subjects\" in "
-            "TRAINING_PIPELINE_GUIDE.md."
+            "docs/training-guide.md."
         )
 
     print(f"\nCreated {len(training_ids):,} training identifiers")

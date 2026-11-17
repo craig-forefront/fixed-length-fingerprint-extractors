@@ -25,11 +25,11 @@ To learn how to train a variant of the DeepPrint model on a small example datase
 
 To learn how to extract embeddings from a dataset using a trained model, see the [embedding generation tutorial notebook](notebooks/embedding_generation_tutorial.ipynb).
 
-The notebooks need `jupyter`, and the embedding notebook also imports `tikzplotlib` (through `flx.visualization`). Both are among the development dependencies ("Development Dependencies" in [AIRGAP_INSTALLATION.md](AIRGAP_INSTALLATION.md)), not among the core ones.
+The notebooks need `jupyter`, and the embedding notebook also imports `tikzplotlib` (through `flx.visualization`). Both are among the development dependencies ("Development Dependencies" in [docs/installation.md](docs/installation.md)), not among the core ones.
 
-To train on your own images with the scripts of this repository (`scripts/extract_minutiae.py`, `scripts/find_learning_rate.py`, `scripts/train_500k.py`), follow the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). It describes the file layout that the training script reads, one complete training command, how a training is continued or started again, and how the trained model is loaded. For large datasets see [LARGE_SCALE_TRAINING_GUIDE.md](LARGE_SCALE_TRAINING_GUIDE.md) and the section "Above about one million subjects" of the training guide, which states what the code cannot do today.
+To train on your own images with the scripts of this repository (`scripts/extract_minutiae.py`, `scripts/find_learning_rate.py`, `scripts/train_500k.py`), follow the [training pipeline guide](docs/training-guide.md). It describes the file layout that the training script reads, one complete training command, how a training is continued or started again, and how the trained model is loaded. For large datasets see [docs/large-datasets.md](docs/large-datasets.md) and the section "Above about one million subjects" of the training guide, which states what the code cannot do today.
 
-To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](TRAINING_PIPELINE_GUIDE.md). For prints from different sensors (resolution, ridge polarity, image sizes) and for the extraction of very large datasets (continuing a run, shards, failure log), see "Images from different sensors" there. The extraction and `scripts/train_500k.py` resample every image to 500 pixels per inch and need to know the resolution of each file.
+To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](docs/training-guide.md). For prints from different sensors (resolution, ridge polarity, image sizes) and for the extraction of very large datasets (continuing a run, shards, failure log), see "Images from different sensors" there. The extraction and `scripts/train_500k.py` resample every image to 500 pixels per inch and need to know the resolution of each file.
 
 ### Pre-trained model
 
@@ -100,7 +100,7 @@ Furthermore, the impact of rotation and translation of fingerprint images on the
 ![Conceptual overview of fixed-length fingerprint representation extraction](figures/conceptual-overview-deepprint.png)
 
 The full DeepPrint model consists of the following components:
- - Localization network: Proposes a rotation and a shift for the fingerprint image, with which the image is resampled before the other components see it (learned alignment). (Not shown in the figure) The rotation is bounded to 60 degrees and the shift to half the image side, the network has its own, smaller learning rate, and the training stops when the aligned images are mostly empty; `scripts/train_500k.py --localization on|off` trains with or without it. See "Learned alignment" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#learned-alignment).
+ - Localization network: Proposes a rotation and a shift for the fingerprint image, with which the image is resampled before the other components see it (learned alignment). (Not shown in the figure) The rotation is bounded to 60 degrees and the shift to half the image side, the network has its own, smaller learning rate, and the training stops when the aligned images are mostly empty; `scripts/train_500k.py --localization on|off` trains with or without it. See "Learned alignment" in [docs/training-guide.md](docs/training-guide.md#learned-alignment).
  - Inception v4 stem: Processes the fingerprint image and extracts a feature map.
  - Texture-branch: Processes the feature map and extracts a fixed-length fingerprint representation.
  - Minutiae-branch: Processes the feature map and extracts a fixed-length minutiae representation as well as a minutia map. The minutia map is used during training to focus the training on the minutiae regions of the fingerprint. It is not used to create the fixed-length fingerprint representation.
@@ -144,10 +144,10 @@ The following preprocessing steps are applied to the fingerprint images before t
 For training the model, the Adam optimizer is used, the optimal learning rate differs between the individual variants. For simpler variants like `DeepPrint_Tex_512` a higher
 learning rate can be chosen to speed up training. For more complex variants like `DeepPrint_LocTexMinu_512` a lower learning rate is necessary to avoid overfitting.
 The learning rate, a warm-up, a cosine schedule and gradient clipping are set in `flx/setup/config.py` or passed to `fit` as a `LearningRateConfig`. `scripts/find_learning_rate.py` runs a short
-range test that suggests a learning rate for a dataset, model variant and batch size; see "Choosing the learning rate" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#choosing-the-learning-rate).
+range test that suggests a learning rate for a dataset, model variant and batch size; see "Choosing the learning rate" in [docs/training-guide.md](docs/training-guide.md#choosing-the-learning-rate).
 The training stops with a message when the loss is not a finite number or more than ten times the loss at the start.
 The loss is a weighted sum of the cross entropy, the center loss and, for variants with minutiae, the minutia map loss. The three weights are set in `flx/setup/config.py`
-or passed as `LossWeights`; see "Loss weights" in [TRAINING_PIPELINE_GUIDE.md](TRAINING_PIPELINE_GUIDE.md#loss-weights) for what they mean, what was measured and how they differ from earlier versions.
+or passed as `LossWeights`; see "Loss weights" in [docs/training-guide.md](docs/training-guide.md#loss-weights) for what they mean, what was measured and how they differ from earlier versions.
 The number of epochs is chosen based on the equal error rate on a validation set (subjects that are not in the training set). The training is stopped when this error rate does not decrease anymore,
 and the epoch with the lowest validation error rate is saved as `best_model.pyt`. Without a validation set, the epoch with the lowest training loss is saved instead, which does not detect overfitting.
 

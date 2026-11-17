@@ -88,7 +88,7 @@ EXTRACTOR_REQUIREMENT = (
     "ClassifyNet and CoreNet paths: branch claude/serene-albattani-s6ehsj "
     "(commit \"Make ClassifyNet and CoreNet optional in the Extractor\" or "
     "later), or main once that branch is merged. Older checkouts and the "
-    "fingerflow release on PyPI do not work. See AIRGAP_INSTALLATION.md."
+    "fingerflow release on PyPI do not work. See docs/installation.md."
 )
 
 
