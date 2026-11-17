@@ -10,6 +10,10 @@
 > - In this repository the import is `from flx.visualization.det_curve_plotting.DET import DET`, not
 >   `from DET import DET`.
 > - The example images that the text refers to (`examples/...`) are not included.
+>
+> Two slips of the original text are corrected below, nothing else is changed: in the example for the axis
+> labels `self.x_label` and `self.y_label` now read `det.x_label` and `det.y_label`, and a missing quotation
+> mark in the last `<img>` tag is added.
 
 # Detection Error Tradeoff (DET) plots
 by Andreas Nautsch, Hochschule Darmstadt, 2018.
