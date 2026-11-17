@@ -105,7 +105,8 @@ from the start.
 | `scripts/run_original_minutiaenet.py`, `scripts/run_fingerflow_minutiaenet.py`, `scripts/run_minutiae_extractor.py`, `scripts/compare_minutiae_outputs.py`, `scripts/visualize_three_way.py` | comparison of minutiae extractors | Development tools that compare three minutiae extractors. They expect directories that are not part of this repository, are not needed for training and were not run for these documents |
 | `flx/scripts/*.py` | the paper | Training, extraction, benchmarks, tables and plots of the paper's experiments on the paper's datasets ([docs/paper.md](docs/paper.md)). Not run for these documents |
 
-Every script of the route describes its options in the docstring at its top and with `--help`.
+For every script of the route, `--help` lists every option with its default; the docstring at the top of the
+script explains the main groups of options.
 
 ## What is not covered
 

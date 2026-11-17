@@ -115,7 +115,8 @@ Learned alignment (see "Learned alignment" in docs/tuning.md):
 
     Whether the localization network makes matching more accurate on your
     data is not known: train both ways with the same settings and compare the
-    validation equal error rates (the guide has the recipe). A model must be
+    validation equal error rates (docs/tuning.md, "How to find out whether it
+    helps on your data", has the recipe). A model must be
     loaded with the variant it was trained with.
 
 Validation (on by default):

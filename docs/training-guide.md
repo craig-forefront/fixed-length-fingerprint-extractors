@@ -535,7 +535,8 @@ python scripts/train_500k.py \
 - The loss weights have options too (`--loss_weight_...`); see [Loss weights](tuning.md#loss-weights). Leave
   them at their defaults unless you compare settings.
 - On several GPUs the same options follow `torchrun`; see [Several GPUs](#several-gpus).
-- `python scripts/train_500k.py --help` lists all options; the docstring at the top of the script describes them.
+- `python scripts/train_500k.py --help` lists every option with its default; the docstring at the top of the
+  script explains the main groups of options.
 
 **How many epochs.** `--num_epochs` is an upper limit (default 10); with validation the training stops earlier
 when the validation error rate has not fallen for `--patience` epochs (default 3). How many epochs a large
@@ -949,7 +950,8 @@ python -m pytest -q
 Where things are:
 
 - Settings and their defaults: [flx/setup/config.py](../flx/setup/config.py)
-- Training script: [scripts/train_500k.py](../scripts/train_500k.py); its docstring describes every option.
+- Training script: [scripts/train_500k.py](../scripts/train_500k.py); `--help` lists every option, its
+  docstring explains the main groups.
   Training loop: [flx/models/model_training.py](../flx/models/model_training.py)
 - Model: [flx/models/deep_print_arch.py](../flx/models/deep_print_arch.py)
 - Image preparation (500 ppi, ridge polarity): `flx/preparation/sensor_normalization.py`
