@@ -691,10 +691,14 @@ The fields of an entry are:
 - `loss_statistics`: the parts of the loss, each multiplied by its weight
   (see [Loss weights](tuning.md#loss-weights)) and averaged per training sample; the
   minutia map loss is averaged over the samples that have a minutia map. The
-  keys are `texture_loss` and `minutia_loss` (one per branch), each with
-  `crossent_loss_sum` (cross entropy) and `center_loss_sum` (center loss),
-  and `minutia_map_loss`. The names end in `_sum` for historical reasons;
-  the values are means.
+  keys depend on the variant:
+  - with minutiae (`DeepPrint_TexMinu`, `DeepPrint_LocTexMinu`): `texture_loss`
+    and `minutia_loss` (one per branch), each with `crossent_loss_sum` (cross
+    entropy) and `center_loss_sum` (center loss), and `minutia_map_loss`;
+  - without minutiae (`DeepPrint_Tex`, `DeepPrint_LocTex`): `crossent_loss_sum`
+    and `center_loss_sum` directly. There is no `texture_loss` key.
+
+  The names end in `_sum` for historical reasons; the values are means.
 - `training_accuracy`: the share of training samples whose subject the model
   named correctly. Higher is better. It says nothing about fingers that are
   not in the training set.
