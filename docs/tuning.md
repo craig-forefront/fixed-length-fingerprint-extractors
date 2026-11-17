@@ -40,7 +40,6 @@ training works at all:
 - **About right:** the loss falls steadily, with some noise from batch to
   batch.
 
-
 This repository uses the Adam optimizer. In its first step Adam changes every parameter by about the learning
 rate itself, whatever the data look like, and most parameters of a fresh DeepPrint model are small numbers. A
 rate of 0.025 therefore destroyed the training in its second step on real images, and 0.01 in its third; the
@@ -324,6 +323,7 @@ few epochs and compare the validation equal error rate, for example the map
 weights 0.095, 0.01 and 1.0, and the center weights 8.0 and 0.5. Change one
 weight at a time, and repeat the learning rate range test for each setting,
 because the weights change the size of the loss and of its gradient.
+
 The recipe for such a comparison (same images, same validation subjects, repeats) is the one under
 [How to find out whether it helps on your data](#how-to-find-out-whether-it-helps-on-your-data) below, with a
 loss weight in place of `--localization` as the one thing that differs.

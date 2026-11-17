@@ -529,6 +529,7 @@ PyTorch 2.15.0, CPU build).
 | `scripts/extract_minutiae.py` with `--file_list`, `--ppi_manifest`, `--skip_existing`, shard 0 and shard 1 (Step 4, "A very large number of files") | `--num_shards 2` | 6 + 6 `.mnt` files, exit status 0, 83 and 81 seconds |
 | The command of Step 4 (no shards), afterwards, as the completeness check | | "Successful: 0", "Skipped: 12", "Failed: 0", exit status 0 |
 | The same command in the training environment, where `fingerflow` cannot be imported | | Python error message `No module named 'fingerflow'`, exit status 1; `extraction_settings.json` was written |
+| The extraction command with a path to a model file that does not exist (Troubleshooting 3) | | Python error message (`FileNotFoundError`), exit status 1 |
 | `scripts/find_learning_rate.py`, the command of Step 5 | `--num_subjects 4 --num_impressions 3 --batch_size 4 --num_steps 30 --min_lr 1e-6 --max_lr 0.1` | ended after 23 steps, suggested 0.000085; wrote the CSV file and the plot |
 | `scripts/train_500k.py`, the command of Step 6 | `--num_subjects 4 --num_impressions 3 --num_epochs 2 --validation_split 0.5 --batch_size 4` | 2 epochs, `DeepPrint_LocTexMinu`, exit status 0; `model.pyt` and `best_model.pyt` of 814 MB each |
 | The same command again (Step 7) | the same | trained no further epoch, exit status 0 |

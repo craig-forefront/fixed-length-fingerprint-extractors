@@ -70,8 +70,10 @@ Very large file lists:
     path, tab, reason. The exit status is 1 if the extraction failed for any
     image of this run and 0 otherwise; 2 means that the run did not start
     (other settings than the files in the output directory, or a minutiae
-    extractor that is too old). The script stops with an exception if the
-    extractor can not be set up for another reason (e.g. missing model files).
+    extractor that is too old). The script stops with a Python error message
+    and exit status 1, before any image, if the extractor can not be set up
+    for another reason: the fingerflow package cannot be imported (wrong
+    environment, PYTHONPATH not set) or a model file is missing.
 
     All .mnt files of one output directory must come from the same settings.
     The first run stores them in extraction_settings.json; a run with other
