@@ -2,6 +2,13 @@
 Run FingerFlow's MinutiaeNet + ClassifyNet + CoreNet on a directory of
 fingerprint images.
 
+Development tool for comparing minutiae extractors. It is NOT part of the
+training route; the route is scripts/extract_minutiae.py (see
+docs/training-guide.md). The usage example expects a copy of the original
+MinutiaeNet code in <repository>/MinutiaeNet-master, which is not part of this
+repository. This script was not run for the documents in
+docs/.
+
 Uses the pip-installed fingerflow package (Python 3.11, fingerflow 3.0.1).
 
 Output .mnt format:

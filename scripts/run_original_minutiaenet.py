@@ -2,6 +2,13 @@
 """
 Run inference with the original MinutiaeNet (2018) on a directory of fingerprint images.
 
+Development tool for comparing minutiae extractors. It is NOT part of the
+training route; the route is scripts/extract_minutiae.py (see
+docs/training-guide.md). It needs a copy of the original MinutiaeNet
+code (<repository>/MinutiaeNet-master) and its old Python environment, neither
+of which is part of this repository. This script was not run for the documents in
+docs/.
+
 Outputs .mnt files in FingerFlow-compatible format so they can be compared with
 the updated FingerFlow extractor using scripts/compare_minutiae_outputs.py.
 

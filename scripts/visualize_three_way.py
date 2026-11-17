@@ -1,6 +1,14 @@
 """
 4-panel visualization: raw image | Original MinutiaeNet | FingerFlow | minutiae_extractor.
 
+Development tool for comparing minutiae extractors. It is NOT part of the
+training route; the route is scripts/extract_minutiae.py (see
+docs/training-guide.md). It expects copies of the original MinutiaeNet
+code and of the minutiae_extractor repository in
+<repository>/MinutiaeNet-master and <repository>/minutiae_extractor-main,
+which are not part of this repository. This script was not run for the documents in
+docs/.
+
 Every marking panel shows:
   - Minutiae typed by ClassifyNet (circle=ending, triangle=bifurcation, diamond=others)
   - Colour by type (green/cyan/yellow/orange/magenta/grey)
