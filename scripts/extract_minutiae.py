@@ -175,8 +175,8 @@ def main() -> int:
         description="Extract minutiae from fingerprint images with the minutiae "
                     "extractor (package fingerflow of the minutiae_extractor "
                     "repository, not the fingerflow release on PyPI)",
-        epilog="See the docstring at the top of this script and the section "
-               "'Dataset Preparation' of docs/training-guide.md.",
+        epilog="See the docstring at the top of this script and Steps 2 and 4 "
+               "of docs/training-guide.md.",
     )
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Directory containing fingerprint images")

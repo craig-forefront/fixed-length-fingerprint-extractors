@@ -139,7 +139,7 @@ class AlignmentMonitor:
                 "tighten its bounds (LOCALIZATION_MAX_SHIFT, "
                 "LOCALIZATION_MAX_ROTATION_DEGREES), or train a variant "
                 "without localization network. See 'Learned alignment' in "
-                "docs/training-guide.md. The parameters of this epoch "
+                "docs/tuning.md. The parameters of this epoch "
                 "were not saved."
             )
         if self.warn_share > 0 and share > self.warn_share:

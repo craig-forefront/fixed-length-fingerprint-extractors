@@ -108,7 +108,7 @@ def suggest_learning_rate(
     does: an untrained model draws a map that is far from empty, and tiny
     changes correct that), and the place of the steepest fall then depends on
     the random start. Measured on six stored range tests of minutiae variants
-    (23 to 79 steps of 4 or 8 images, see docs/training-guide.md): the
+    (23 to 79 steps of 4 or 8 images, see docs/measurements.md): the
     former rule, which followed the steepest fall unless it was more than 100
     times below the rate with the lowest loss, suggested rates between
     0.0000016 and 0.00027, a factor of 170 apart; a tenth of the rate with
