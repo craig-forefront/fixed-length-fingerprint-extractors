@@ -438,7 +438,7 @@ The *learning rate* is the size of the change that every training step makes to 
 destroys a training within a few steps, too low a value wastes time, and the right value depends on the data,
 the variant and the batch size. `scripts/find_learning_rate.py` finds a starting value: it trains a fresh model
 on a part of your data for a few hundred steps while it raises the learning rate after every step, from far too
-low to far too high. It reads the same directory layout as the training and saves no model.
+low (0.0000001) to far too high (1). It reads the same directory layout as the training and saves no model.
 
 ```bash
 python scripts/find_learning_rate.py \
