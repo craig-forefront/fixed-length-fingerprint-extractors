@@ -341,12 +341,27 @@ All `.mnt` files of a dataset must come from the same settings and the same extr
   `--output_dir`, or give `--allow_settings_change` without `--skip_existing`, which extracts every file
   again.
 - A change of the minutiae extractor itself is **not** detected, because its revision is not recorded. Note
-  it yourself next to the output (for the air-gapped layout the clone has no git history; note the commit when
-  you build the bundle), and use a new output directory when the extractor changes:
+  it yourself next to the output, and use a new output directory when the extractor changes. The clone of
+  the extractor is in a different place in the two parts of [installation.md](installation.md).
+
+  If you installed with network access (Part A):
 
   ```bash
-  git -C ../minutiae_extractor rev-parse HEAD > data/poses/my-dataset-extractor-revision.txt
+  REV=$(git -C ../minutiae_extractor rev-parse HEAD) && echo "$REV" > data/poses/my-dataset-extractor-revision.txt
+  cat data/poses/my-dataset-extractor-revision.txt
   ```
+
+  If you installed air-gapped (Part B):
+
+  ```bash
+  REV=$(git -C ../airgap-packages/minutiae_extractor rev-parse HEAD) && echo "$REV" > data/poses/my-dataset-extractor-revision.txt
+  cat data/poses/my-dataset-extractor-revision.txt
+  ```
+
+  The second line must print one line of 40 letters and digits (the commit). If it prints an error instead,
+  nothing was recorded: the path is wrong, or `git` is not installed on this machine. In the second case
+  read the commit on the machine where you built the bundle (the same `git ... rev-parse HEAD` in the clone
+  there) and write it into the file by hand.
 
 Nothing in this repository was run on latent prints (prints lifted from a surface). What the extractor finds
 on latents is measured in the extractor's documentation (section "Direction sense" of its README or its
