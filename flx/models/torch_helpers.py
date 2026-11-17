@@ -142,15 +142,16 @@ def get_training_batch_size() -> int:
 
 def get_dataloader_args(train: bool) -> dict:
     """
-    Get DataLoader arguments optimized for training scale.
+    Arguments for the torch DataLoader.
 
-    The batch size is the one of set_training_batch_size (default 64, chosen
-    for GPUs with 24 GB or more; reduce it if the GPU runs out of memory),
-    and twice that outside of training.
+    The batch size is the one of set_training_batch_size (default 64; reduce
+    it if the GPU runs out of memory), and twice that outside of training.
 
-    Workers:
-    - Rule of thumb: 2-4 workers per GPU
-    - For 4 GPUs: 16 workers, 8 GPUs: 16-32 workers
+    Worker processes, in every process that calls this (with several GPUs
+    there is one such process per GPU): 16 with a GPU (8 if HIGH_VRAM_GPU is
+    False), 4 without a GPU. These numbers were not tuned by measurement; the
+    image preparation in the workers took about 1 second per rolled print per
+    CPU core (see docs/large-datasets.md), so match them to the CPU cores.
     """
     batch_size = _training_batch_size
 
@@ -171,7 +172,7 @@ def get_dataloader_args(train: bool) -> dict:
             "batch_size": batch_size,
             "shuffle": train,
             "num_workers": 16,
-            "prefetch_factor": 4,  # Increased for better GPU utilization
+            "prefetch_factor": 4,
             "pin_memory": True,
             "persistent_workers": True,  # Keep workers alive between epochs
         }
@@ -179,7 +180,7 @@ def get_dataloader_args(train: bool) -> dict:
     return {
         "batch_size": batch_size,
         "shuffle": train,
-        "num_workers": 8,  # Increased from 4
+        "num_workers": 8,
         "prefetch_factor": 2,
         "pin_memory": True,
         "persistent_workers": True,

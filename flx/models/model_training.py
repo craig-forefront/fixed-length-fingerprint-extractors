@@ -181,7 +181,8 @@ def _train(
     Trains the model for one epoch.
 
     Args:
-        use_amp: Use Automatic Mixed Precision (AMP) for 2-3x speedup.
+        use_amp: Use automatic mixed precision when a GPU is used. Its effect
+                 on speed and memory was not measured for this repository.
                  Set to False if you encounter numerical instability.
         learning_rate: Learning rate, warm-up, schedule and gradient clipping.
                  None leaves the learning rate of the optimizer as it is and
@@ -249,7 +250,7 @@ def _train(
 
         # Forward pass with automatic mixed precision
         if scaler is not None:
-            # Mixed precision training (2-3x faster)
+            # Mixed precision training
             with torch.cuda.amp.autocast():
                 output: DeepPrintTrainingOutput = model(fp_imgs)
                 loss = loss_fun.forward(
@@ -404,8 +405,9 @@ def train_model(
                   Has no effect without a validation set. The epochs are counted
                   from the training log, so they carry over when a training is
                   resumed.
-        use_amp: Use Automatic Mixed Precision for 2-3x speedup and 30-40% less memory.
-                 Recommended for large-scale training. Set to False if numerical issues occur.
+        use_amp: Use automatic mixed precision when a GPU is used (the default).
+                 Its effect on speed and memory was not measured for this
+                 repository. Set to False if numerical issues occur.
         learning_rate: Learning rate, warm-up, schedule, gradient clipping and
                  the limit at which a rising loss stops the training. None uses
                  the defaults from flx/setup/config.py. The schedule depends
