@@ -61,7 +61,9 @@ Continuing and starting again:
 
     training_settings.json holds the settings of the last run that trained
     an epoch. A start that is refused (settings, missing files) or that
-    trains nothing does not write it.
+    trains nothing does not write it. A first start that passes these checks
+    and then fails in its first step (for example on a file whose resolution
+    is unknown) leaves the settings files and no model.pyt.
 
     --batch_size 64                 images per step on each GPU (default 64)
     --allow_changed_settings        continue although settings that must stay
@@ -146,12 +148,12 @@ Validation (on by default):
     then the epoch with the lowest training loss, which cannot detect
     overfitting, and early stopping is off.
 
-    torchrun --nproc_per_node=4 scripts/train_500k.py \
-        --dataset_dir /path/to/fingerprints \
-        --output_dir /path/to/model \
-        --validation_split 0.1 \
-        --max_validation_subjects 5000 \
-        --patience 3
+    --patience 3                    stop after this many epochs without a
+                                    lower validation error rate (default 3;
+                                    0 = never stop early)
+
+    These options are added to the command at the top, for example
+        --validation_split 0.1 --max_validation_subjects 5000 --patience 3
 
 Learning rate (see "Choosing the learning rate" in docs/tuning.md):
     The learning rate is the size of the change that the optimizer makes to
@@ -224,16 +226,18 @@ NUM_SUBJECTS = 50000          # Number of unique fingerprint subjects
 NUM_IMPRESSIONS = 10          # Impressions per subject (50000 * 10 = 500K)
 
 # Training hyperparameters
-NUM_EPOCHS = 10               # Fewer epochs needed with large dataset
-EMBEDDING_DIM = 256           # Dimension of the fixed-length representation
+NUM_EPOCHS = 10               # Upper limit; how many epochs a large set needs was not measured
+EMBEDDING_DIM = 256           # Values per branch (512 per print for variants with minutiae)
 
 # Learned alignment: "on" trains with the localization network, "off" without
 DEFAULT_LOCALIZATION = "on"
 
 # Image preprocessing
-BINARIZATION_THRESHOLD = 5.0  # Adjust based on your image quality
+# Despite its name this is not a threshold: it is the ridge width in pixels
+# that the binarisation (LazilyAllocatedBinarizer, a Gabor filter) assumes
+BINARIZATION_THRESHOLD = 5.0
 
-# Data augmentation - helps LocalizationNetwork learn robust alignment
+# Data augmentation: random rotation and shift of the training images
 POSE_AUGMENTATION = RandomPoseTransform(
     pad=0,
     angle_min=-30,            # Random rotation range (degrees)

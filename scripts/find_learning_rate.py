@@ -125,13 +125,17 @@ def main():
     parser.add_argument("--minutiae_dir", type=str, default=None,
                         help="Path to extracted minutiae (.mnt files)")
     parser.add_argument("--num_subjects", type=int, default=train_500k.NUM_SUBJECTS,
-                        help="Number of subjects in the dataset")
+                        help="Number of subjects in the dataset "
+                             f"(default: {train_500k.NUM_SUBJECTS})")
     parser.add_argument("--num_impressions", type=int, default=train_500k.NUM_IMPRESSIONS,
-                        help="Impressions per subject")
+                        help="Impressions per subject "
+                             f"(default: {train_500k.NUM_IMPRESSIONS})")
     parser.add_argument("--max_subjects", type=int, default=2000,
                         help="Use a random choice of this many subjects "
                              "(default: 2000, 0 = all subjects)")
-    parser.add_argument("--embedding_dim", type=int, default=train_500k.EMBEDDING_DIM)
+    parser.add_argument("--embedding_dim", type=int, default=train_500k.EMBEDDING_DIM,
+                        help="Embedding dimensions PER BRANCH, as in the planned "
+                             f"training (default: {train_500k.EMBEDDING_DIM})")
     parser.add_argument("--variant", type=str, default="auto",
                         choices=["auto"] + list(VARIANTS),
                         help="Model variant; use the one of the planned training. "
@@ -159,14 +163,19 @@ def main():
                         help="Loss weights as in the planned training; see the "
                              "options of the same name of train_500k.py "
                              "(default: the values in flx/setup/config.py)")
-    parser.add_argument("--loss_weight_center", type=float, default=None)
-    parser.add_argument("--loss_weight_minutia_map", type=float, default=None)
+    parser.add_argument("--loss_weight_center", type=float, default=None,
+                        help="Weight of the center loss, as in the planned training "
+                             "(default: LOSS_WEIGHT_CENTER in flx/setup/config.py)")
+    parser.add_argument("--loss_weight_minutia_map", type=float, default=None,
+                        help="Weight of the minutia map loss, as in the planned training "
+                             "(default: LOSS_WEIGHT_MINUTIA_MAP in flx/setup/config.py)")
     parser.add_argument("--smoothing", type=float, default=0.9,
                         help="Weight of the past in the moving average of the loss (default: 0.9)")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Processes that load images (default: 4)")
     parser.add_argument("--seed", type=int, default=0,
-                        help="Seed of the subject choice, the model and the batch order")
+                        help="Seed of the subject choice, the model and the batch order "
+                             "(default: 0)")
     sensor_normalization.add_arguments(parser)
     parser.add_argument("--canvas_size", type=int, default=0,
                         help="As for train_500k.py: side in pixels of the square that every "
