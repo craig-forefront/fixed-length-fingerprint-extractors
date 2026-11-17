@@ -1,9 +1,14 @@
 """
 Compare minutiae extraction outputs from two directories of .mnt files.
 
+Development tool for comparing minutiae extractors. It is NOT part of the
+training route; the route is scripts/extract_minutiae.py (see
+docs/training-guide.md). This script was not run for the documents in
+docs/.
+
 Designed to compare:
   - Original MinutiaeNet (run via scripts/run_original_minutiaenet.py)
-  - Updated FingerFlow extractor (run via scripts/extract_minutiae.py)
+  - The minutiae extractor used for training (run via scripts/extract_minutiae.py)
 
 Both directories must contain .mnt files in FingerFlow-compatible format:
     Line 1: <num_minutiae>
@@ -20,8 +25,11 @@ Matching algorithm per image pair:
 Usage:
     python scripts/compare_minutiae_outputs.py \\
         --original_dir /tmp/original_mnt \\
-        --updated_dir /tmp/fingerflow_mnt \\
+        --updated_dir /tmp/extract_minutiae_mnt \\
         [--dist_thresh 16] [--ori_thresh 0.5236] [--output_csv comparison_results.csv]
+
+Without --output_csv the table is written to comparison_results.csv in the
+current directory.
 """
 
 import argparse

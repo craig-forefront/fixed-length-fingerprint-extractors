@@ -1,17 +1,17 @@
 """
-Batch minutiae extraction script using the minutiae_extractor (FingerFlow).
+Batch minutiae extraction script using the minutiae extractor (the package
+`fingerflow` of the minutiae_extractor repository).
 
 This script extracts minutiae from all fingerprint images and saves them
 as .mnt files for use in DeepPrint training. It is made for prints from
 different sensors and for very large numbers of files.
 
 Prerequisites:
-    The `fingerflow` package of the minutiae_extractor repository, e.g.
-        pip install -e /path/to/minutiae_extractor
-    in a revision whose Extractor has the image_dpi option and accepts None
-    for the ClassifyNet and CoreNet paths (the `fingerflow` release on PyPI
-    has neither). See AIRGAP_INSTALLATION.md. Pillow is needed to read the
-    resolution from the image files. torch is not needed.
+    The `fingerflow` package of the minutiae_extractor repository
+    (https://github.com/craig-forefront/minutiae_extractor, branch main) must
+    be importable, with its own dependencies (TensorFlow), Pillow and tqdm.
+    This is not the `fingerflow` release on PyPI, which does not work here.
+    docs/installation.md describes the environment. torch is not needed.
 
 Usage:
     python scripts/extract_minutiae.py \
@@ -70,8 +70,10 @@ Very large file lists:
     path, tab, reason. The exit status is 1 if the extraction failed for any
     image of this run and 0 otherwise; 2 means that the run did not start
     (other settings than the files in the output directory, or a minutiae
-    extractor that is too old). The script stops with an exception if the
-    extractor can not be set up for another reason (e.g. missing model files).
+    extractor that is too old). The script stops with a Python error message
+    and exit status 1, before any image, if the extractor can not be set up
+    for another reason: the fingerflow package cannot be imported (wrong
+    environment, PYTHONPATH not set) or a model file is missing.
 
     All .mnt files of one output directory must come from the same settings.
     The first run stores them in extraction_settings.json; a run with other
@@ -95,10 +97,10 @@ program wrote a wrong 300 or 600 into it. For a corpus of one known resolution
 use --ppi. At its end the script prints how many files took their resolution
 from where.
 
-The extractor that this script needs is named in AIRGAP_INSTALLATION.md
-(repository minutiae_extractor, branch claude/serene-albattani-s6ehsj until it
-is merged into its main). With an older one the script stops with exit status
-2 and says so.
+The extractor that this script needs is the `main` branch of the
+minutiae_extractor repository, commit 420b6e5 or later; docs/installation.md
+says how to get it and how to check a clone. With an older one the script
+stops with exit status 2 and says so.
 
 Output format (.mnt files):
     Line 1: <num_minutiae>
@@ -108,7 +110,14 @@ Output format (.mnt files):
 
     x is the column and y the row of the 500 ppi image (y pointing down). The
     angle is the direction of the minutia, the direction vector is
-    (cos(angle), sin(angle)) in these axes.
+    (cos(angle), sin(angle)) in these axes. The class index is -1 without
+    --classify_net. direction_confidence rates the direction only; the
+    extractor's score is not written. The full description of the format is
+    in the docstring of flx/preparation/minutiae_extraction.py.
+
+Extractor settings:
+    The extractor is run with its default settings. Its options crop_to_print
+    and reweight_score are off and cannot be set from this script.
 """
 
 import argparse
@@ -165,9 +174,11 @@ def get_output_path(image_path: Path, input_dir: Path, output_dir: Path) -> Path
 def main() -> int:
     """Returns the exit status: 1 if the extraction failed for any image, else 0."""
     parser = argparse.ArgumentParser(
-        description="Extract minutiae from fingerprint images using FingerFlow",
-        epilog="See the docstring at the top of this script and the section "
-               "'Dataset Preparation' of TRAINING_PIPELINE_GUIDE.md.",
+        description="Extract minutiae from fingerprint images with the minutiae "
+                    "extractor (package fingerflow of the minutiae_extractor "
+                    "repository, not the fingerflow release on PyPI)",
+        epilog="See the docstring at the top of this script and Steps 2 and 4 "
+               "of docs/training-guide.md.",
     )
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Directory containing fingerprint images")
