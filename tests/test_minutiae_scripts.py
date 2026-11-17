@@ -195,7 +195,8 @@ def test_extract_minutiae_stops_without_extractor(
     message = capsys.readouterr().err
     assert "unexpected keyword argument 'image_dpi'" in message
     assert "too old" in message
-    assert "claude/serene-albattani-s6ehsj" in message
+    assert "craig-forefront/minutiae_extractor" in message
+    assert "main branch, commit 420b6e5" in message
     # Not tried again for each of the 8 images
     assert attempts == [{"image_dpi": 500}]
     assert not list(output_dir.glob("*.mnt"))
