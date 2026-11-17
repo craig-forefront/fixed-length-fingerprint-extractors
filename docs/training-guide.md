@@ -77,9 +77,12 @@ You need:
 **Do the whole route on a small part of your data first**: a few hundred prints with prints from every kind of
 sensor, through the extraction, the range test, two epochs of training and the embeddings. Mistakes in the
 file layout, the resolutions or the ridge polarity show there, before a long run. Choose the size by the
-minutiae extraction, which is the slow part: on the CPU used here it took 14 to 60 seconds per print
-([measurements.md](measurements.md#minutiae-extraction-time-and-settings)). A few hundred prints are enough
-to find such mistakes; they are not enough to judge the accuracy of the model.
+minutiae extraction, which is the slow part: on the CPU used here it took 19 to 60 seconds per real print
+(14 seconds for small synthetic images;
+[measurements.md](measurements.md#minutiae-extraction-time-and-settings)). At that speed a few hundred prints
+take hours in one process, and a few thousand subjects with 10 prints each take days unless the extraction
+runs in many shards ([A very large number of files](#a-very-large-number-of-files)). A few hundred prints are
+enough to find such mistakes; they are not enough to judge the accuracy of the model.
 
 ---
 
@@ -369,8 +372,10 @@ on latents is measured in the extractor's documentation (section "Direction sens
 
 ### A very large number of files
 
-The extraction is the slow step: 14 to 60 seconds per print on the CPU used here
-([measurements.md](measurements.md#minutiae-extraction-time-and-settings)). No GPU was available, so the
+The extraction is the slow step: 19 to 60 seconds per real print on the CPU used here, 14 seconds for small
+synthetic images of 292x392 pixels
+([measurements.md](measurements.md#minutiae-extraction-time-and-settings)). In one process that is hours for
+a few hundred prints and days for a few thousand subjects with 10 prints each. No GPU was available, so the
 speed on your hardware must be measured: time one shard of a few hundred files before you choose the number of
 shards. Plan the extraction as a job that runs on many machines, is interrupted and is continued.
 
