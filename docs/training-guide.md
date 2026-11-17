@@ -928,6 +928,15 @@ Things to check, in this order: the starting loss and its parts
 ([tuning.md](tuning.md#what-to-watch-in-the-first-thousand-steps)), the resolution sources printed at the
 start, the polarity warnings of the extraction, and whether the training accuracy rises at all.
 
+#### 12. The training on a CPU ends with `Killed` and no error message
+
+The main memory of the machine ran out and the operating system stopped the process; Python prints nothing.
+The memory depends on `--batch_size`: the example of the README (80 training images, no minutiae, on a CPU)
+used up to 11.6 GB with the default of 64 images per step and up to 4.1 GB with `--batch_size 16`. Lower
+`--batch_size` and repeat the range test of Step 5 with the new value. No figure was measured for a variant with minutiae or for a GPU, and the stop
+itself was not provoked with this script (it was seen once with the training notebook, see
+[measurements.md](measurements.md#what-was-run-for-these-documents)).
+
 ---
 
 ## Quick reference
@@ -964,16 +973,6 @@ Where things are:
   Training loop: [flx/models/model_training.py](../flx/models/model_training.py)
 - Model: [flx/models/deep_print_arch.py](../flx/models/deep_print_arch.py)
 - Image preparation (500 ppi, ridge polarity): `flx/preparation/sensor_normalization.py`
-
-#### 12. The training on a CPU ends with `Killed` and no error message
-
-The main memory of the machine ran out and the operating system stopped the process; Python prints nothing.
-The memory depends on `--batch_size`: the
-example of the README (80 training images, no minutiae, on a CPU) used up to 11.6 GB with the default of 64
-images per step and up to 4.1 GB with `--batch_size 16`. Lower `--batch_size` and repeat the range test of
-Step 5 with the new value. No figure was measured for a variant with minutiae or for a GPU, and the stop
-itself was not provoked with this script (it was seen once with the training notebook, see
-[measurements.md](measurements.md#what-was-run-for-these-documents)).
 
 ---
 
