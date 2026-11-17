@@ -119,8 +119,10 @@ cd ../fixed-length-fingerprint-extractors
 
 `uv` is the package tool that the extractor uses; its README says how to get it. Use the clone line above:
 the README of the extractor at commit `420b6e5` still names the upstream repository in its own clone command.
-Expect a large environment (the extractor's documentation gives 6.4 GB, most of it GPU libraries that are
-installed on a machine without a GPU as well) and 1.6 GB of model files. Pillow and tqdm, which
+Expect a large environment and 1.6 GB of model files (the four files below). The size of the environment was
+not measured for this document; 6.4 GB were measured for a rewrite of the extractor's documentation that is
+not yet in its `main`, most of it GPU libraries that are installed on a machine without a GPU as well.
+Pillow and tqdm, which
 `scripts/extract_minutiae.py` needs, are part of that environment (they are in the extractor's `uv.lock`).
 
 Of the four model files in `minutiae_extractor/models`, the extraction needs `CoarseNet.h5` (81 MB) and
