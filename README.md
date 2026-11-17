@@ -59,7 +59,8 @@ extraction, and the installation on a machine without network access (air-gapped
 
 This trains a model without minutiae for one epoch on the 100 synthetic example images of the repository (10
 fingers with 10 images each). It shows that the installation works; the model it writes is useless. On the
-CPU used here it took under two minutes and wrote two model files of 0.5 GB each into `models/example`.
+CPU used here it took under two minutes, used up to 4.1 GB of main memory and wrote two model files of 0.5 GB
+each into `models/example`.
 
 ```bash
 python scripts/train_500k.py \
@@ -68,8 +69,13 @@ python scripts/train_500k.py \
   --assume_ppi 500 \
   --validation_split 0.2 \
   --num_epochs 1 \
+  --batch_size 16 \
   --output_dir models/example
 ```
+
+`--batch_size 16` keeps the memory small. With the default of 64 images per step the same command used up to
+11.6 GB on the CPU; on a machine with less free memory the operating system then stops it with the one word
+`Killed` and no Python error message.
 
 `--assume_ppi 500` is only acceptable here because the images are examples; for your own images you say what
 resolution each file really has. For your own data, follow [docs/training-guide.md](docs/training-guide.md)

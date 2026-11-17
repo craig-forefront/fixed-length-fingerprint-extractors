@@ -383,3 +383,7 @@ one.
 `FineNet.h5`; check the paths given to `--coarse_net` and `--fine_net`.
 
 **`CUDA out of memory` during training.** Lower `--batch_size` of `scripts/train_500k.py` (default 64).
+
+**The training on a CPU ends with the one word `Killed` and no Python error message.** The main memory ran
+out and the operating system stopped the process. Lower `--batch_size`; see entry 12 of the
+[troubleshooting list of the training guide](training-guide.md#troubleshooting) for the measured figures.
