@@ -80,7 +80,8 @@ translation of up to 40 pixels (`POSE_AUGMENTATION` in the script).
 
 The rotation and translation are also applied to the minutiae, so that the minutia map of a training sample
 follows the augmentation of its image (`PoseTransformedMinutiaMapLoader` in
-`flx/data/minutia_map_loader.py`).
+`flx/data/minutia_map_loader.py`). This does not correct a minutia map that does not match its image without
+augmentation.
 
 The following preprocessing steps are applied to the fingerprint images before they are fed into the network:
 
@@ -88,7 +89,8 @@ The following preprocessing steps are applied to the fingerprint images before t
 
 ## Training in the paper
 
-Statements of the original authors, not measured here:
+Statements of the original authors, from their README of 2023, not measured here. This includes the one GPU
+timing in these documents; no GPU was used for any other statement.
 
 - The Adam optimizer was used, and the best learning rate differed between the variants: a higher one could
   be chosen for simpler variants like `DeepPrint_Tex_512` to speed up training, and a lower one was necessary
