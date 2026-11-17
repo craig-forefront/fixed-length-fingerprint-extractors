@@ -1,194 +1,178 @@
-# flx: Fixed-length fingerprint representation extractor
+# flx: fixed-length fingerprint representations with DeepPrint
 
-Refactored code used in the paper "Benchmarking fixed-length Fingerprint Representations across different Embedding Sizes and Sensor Types" (BIOSIG 2023, Rohwedder et al.). A summary of the paper can be found at the end of this README.
+`flx` is a Python package that trains and runs [DeepPrint](https://arxiv.org/abs/1909.09901), a neural network
+that turns one fingerprint image into a list of numbers of fixed length (an *embedding*). Two prints are
+compared by comparing their embeddings.
 
-It contains an implementation of [DeepPrint](https://arxiv.org/abs/1909.09901), a Deep Learning based fixed-length Fingerprint Representation extractor, and various experiments with this architecture.
+The repository holds the package, three scripts that take you from a directory of your own fingerprint
+images to a trained model, and the documents below. It began as the code of a BIOSIG 2023 paper
+([docs/paper.md](docs/paper.md)). For the model variants that use minutiae it works together with a second
+repository, the [minutiae extractor](https://github.com/craig-forefront/minutiae_extractor).
 
-Using the `flx` package
-------------
+## What these documents rest on
 
-### Installation
+Read this before you rely on any number in them.
 
-To install the package, clone the repository and run `pip install -e .` in the root directory of the repository.
+- Everything was run on **one machine with 4 CPU cores and no GPU**.
+- The largest training set was **440 real fingerprint images**. The synthetic SFinGe images in this
+  repository are example data to try the code on, nothing more.
+- **No accuracy, no GPU speed and no behaviour at large scale was measured.** Where a document gives a number,
+  it says what it was measured on; where something was only calculated or read from the code, it says so.
+- [docs/measurements.md](docs/measurements.md) lists every run and what was not run.
 
-The package requires Python 3.11 or higher (`requires-python` in `pyproject.toml`). The dependencies are listed in `pyproject.toml` and in the `requirements.txt` file. Install them with
+## The route, and the two repositories
 
-```pip install -r requirements.txt```
+| Step | What does it | Environment | Described in |
+|------|--------------|-------------|--------------|
+| 1. Lay out the images and say which resolution each file has | you | | [training guide](docs/training-guide.md), Steps 1 and 2 |
+| 2. Bring every image to 500 ppi (pixels per inch) with dark ridges | this repository, inside the scripts (`SensorNormalizer`) | both | Step 2 |
+| 3. Find the minutiae (only for the model variants with minutiae) | this repository's `scripts/extract_minutiae.py`, which calls the package `fingerflow` of the **minutiae extractor** repository and needs its two model files | extraction (TensorFlow) | Step 4 |
+| 4. Find a learning rate, train | `scripts/find_learning_rate.py`, `scripts/train_500k.py` | training (PyTorch) | Steps 5 to 8 |
+| 5. Compute embeddings, compare prints | `load_trained_model` in `scripts/train_500k.py`, `flx.benchmarks` | training (PyTorch) | Steps 9 and 10 |
 
-### Usage
+*Minutiae* are the points where a ridge of the finger ends or splits. "Minutiae extractor" always means the
+repository [craig-forefront/minutiae_extractor](https://github.com/craig-forefront/minutiae_extractor). Its
+Python package is called `fingerflow`; it is **not** the `fingerflow` package on PyPI (the public Python
+package index), which does not work here. You never run a script of that repository yourself; you need its
+documentation only for what its output means.
 
-You can import modules from the `flx` package in your own scripts and use them to train models, generate embeddings and run benchmarks.
+The two *environments* are two separate Python installations, because the minutiae extraction needs
+TensorFlow and everything else needs PyTorch.
 
-To learn how to add your own dataset to the package, see the [dataset tutorial notebook](notebooks/dataset_tutorial.ipynb).
+## Installation
 
-To learn how to train a variant of the DeepPrint model on a small example dataset, see the [training example notebook](notebooks/model_training_tutorial.ipynb).
+In short, for the training environment on a machine with network access:
 
-To learn how to extract embeddings from a dataset using a trained model, see the [embedding generation tutorial notebook](notebooks/embedding_generation_tutorial.ipynb).
-
-The notebooks need `jupyter`, and the embedding notebook also imports `tikzplotlib` (through `flx.visualization`). Both are among the development dependencies ("Development Dependencies" in [docs/installation.md](docs/installation.md)), not among the core ones.
-
-To train on your own images with the scripts of this repository (`scripts/extract_minutiae.py`, `scripts/find_learning_rate.py`, `scripts/train_500k.py`), follow the [training pipeline guide](docs/training-guide.md). It describes the file layout that the training script reads, one complete training command, how a training is continued or started again, and how the trained model is loaded. For large datasets see [docs/large-datasets.md](docs/large-datasets.md) and the section "Above about one million subjects" of the training guide, which states what the code cannot do today.
-
-To learn how to extract the minutiae for the minutia maps of your own dataset with `scripts/extract_minutiae.py` (image format, format of the `.mnt` files), see "Step 3: Prepare Minutiae Data" in the [training pipeline guide](docs/training-guide.md). For prints from different sensors (resolution, ridge polarity, image sizes) and for the extraction of very large datasets (continuing a run, shards, failure log), see "Images from different sensors" there. The extraction and `scripts/train_500k.py` resample every image to 500 pixels per inch and need to know the resolution of each file.
-
-### Pre-trained model
-
-The model for an embedding size of 512 can be found under the link
-[Google Drive](https://drive.google.com/drive/folders/1vV2skXApZMhqWTlF2j_qgXDxRYan5U1f?usp=drive_link)
-
-Project Organization
-------------
-
-    ├── LICENSE
-    ├── README.md          <- The top-level README for developers using this project.
-    ├── requirements.txt   <- The requirements file for reproducing the analysis environment
-    ├── pyproject.toml     <- makes project pip installable (pip install -e .) so you can  `import flx. ...`
-    ├── scripts            <- Minutiae extraction, learning rate range test and training (`train_500k.py`) for your own data
-    ├── figures            <- Figures for the README
-    ├── models             <- Trained and serialized models, training logs
-    ├── notebooks          <- Jupyter notebooks for tutorials and examples
-    ├── tests              <- Some unit tests for the package. Run with `pytest`.
-    │
-    ├── data
-    │   ├── benchmarks     <- Folder for the benchmark specifications (i.e. which comparisons to run)
-    │   ├── poses          <- Folder for poses of a corresponding fingerprint dataset.
-    │   ├── embeddings     <- Output folder for fingerprint embeddings.
-    │   └── fingerprints   <- Folder with fingerprint datasets.
-    │
-    ├── reports            <- Not in the repository: created by the benchmark code (`flx/setup/paths.py`) for the benchmark results of trained models
-    │   ├── ...            <- Output folders for the benchmark results (in .json format) are here.
-    │   └── figures        <- Generated graphics and figures to be used in reporting
-    │
-    └── flx                <- Source code for use in this project.
-        │
-        ├── benchmarks     <- Implementation of biometric performance benchmarks (verification, identification)
-        ├── data           <- Code to manage datasets of fingerprints, poses, embeddings etc.
-        ├── extractor      <- Embedding extraction code using the DeepPrint model
-        ├── models         <- DeepPrint model architectures, loss functions and pytorch code for training
-        ├── image_processing <- Data augmentation and contrast enhancement
-        ├── preparation    <- Images from different sensors (500 ppi, dark ridges) and the minutiae extraction
-        ├── reweighting    <- Code to reweight embedding dimensions after extraction
-        ├── scripts        <- Different scripts for running benchmarks, generating embeddings etc.
-        ├── setup          <- Settings, predefined models and datasets are defined here. This allows to easily benchmark different models and datasets.
-        └── visualization  <- Contains functions for visualization and graphical debugging
-     
---------
-
-### Credit to other authors:
-
-- Remi Cadene; Inception v4 pytorch implementation (see `flx/models/Inceptionv4.py`); https://github.com/Cadene/pretrained-models.pytorch
-
-- Dong Chengdong Hang Zhou; iso-19794-2 fingerprint template encoder and decoder (see `flx/data/iso_encoder_decoder`); https://github.com/DongChengdongHangZhou/iso-19794-2-decoder-encoder
-
-
-Paper: Benchmarking fixed-length Fingerprint Representations across different Embedding Sizes and Sensor Types
-------------
-
-### Abstract
-
-Traditional minutiae-based fingerprint representations consist of a variable-length set of
-minutiae. This necessitates a more complex comparison causing the drawback of high computational cost in one-to-many comparison. Recently, deep neural networks have been proposed to extract fixed-length embeddings from fingerprints. In this paper, we explore to what extent fingerprint
-texture information contained in such embeddings can be reduced in terms of dimension, while preserving high biometric performance. This is of particular interest, since it would allow to reduce
-the number of operations incurred at comparisons. We also study the impact in terms of recognition
-performance of the fingerprint textural information for two sensor types, i.e. optical and capacitive.
-Furthermore, the impact of rotation and translation of fingerprint images on the extraction of fingerprint embeddings is analysed. Experimental results conducted on a publicly available database reveal an optimal embedding size of 512 feature elements for the texture-based embedding part of fixed-length fingerprint representations. In addition, differences in performance between sensor types can be perceived.
-
-
-
-### Deep Print
-
-![Conceptual overview of fixed-length fingerprint representation extraction](figures/conceptual-overview-deepprint.png)
-
-The full DeepPrint model consists of the following components:
- - Localization network: Proposes a rotation and a shift for the fingerprint image, with which the image is resampled before the other components see it (learned alignment). (Not shown in the figure) The rotation is bounded to 60 degrees and the shift to half the image side, the network has its own, smaller learning rate, and the training stops when the aligned images are mostly empty; `scripts/train_500k.py --localization on|off` trains with or without it. See "Learned alignment" in [docs/training-guide.md](docs/training-guide.md#learned-alignment).
- - Inception v4 stem: Processes the fingerprint image and extracts a feature map.
- - Texture-branch: Processes the feature map and extracts a fixed-length fingerprint representation.
- - Minutiae-branch: Processes the feature map and extracts a fixed-length minutiae representation as well as a minutia map. The minutia map is used during training to focus the training on the minutiae regions of the fingerprint. It is not used to create the fixed-length fingerprint representation.
-
-In this project, many smaller variants of the DeepPrint model were examined. In the code, the naming convention is:
-
-`DeepPrint_[Loc][Tex][Minu]_<NDIMS>`
-
-Where `[Loc]` means that the localization network is included, `[Tex]` means that the texture branch is included and `[Minu]` means that the minutiae branch is included. `<NDIMS>` is the dimensionality of the fixed-length fingerprint representation (i.e. the number of neurons in the last linear layer). In `scripts/train_500k.py`, `--embedding_dim` is the size per branch: a variant with texture and minutiae branch gives twice that many values per print (512 with the default of 256).
-
-### Databases
-
-In the code we do not distinguish between different fingers of one subject and different fingers from separate subjects. Instead, we use the term "subject" to refer a distinct fingerprint. The term "impression" refers to a single sample / capture of a fingerprint. This deviates a bit from the terminology used in the paper. In these terms, the databases used in the paper are:
-
-In the paper, a synthetic databases created with the `SFinge` synthetic fingerprint generator were used for training (6000 subjects à 10 impressions) and validation (2000 subjects à 4 impressions).
-
-In addition MCYT330 optical and capacitive sensor databases (3300 subjects à 2 sensors à 12 impressions) were used. The first 2000 subjects were used for training and the remaining 1300 subjects were used for testing.
-
-There is also code to load and benchmark for FVC2004 DB1 and SD4 databases. However, these were not used in the paper.
-
-### Image processing
-
-The input size of DeepPrint is 299x299 pixels. How the resizing and cropping is done depends on the source dataset and can be found in the `flx/data/image_loader.py` file.
-
-During training, data augumentation is applied to the fingerprint images. The following augmentations are applied:
-
- - Random rotation between -15° and 15°
- - Random translation of up to 25 pixels in x and y direction
- - Random gain and contrast adjustment (see `flx/setup/datasets.py` -> `QUALITY_AUGMENTATION`)
-
-These values belong to the predefined datasets of the paper in `flx/setup/datasets.py`. `scripts/train_500k.py`, the script for your own images, uses a rotation between -30° and 30° and a translation of up to 40 pixels (`POSE_AUGMENTATION` in the script).
-
-The rotation and translation are also applied to the minutiae, so that the minutia map of a training sample follows the augmentation of its image (see `PoseTransformedMinutiaMapLoader` in `flx/data/minutia_map_loader.py`). This does not correct a minutia map that does not match its image without augmentation.
-
-The following preprocessing steps are applied to the fingerprint images before they are fed into the network:
-
-![Example of a synthetic fingerprint image generated by SFinGe with the respective preprocessing steps](figures/preprocessing-steps.png)
-
-### Training
-
-For training the model, the Adam optimizer is used, the optimal learning rate differs between the individual variants. For simpler variants like `DeepPrint_Tex_512` a higher
-learning rate can be chosen to speed up training. For more complex variants like `DeepPrint_LocTexMinu_512` a lower learning rate is necessary to avoid overfitting.
-The learning rate, a warm-up, a cosine schedule and gradient clipping are set in `flx/setup/config.py` or passed to `fit` as a `LearningRateConfig`. `scripts/find_learning_rate.py` runs a short
-range test that suggests a learning rate for a dataset, model variant and batch size; see "Choosing the learning rate" in [docs/training-guide.md](docs/training-guide.md#choosing-the-learning-rate).
-The training stops with a message when the loss is not a finite number or more than ten times the loss at the start.
-The loss is a weighted sum of the cross entropy, the center loss and, for variants with minutiae, the minutia map loss. The three weights are set in `flx/setup/config.py`
-or passed as `LossWeights`; see "Loss weights" in [docs/training-guide.md](docs/training-guide.md#loss-weights) for what they mean, what was measured and how they differ from earlier versions.
-The number of epochs is chosen based on the equal error rate on a validation set (subjects that are not in the training set). The training is stopped when this error rate does not decrease anymore,
-and the epoch with the lowest validation error rate is saved as `best_model.pyt`. Without a validation set, the epoch with the lowest training loss is saved instead, which does not detect overfitting.
-
-For the datasets of the paper (60,000 training images), up to 100 epochs were necessary depending on the learning rate and model, at roughly 10-15 minutes per epoch on an A100
-(figures of the original authors, not measured again). `scripts/train_500k.py` defaults to at most 10 epochs with early stopping after 3 epochs without a lower validation error rate; how many
-epochs a large dataset needs was not measured. Most of the preprocessing happens on the CPU: about 1 second per rolled 800x750 print per core was measured here, so the number of CPU cores per GPU matters.
-
-### Experiments
-
-#### Embedding size
-
-Different embedding sizes were compared for the DeepFinger variant with only the texture branch (which has lower computational cost than the full DeepPrint model). The results are shown in the following figure:
-
-![Results for different embedding sizes](figures/embedding-sizes-results.png)
-
-#### Model variants and sensor types
-
-Different model variants are compared for optical and capacitive sensor types. The results are shown in the following figure:
-
-![Results of different variants](figures/different-variants-results.png)
-
-#### Pose alignment
-
-The impact of pose alignment on the performance of the DeepPrint model was estimated by randomly changing the image pose with increasing magnitude of shifting and rotation:
-
-![Results for varying poses](figures/pose-alignment-results.png)
-
-### Citation
-
-If you use this code in your research, please cite the following paper:
-
-```{bibtex}
-@inproceedings{
-    Rohwedder-FixedLengthFingerprintDNN-BIOSIG-2023,
-    author = {T. Rohwedder and D. Osorio-Roig and C. Rathgeb and C. Busch},
-    booktitle = {Intl. Conf. of the Biometrics Special Interest Group ({BIOSIG})},
-    keywords = {Fingerprint recognition, computational workload reduction},
-    month = {September},
-    publisher = {IEEE},
-    title = {Benchmarking fixed-length Fingerprint Representations across different Embedding Sizes and Sensor Types},
-    year = {2023}
-}
+```bash
+git clone https://github.com/craig-forefront/fixed-length-fingerprint-extractors.git
+cd fixed-length-fingerprint-extractors
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -e .
 ```
 
+Python 3.11 or higher is required. [docs/installation.md](docs/installation.md) has the full instructions: the
+CPU-only build of PyTorch, the optional tools for tests and notebooks, the second environment for the minutiae
+extraction, and the installation on a machine without network access (air-gapped).
+
+## Shortest working example
+
+This trains a model without minutiae for one epoch on the 100 synthetic example images of the repository (10
+fingers with 10 images each). It shows that the installation works; the model it writes is useless. On the
+CPU used here it took under two minutes and wrote two model files of 0.5 GB each into `models/example`.
+
+```bash
+python scripts/train_500k.py \
+  --dataset_dir notebooks/example-dataset \
+  --num_subjects 10 --num_impressions 10 \
+  --assume_ppi 500 \
+  --validation_split 0.2 \
+  --num_epochs 1 \
+  --output_dir models/example
+```
+
+`--assume_ppi 500` is only acceptable here because the images are examples; for your own images you say what
+resolution each file really has. For your own data, follow [docs/training-guide.md](docs/training-guide.md)
+from the start.
+
+## Documents: read in this order
+
+| Document | What it is for | When to read |
+|----------|----------------|--------------|
+| [docs/installation.md](docs/installation.md) | The two environments, with network access or air-gapped; how to get and check the minutiae extractor | First |
+| [docs/training-guide.md](docs/training-guide.md) | The route step by step: file layout, resolution of the files, minutiae extraction, learning rate, training, continuing, embeddings, benchmark; troubleshooting; file formats | Second; follow it on a small part of your data |
+| [docs/tuning.md](docs/tuning.md) | Learning rate, loss weights and learned alignment: what each setting is, what to watch, how to decide on your data | Before the first long training |
+| [docs/large-datasets.md](docs/large-datasets.md) | Several GPUs, what limits the speed, storage, and what the code cannot do above about one million fingers | Before you plan more than a few hundred thousand images |
+| [docs/measurements.md](docs/measurements.md) | The evidence: every measured table, what was run, what was not, and what changed against earlier versions of the code | When you want to know what a statement rests on, or have files from an earlier version |
+| [docs/paper.md](docs/paper.md) | The paper this code comes from: architecture, its experiments, pre-trained model, citation | Background |
+| Documentation of the [minutiae extractor](https://github.com/craig-forefront/minutiae_extractor) | What the extractor finds, its options, its measurements (also on latent prints) | When you need to know what is in the minutiae |
+| [notebooks/](notebooks) | Three tutorials on the classes underneath (`Identifier`, `Dataset`, loaders, `fit`, `extract`), on the SFinGe example data | If you write your own loader or training script. They are not the route for your own data |
+| [flx/visualization/det_curve_plotting/readme.md](flx/visualization/det_curve_plotting/readme.md) | Original readme of a bundled third-party plotting module | Only if you use that module |
+
+## Scripts
+
+| Script | Group | What it does |
+|--------|-------|--------------|
+| `scripts/extract_minutiae.py` | **the route** | Writes one minutiae file (`.mnt`) per image; can continue an interrupted run and work in parts on many machines |
+| `scripts/find_learning_rate.py` | **the route** | Short test that suggests a learning rate before a training |
+| `scripts/train_500k.py` | **the route** | Trains a DeepPrint variant; also holds `load_trained_model` for using the model |
+| `scripts/run_original_minutiaenet.py`, `scripts/run_fingerflow_minutiaenet.py`, `scripts/run_minutiae_extractor.py`, `scripts/compare_minutiae_outputs.py`, `scripts/visualize_three_way.py` | comparison of minutiae extractors | Development tools that compare three minutiae extractors. They expect directories that are not part of this repository, are not needed for training and were not run for these documents |
+| `flx/scripts/*.py` | the paper | Training, extraction, benchmarks, tables and plots of the paper's experiments on the paper's datasets ([docs/paper.md](docs/paper.md)). Not run for these documents |
+
+Every script of the route describes its options in the docstring at its top and with `--help`.
+
+## What is not covered
+
+So that you do not search for it:
+
+- **Tenprint decisions.** A "subject" in this code is one finger. The model compares single fingers; how the
+  comparisons of ten fingers are combined into one decision is not part of this repository.
+- **Cutting slap images into single fingers.** The scripts need one finger per image. The package has a
+  `SlapSegmenter` class (`flx/image_processing/slap_segmentation.py`); it is not used by the scripts and was
+  not run or checked for these documents.
+- **Latent prints.** Nothing here was run on latents. The minutiae extractor's documentation has
+  measurements of what the extractor finds on them.
+- **Searching a gallery (identification).** The package has identification benchmarks (`flx/benchmarks`), used
+  by the paper's scripts; the guides cover verification (pairs of prints) only.
+- **Training on more than about one million fingers.** The code has limits there that it cannot work around
+  today; [docs/large-datasets.md](docs/large-datasets.md) states them.
+
+## Repository layout
+
+    ├── README.md            <- This page
+    ├── docs                 <- The documents listed above
+    ├── LICENSE
+    ├── pyproject.toml       <- Makes the package installable (`pip install -e .`); lists the dependencies
+    ├── requirements.txt     <- The same dependencies plus the development tools, for `pip install -r`
+    ├── scripts              <- The three scripts of the route, and five tools that compare minutiae extractors
+    ├── notebooks            <- Tutorials, and `example-dataset` (100 synthetic SFinGe images with minutiae)
+    ├── figures              <- Figures used by the documents
+    ├── tests                <- Tests of the package and the scripts, with their data
+    ├── models               <- Empty; trained models and training logs go here (not under version control)
+    ├── .devcontainer        <- Container definition for Visual Studio Code (not used for these documents)
+    │
+    ├── data
+    │   ├── benchmarks       <- Benchmark definitions of the paper (which comparisons to run)
+    │   ├── fingerprints     <- Created by you: your image datasets
+    │   ├── poses            <- Created by you: the output of the minutiae extraction
+    │   └── embeddings       <- Created by you or the code: computed embeddings
+    │
+    ├── reports              <- Created by the paper's benchmark code (`flx/setup/paths.py`) for its results
+    │
+    └── flx                  <- The package
+        ├── benchmarks       <- Biometric performance benchmarks (verification, identification)
+        ├── data             <- Datasets of fingerprints, minutia maps, embeddings; the loaders
+        ├── extractor        <- Embedding extraction with the DeepPrint model
+        ├── models           <- DeepPrint architectures, loss functions, training loop, learning rate
+        ├── image_processing <- Data augmentation, contrast enhancement, binarisation, slap segmentation
+        ├── preparation      <- Images from different sensors (500 ppi, dark ridges) and the minutiae extraction
+        ├── reweighting      <- Reweighting of embedding dimensions after extraction (paper)
+        ├── scripts          <- Scripts of the paper's experiments
+        ├── setup            <- Settings (`config.py`), predefined models and datasets of the paper
+        └── visualization    <- Plots and graphical debugging
+
+The root directory also holds ten image files and `comparison_results.csv`. They are outputs of the
+extractor comparison tools; no document, test or module uses them.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+358 tests, CPU only. One of them is skipped if the package `scikit-image` is not installed. `pytest` is one
+of the optional tools ([docs/installation.md](docs/installation.md)).
+
+## Credit to other authors
+
+- Remi Cadene: Inception v4 PyTorch implementation (`flx/models/InceptionV4.py`);
+  https://github.com/Cadene/pretrained-models.pytorch
+- Dong Chengdong Hang Zhou: ISO 19794-2 fingerprint template encoder and decoder
+  (`flx/data/iso_encoder_decoder`); https://github.com/DongChengdongHangZhou/iso-19794-2-decoder-encoder
+- Andreas Nautsch: DET curve plotting (`flx/visualization/det_curve_plotting`)
+- T. Rohwedder, D. Osorio-Roig, C. Rathgeb, C. Busch: the original `flx` code and the paper
+  ([docs/paper.md](docs/paper.md) has the citation)
+
+## Licence
+
+See [LICENSE](LICENSE).
