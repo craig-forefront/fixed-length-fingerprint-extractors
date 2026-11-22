@@ -1,7 +1,8 @@
 """
 flx/preparation/sample_table.py where pyarrow is not installed: the module is
 imported, what needs no Parquet file works, and reading or writing a table
-says how to install pyarrow.
+says how to install pyarrow. The loaders of flx/data/sample_table_loader.py
+are imported and used without pyarrow as well (that test needs PyTorch).
 
 No test of this file needs pyarrow and none is skipped without it, because
 the environment without pyarrow is the one these tests are about. Where

@@ -18,6 +18,7 @@ fault would be seen:
       when the sizes are given as numpy numbers;
     - prints at 500, 1000 and 385 ppi, large enough for the real binariser;
     - light ridges that the preparation has to find out from the image;
+    - a print with a single minutia, which is one minutia and not none;
     - .mnt files without minutiae: one of 0 bytes, one with the header 0.
 
 The rows are made here as scripts/build_sample_table.py makes them, from
@@ -32,6 +33,8 @@ import importlib.util
 import os
 import pickle
 import random
+import tracemalloc
+import weakref
 from os.path import abspath, dirname, join
 from typing import NamedTuple, Optional
 
@@ -199,8 +202,9 @@ PRINTS = [
     # 157 pixels at 251.2 ppi are 312 pixels at 500 ppi, and 313 with the
     # resolution rounded to 32 bits
     Print("sensor_b/2_2.png", (157, 201), 251.2, "manifest", False, 5),
-    # Light ridges, which the preparation has to find out from the image
-    Print("3_1.png", (256, 320), 500, "metadata", True, 5),
+    # Light ridges, which the preparation has to find out from the image. Its
+    # .mnt file holds a single minutia: the smallest number that is not none.
+    Print("3_1.png", (256, 320), 500, "metadata", True, 1),
     # A .mnt file of 0 bytes
     Print("3_2.png", (240, 300), 500, "metadata", False, None),
     # A .mnt file with the header 0, as the extraction writes it for an image
@@ -369,6 +373,8 @@ def test_the_files_of_the_comparison_are_those_that_show_the_faults(corpus):
         assert samples.minutiae_known[row]
         assert len(samples.minutiae_of(row)) == (spec.minutiae or 0)
     assert len(table.rows_without_minutiae()) == 0
+    # One print with a single minutia, beside those with several and with none
+    assert sorted(spec.minutiae or 0 for spec in PRINTS) == [0, 0, 1, 5, 5, 5, 5, 6]
 
 
 def test_images_of_a_table_are_the_tensors_of_directory_mode(corpus, train_500k, monkeypatch):
@@ -400,6 +406,51 @@ def test_images_of_a_table_are_the_tensors_of_directory_mode(corpus, train_500k,
     for _ in range(2):
         for identifier in directory.ids:
             assert torch.equal(loader.get(identifier), expected[identifier])
+
+
+def test_the_image_loader_keeps_one_normalizer_per_resolution_and_polarity_up_to_its_limit(
+    corpus, tmp_path, monkeypatch
+):
+    made, alive = [], weakref.WeakSet()
+
+    class Counted(SensorNormalizer):
+        """A SensorNormalizer that is counted when it is made and while it is kept."""
+
+        def __init__(self, **settings):
+            super().__init__(**settings)
+            made.append((settings["ppi"], settings["ridges"]))
+            alive.add(self)
+
+    monkeypatch.setattr(sample_table_loader, "SensorNormalizer", Counted)
+    loader = SampleTableImageLoader(corpus.table)
+    for _ in range(2):
+        for identifier in corpus.table.ids:
+            loader.get(identifier)
+    # One for every pair of resolution and polarity of the table, made once
+    pairs = [(251.2, "dark"), (385.0, "dark"), (500.0, "dark"), (500.0, "light"), (1000.0, "dark")]
+    assert sorted(made) == pairs
+    assert len(alive) == len(pairs)
+
+    # Resolutions that differ by a fraction are two pairs
+    table = small_table(tmp_path)
+    close = dataclasses.replace(table.samples, ppi=np.array([500.0, 500.4, 500.0]))
+    made.clear()
+    loader = SampleTableImageLoader(SampleTable(close, table.image_dir))
+    for identifier in table.identifiers:
+        assert loader.get(identifier).shape == (1, 120, 96)
+    assert made == [(500.0, "dark"), (500.4, "dark")]
+
+    # With a limit of two no more than two are kept at a time, and a pair
+    # that was let go is made again when a file needs it
+    del loader
+    made.clear()
+    monkeypatch.setattr(sample_table_loader, "_MAX_NORMALIZERS", 2)
+    loader = SampleTableImageLoader(corpus.table)
+    for _ in range(2):
+        for identifier in corpus.table.ids:
+            loader.get(identifier)
+            assert len(alive) <= 2
+    assert len(made) > len(pairs) and set(made) == set(pairs)
 
 
 def test_a_table_with_another_polarity_or_resolution_would_show_in_the_images(corpus, train_500k):
@@ -461,7 +512,10 @@ def test_minutiae_of_a_table_are_the_arrays_of_directory_mode(corpus):
             assert frame == directory.get_frame_size(identifier)
             assert frame == resampled_size(*spec.size, spec.ppi)
         else:
-            assert locations.shape == (0, 2) and angles.shape == (0,)
+            assert locations.shape == expected_locations.shape == (0, 2)
+            assert angles.shape == expected_angles.shape == (0,)
+            assert locations.dtype == expected_locations.dtype
+            assert angles.dtype == expected_angles.dtype
         assert [type(side) for side in loader.get_frame_size(identifier)] == [int, int]
 
         expected_map, expected_weight = directory.get(identifier)
@@ -718,12 +772,70 @@ def test_an_identifier_that_is_not_in_the_table_raises_a_key_error_that_names_it
             assert f"subject {subject} with impression {impression}" in message
 
 
+def test_a_loader_is_made_of_a_table_and_not_of_its_rows():
+    """
+    The Samples of a table are not a SampleTable. A loader over them would
+    be made without an error, and a Dataset over it would skip its check of
+    the identifiers, so the mistake is refused where it is made.
+    """
+    table = uneven_table()
+    for loader in (SampleTableImageLoader, SampleTableMinutiaMapLoader):
+        with pytest.raises(TypeError) as error:
+            loader(table.samples)
+        assert str(error.value) == f"A {loader.__name__} is made of a SampleTable, got Samples"
+        assert loader(table).table is table
+
+
+def test_rows_whose_identifiers_compare_as_equal_are_refused_with_both_rows_named():
+    """
+    An Identifier is compared by the hash of its two numbers, and two pairs
+    of numbers can have the same hash. A table with two such rows passes the
+    rules of a table (the numbers differ), but no set of identifiers can
+    hold both. The refusal names the rows and says what to do.
+    """
+    first, second = (391292100, 1755844984), (1473744498, 0)
+    if hash(first) != hash(second):
+        pytest.skip("These two pairs of numbers have different hashes with this Python")
+    assert Identifier(*first) == Identifier(*second)  # control
+    rows = [
+        dataclasses.replace(
+            sample_row(1, 0), subject=subject, impression=impression, image_path=name
+        )
+        for (subject, impression), name in ((first, "a.png"), (second, "b.png"))
+    ]
+    table = SampleTable(samples_from_rows(rows + [sample_row(7, 0)]), "images")
+    # The rows themselves are found by their numbers
+    assert [(i.subject, i.impression) for i in table.identifiers] == [(7, 0), first, second]
+    assert [table.row(identifier) for identifier in table.identifiers] == [0, 1, 2]
+    for ids_of in (
+        lambda: table.ids,
+        lambda: SampleTableImageLoader(table).ids,
+        lambda: SampleTableMinutiaMapLoader(table).ids,
+    ):
+        with pytest.raises(SampleTableError) as error:
+            ids_of()
+        message = str(error.value)
+        assert message.startswith(
+            "1 pair(s) of rows of the sample table cannot be told apart by their numbers: "
+            "'a.png' (subject 391292100, impression 1755844984) and "
+            "'b.png' (subject 1473744498, impression 0). "
+        )
+        assert "these pairs of numbers have the same hash" in message
+        assert "another subject or impression" in message and BUILDER in message
+    # Without the two rows the same table has its identifiers
+    assert len(SampleTable(samples_from_rows(rows[:1] + [sample_row(7, 0)]), "images").ids) == 2
+
+
 def test_the_subjects_of_a_table_and_where_their_rows_are():
     table = uneven_table()
     assert table.subjects.dtype == np.int32 and table.subjects.tolist() == [0, 3, 5, 8, 17]
     assert table.subject_offsets.dtype == np.int64
     assert table.subject_offsets.tolist() == [0, 3, 4, 6, 8, 9]
+    assert table.impressions_per_subject.dtype == np.int64
     assert table.impressions_per_subject.tolist() == [3, 1, 2, 2, 1]
+    # Each of the three is made once: asking again does not go through the rows again
+    for name in ("subjects", "subject_offsets", "impressions_per_subject"):
+        assert getattr(table, name) is getattr(table, name), name
     # The rows of each subject follow from the offsets
     for subject, first, end in zip(
         table.subjects, table.subject_offsets[:-1], table.subject_offsets[1:]
@@ -736,6 +848,9 @@ def test_the_subjects_of_a_table_and_where_their_rows_are():
     assert table.rows_of(np.array([3, 5], dtype=np.int32)).tolist() == [3, 4, 5]
     assert table.rows_of(iter([5])).dtype == np.int64
     assert table.rows_of([]).tolist() == [] and table.identifiers_of([]) == []
+    # A subject that is given twice gives its rows twice
+    assert table.rows_of([5, 0, 5]).tolist() == [4, 5, 0, 1, 2, 4, 5]
+    assert table.identifiers_of([3, 3]) == [table.identifiers[3]] * 2
     wanted = table.identifiers_of([8, 0, 17])
     assert [(i.subject, i.impression) for i in wanted] == [
         UNEVEN_IN_ORDER[row] for row in (6, 7, 0, 1, 2, 8)
@@ -757,6 +872,88 @@ def test_the_subjects_of_a_table_and_where_their_rows_are():
         )
         with pytest.raises(TypeError, match="whole numbers"):
             use([8.0])
+        with pytest.raises(TypeError, match=r"one dimension, got an array of .* \(1, 2\)"):
+            use(np.array([[8, 0]]))
+
+
+def test_subjects_are_found_in_whatever_type_of_whole_numbers_names_them():
+    table = uneven_table()
+    rows = [6, 7, 0, 1, 2, 8]
+    given = [[8, 0, 17], (8, 0, 17), iter([8, 0, 17])]
+    given += [
+        np.array([8, 0, 17], dtype=dtype)
+        for dtype in ("int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64")
+    ]
+    for subjects in given:
+        assert table.rows_of(subjects).tolist() == rows
+    for subjects in given[:2] + given[3:]:  # the iterator is used up
+        assert table.identifiers_of(subjects) == [table.identifiers[row] for row in rows]
+
+    # A number that 32 bits cannot hold is not in the table, also where its
+    # lower 32 bits are those of the subject 5
+    assert table.rows_of([5]).tolist() == [4, 5]
+    for number in (2**32 + 5, 5 - 2**32, 2**63 - 2**32 + 5, 2**31, -1):
+        for use in (table.rows_of, table.identifiers_of):
+            with pytest.raises(KeyError) as error:
+                use([8, number, 0])
+            assert error.value.args[0] == (
+                f"The sample table has no row of the subject(s) {number}; it holds 5 subjects"
+            )
+    # ... and it is named with the numbers that fit but are no subjects
+    unsigned = np.array([4, 2**32 + 5, 5, 6, 2**64 - 2**32 + 5], dtype=np.uint64)
+    with pytest.raises(KeyError) as error:
+        table.rows_of(unsigned)
+    assert error.value.args[0] == (
+        "The sample table has no row of the subject(s) 4, 4294967301, 6, 18446744069414584325; "
+        "it holds 5 subjects"
+    )
+
+
+def test_a_call_for_one_subject_does_not_copy_the_subjects_of_the_table():
+    """
+    A split or the validation pairs can ask for the rows of one subject after
+    the other, so one call must not cost a pass over all subjects, in
+    whatever type the number is given. numpy searches a sorted array for
+    numbers of a wider type in a copy of the whole array, and such a copy
+    shows in the memory that a call takes.
+    """
+    count = 5_000
+    rows = [sample_row(subject, 0, "unknown") for subject in range(count)]
+    table = SampleTable(samples_from_rows(rows), "images")
+    table.identifiers  # made at the first access, which is not what is measured
+    assert table.rows_of([count - 1]).tolist() == [count - 1]
+
+    def memory_taken(call) -> int:
+        """The most bytes that are allocated at a time while the call runs, above those before."""
+        # Tracing can be on already (python -X tracemalloc): it is left on then
+        tracing = tracemalloc.is_tracing()
+        if not tracing:
+            tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            before = tracemalloc.get_traced_memory()[0]
+            call()
+            return tracemalloc.get_traced_memory()[1] - before
+        finally:
+            if not tracing:
+                tracemalloc.stop()
+
+    # The subjects of the table take 4 bytes each
+    assert table.subjects.nbytes == 4 * count
+    for subject in (
+        [count - 2],
+        (count - 2,),
+        np.array([count - 2], dtype=np.int64),
+        np.array([count - 2], dtype=np.uint32),
+        np.array([count - 2], dtype=np.int32),
+    ):
+        for use in (table.rows_of, table.identifiers_of):
+            taken = memory_taken(lambda: use(subject))
+            assert taken < table.subjects.nbytes, (use.__name__, subject, taken)
+    # Neither does asking for the impressions per subject, which are kept
+    assert memory_taken(lambda: table.impressions_per_subject) < table.subjects.nbytes
+    # Control: a copy of the subjects in 64 bits would show
+    assert memory_taken(lambda: table.subjects.astype(np.int64)) >= 8 * count
 
 
 def test_a_table_says_which_rows_have_no_known_minutiae():
@@ -965,6 +1162,26 @@ def test_a_file_of_another_size_in_bytes_is_refused_before_it_is_loaded(tmp_path
     assert loaded == [table.image_file(0), table.image_file(2)]
 
 
+def test_a_file_that_lost_bytes_is_refused_before_it_is_loaded(tmp_path, monkeypatch):
+    """A copy that was cut off: fewer bytes than the row holds, here one byte less."""
+    table = small_table(tmp_path)
+    loader = SampleTableImageLoader(table)
+    path = table.image_file(0)
+    size = os.path.getsize(path)
+    with open(path, "rb+") as file:
+        file.truncate(size - 1)
+    loaded = []
+    load = SensorNormalizer.load
+    monkeypatch.setattr(
+        SensorNormalizer, "load", lambda self, path: loaded.append(path) or load(self, path)
+    )
+    message = refusal(loader, table.identifiers[0])
+    assert loaded == []
+    assert message.startswith(f"{path} is not the file that its row of the sample table describes")
+    assert f"the table holds {size:,} bytes as the size of the file" in message
+    assert f"the file has {size - 1:,} bytes" in message
+
+
 def test_a_file_of_other_pixels_is_refused_also_with_the_same_number_of_bytes(tmp_path):
     table = small_table(tmp_path)
     loader = SampleTableImageLoader(table)
@@ -989,6 +1206,37 @@ def test_a_file_of_other_pixels_is_refused_also_with_the_same_number_of_bytes(tm
     # Control: the file is an image, of the size the message says
     image, info = SensorNormalizer().load(path)
     assert (info.source_width, info.source_height) == (120, 96)
+
+
+@pytest.mark.parametrize(
+    "side, held",
+    [
+        ("source_width", "97x120"),
+        ("source_height", "96x121"),
+        ("width", "97x120"),
+        ("height", "96x121"),
+    ],
+)
+def test_a_row_that_differs_from_its_file_in_one_side_only_is_refused(tmp_path, side, held):
+    """
+    Each of the four sizes of a row is compared with the file, not one of a
+    pair: the file of the test above differs from its row in width and in
+    height.
+    """
+    table = small_table(tmp_path)
+    samples = table.samples
+    longer = dataclasses.replace(samples, **{side: getattr(samples, side) + 1})
+    # Such rows are no table (the prepared size follows from the other
+    # three), so they are taken without the check
+    loader = SampleTableImageLoader(SampleTable(longer, table.image_dir, validate=False))
+    message = refusal(loader, table.identifiers[0])
+    what = "its size in pixels (width x height)"
+    if side in ("width", "height"):
+        what = "the size in pixels (width x height) of the image prepared at 500 ppi"
+    assert f"the table holds {held} as {what}, the file has 96x120." in message, message
+    assert f"build the table again from the files as they are now ({BUILDER})" in message
+    # Control: the files are served under the rows as they were made
+    assert SampleTableImageLoader(table).get(table.identifiers[0]).shape == (1, 120, 96)
 
 
 def test_images_are_prepared_at_the_target_resolution_of_the_table(tmp_path, train_500k):
@@ -1085,10 +1333,11 @@ def test_the_table_is_not_changed_by_what_the_loaders_hand_out(corpus):
     assert samples_checksum(samples) == before == table.checksum
 
     # What is memory of the table cannot be written to: its arrays, the
-    # minutiae of a row, the subjects and their offsets
+    # minutiae of a row, the subjects, their offsets and their numbers of rows
     row = corpus.row(PRINTS[0])
     of_the_table = [getattr(samples, name) for name in ARRAYS]
     of_the_table += [samples.minutiae_of(row), table.subjects, table.subject_offsets]
+    of_the_table.append(table.impressions_per_subject)
     assert len(samples.minutiae_of(row)) == PRINTS[0].minutiae
     for array in of_the_table:
         assert array.size > 0
@@ -1116,10 +1365,12 @@ def test_copies_of_the_loaders_serve_the_same_samples(corpus):
     for array in [getattr(table_copy.samples, name) for name in ARRAYS] + [
         table_copy.subjects,
         table_copy.subject_offsets,
+        table_copy.impressions_per_subject,
     ]:
         assert not array.flags.writeable and not np.shares_memory(array, table.samples.minutiae)
     assert table_copy.subjects.tolist() == table.subjects.tolist()
     assert table_copy.subject_offsets.tolist() == table.subject_offsets.tolist()
+    assert table_copy.impressions_per_subject.tolist() == table.impressions_per_subject.tolist()
 
     # The same lookups and the same tensors, for the identifiers of the original
     for identifier in table.ids:
@@ -1167,8 +1418,8 @@ def test_the_loaders_serve_the_worker_processes_of_a_training(corpus, train_500k
     """
     Images, minutia maps and labels as the training zips them, fetched by
     forked worker processes of a torch DataLoader: every sample is the one
-    that the loaders give in this process. Without augmentation and without
-    the binariser, so that a sample does not depend on the process that made it.
+    that the loaders give in this process. Without augmentation, which is
+    random, and without the binariser, which this comparison does not need.
     """
     monkeypatch.setattr(train_500k, "LazilyAllocatedBinarizer", lambda _: identity)
     table = corpus.table

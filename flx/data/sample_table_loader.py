@@ -137,6 +137,7 @@ class SampleTable:
         self._ids = None
         self._subjects = None
         self._subject_offsets = None
+        self._impressions_per_subject = None
         self._checksum = None
 
     def __getstate__(self) -> dict:
@@ -202,9 +203,11 @@ class SampleTable:
             first_rows = np.concatenate(([0], first_rows))
         offsets = np.append(first_rows, len(subject)).astype(np.int64)
         subjects = subject[first_rows]
-        for array in (subjects, offsets):
+        impressions = np.diff(offsets)
+        for array in (subjects, offsets, impressions):
             array.flags.writeable = False
         self._subjects, self._subject_offsets = subjects, offsets
+        self._impressions_per_subject = impressions
 
     @property
     def subjects(self) -> np.ndarray:
@@ -226,8 +229,10 @@ class SampleTable:
 
     @property
     def impressions_per_subject(self) -> np.ndarray:
-        """The number of rows of every subject, in the order of `subjects` (int64)."""
-        return np.diff(self.subject_offsets)
+        """The number of rows of every subject, in the order of `subjects` (int64, read-only)."""
+        if self._impressions_per_subject is None:
+            self._group_by_subject()
+        return self._impressions_per_subject
 
     def _positions(self, subjects: Union[Iterable[int], np.ndarray]) -> np.ndarray:
         """Where the given subjects are in self.subjects. KeyError for those the table lacks."""
@@ -244,10 +249,18 @@ class SampleTable:
             found = np.zeros(len(wanted), dtype=np.bool_)
             positions = np.zeros(len(wanted), dtype=np.int64)
         else:
+            # The numbers are searched for in the type of the subjects. For
+            # numbers of a wider type, as a list of Python numbers gives
+            # them, numpy copies all subjects of the table into that type at
+            # every call, so that a call per subject would cost a pass over
+            # the table each. A number that 32 bits cannot hold becomes
+            # another number by this, and is told by that: it is not in the
+            # table.
+            searched = wanted.astype(known.dtype, copy=False)
             # A number above all subjects of the table is searched for
             # behind the last one: it is compared with the last one instead
-            positions = np.minimum(np.searchsorted(known, wanted), len(known) - 1)
-            found = known[positions] == wanted
+            positions = np.minimum(np.searchsorted(known, searched), len(known) - 1)
+            found = (known[positions] == searched) & (searched == wanted)
         if not found.all():
             missing = wanted[~found]
             named = ", ".join(str(number) for number in missing[:_MAX_NAMED].tolist())
@@ -318,8 +331,33 @@ class SampleTable:
         It is what the loaders of the table return as their `ids`.
         """
         if self._ids is None:
-            self._ids = IdentifierSet(self.identifiers)
+            try:
+                self._ids = IdentifierSet(self.identifiers)
+            except RuntimeError as error:
+                # IdentifierSet refuses identifiers that are equal. The rows
+                # of a table have different numbers, but an Identifier is
+                # compared by the hash of its two numbers, and two pairs of
+                # numbers can have the same hash.
+                raise SampleTableError(self._equal_identifiers()) from error
         return self._ids
+
+    def _equal_identifiers(self) -> str:
+        """The refusal for a table with rows whose identifiers compare as equal."""
+        first_with, pairs = {}, []
+        for row, identifier in enumerate(self.identifiers):
+            first = first_with.setdefault(hash(identifier), row)
+            if first != row:
+                pairs.append(f"{self.describe_row(first)} and {self.describe_row(row)}")
+        named = "; ".join(pairs[:_MAX_NAMED])
+        if len(pairs) > _MAX_NAMED:
+            named += f"; and {len(pairs) - _MAX_NAMED:,} more"
+        return (
+            f"{len(pairs):,} pair(s) of rows of the sample table cannot be told apart by "
+            f"their numbers: {named}. The numbers of the two rows differ, but an image is "
+            "found by the hash of its subject and impression, and these pairs of numbers have "
+            "the same hash. That takes very large numbers. Give one row of each pair another "
+            f"subject or impression and build the table again ({_BUILDER})."
+        )
 
     def identifiers_of(self, subjects: Union[Iterable[int], np.ndarray]) -> list[Identifier]:
         """
@@ -363,6 +401,20 @@ class SampleTable:
         )
 
 
+def _table_of_a_loader(table, loader) -> "SampleTable":
+    """
+    The table a loader is given. The Samples of a table are not one: a loader
+    over them would be made without an error, and a Dataset over it would
+    skip its check of the identifiers, because it takes the error of `ids`
+    for a loader without identifiers.
+    """
+    if not isinstance(table, SampleTable):
+        raise TypeError(
+            f"A {type(loader).__name__} is made of a SampleTable, got {type(table).__name__}"
+        )
+    return table
+
+
 class SampleTableImageLoader(DataLoader):
     """
     Loads the image of a row as CustomFingerprintLoader of
@@ -387,7 +439,7 @@ class SampleTableImageLoader(DataLoader):
     """
 
     def __init__(self, table: SampleTable):
-        self._table = table
+        self._table = _table_of_a_loader(table, self)
         # SensorNormalizer by (ppi, light ridges)
         self._normalizers: dict[tuple[float, bool], SensorNormalizer] = {}
 
@@ -506,7 +558,7 @@ class SampleTableMinutiaMapLoader(MinutiaMapLoader):
     """
 
     def __init__(self, table: SampleTable):
-        self._table = table
+        self._table = _table_of_a_loader(table, self)
 
     @property
     def table(self) -> SampleTable:
