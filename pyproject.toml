@@ -39,6 +39,7 @@ dev = [
     "seaborn",
     "tikzplotlib",
 ]
+table = ["pyarrow>=17.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]

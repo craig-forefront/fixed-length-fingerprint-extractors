@@ -19,3 +19,6 @@ jupyter
 pytest
 seaborn
 tikzplotlib
+
+# Sample table (the extra "table" in pyproject.toml)
+pyarrow>=17.0
