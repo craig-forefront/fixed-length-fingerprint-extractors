@@ -10,6 +10,7 @@ read_mnt_file give for the same files.
 """
 
 import dataclasses
+import errno
 import importlib.util
 import json
 import multiprocessing
@@ -505,6 +506,32 @@ def test_the_minutiae_can_lie_next_to_the_images(builder, monkeypatch, tmp_path)
     assert snapshot(tmp_path / "images") == before
 
 
+def test_an_image_is_a_row_under_its_own_name_also_where_it_is_a_link(
+    builder, monkeypatch, tmp_path
+):
+    """
+    The path of a row is the name of the file as it is, also where its ending
+    is written in capitals. For a symbolic link the row holds the size of the
+    file that the link leads to, which is what a reader of the table loads.
+    """
+    images = tmp_path / "images"
+    save(images / "1_1.PNG")
+    extracted(tmp_path, "1_1.PNG")
+    scan = save(tmp_path / "scans" / "00002239.png", ridge_image(200, 144))
+    os.symlink(scan, images / "1_2.png")
+    extracted(tmp_path, "1_2.png", minutiae=MINUTIAE[:2])
+    assert build(builder, monkeypatch, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 0
+    samples = read_samples(tmp_path / "table")
+    assert paths(samples) == ["1_1.PNG", "1_2.png"]
+    # The .mnt file of 1_1.PNG is 1_1.mnt, as the extraction names it
+    assert np.diff(samples.minutiae_offsets).tolist() == [3, 2]
+    sizes = [os.path.getsize(images / "1_1.PNG"), os.path.getsize(scan)]
+    assert samples.file_size.tolist() == sizes
+    assert row_of(samples, 0, 1)["source_size"] == (144, 200)
+    # Control: the link itself has another size, that of the path it holds
+    assert os.lstat(images / "1_2.png").st_size == len(scan) != os.path.getsize(scan)
+
+
 # ---------------------------------------------------------------------------
 # A sample list
 # ---------------------------------------------------------------------------
@@ -563,14 +590,56 @@ def test_a_sample_list_says_which_finger_each_file_shows(builder, monkeypatch, t
     assert "Impressions per subject: smallest 1, median 1, largest 3" in lines
 
 
-def test_a_sample_list_can_begin_with_a_byte_order_mark_and_pad_its_cells(
+def test_a_sample_list_can_begin_with_a_byte_order_mark_and_pad_its_numbers(
     builder, monkeypatch, tmp_path
 ):
     write_listed(tmp_path)
-    text = "\N{BYTE ORDER MARK}path , subject, impression \r\n w.bmp , 3 , 004 \r\n\r\n"
+    # White space around the names of the columns and around the numbers, and
+    # a number with more zeros in front than the largest number has digits
+    text = "\N{BYTE ORDER MARK}path , subject, impression \r\nw.bmp, 3 , 0000000000004 \r\n\r\n"
     assert build(builder, monkeypatch, tmp_path, *with_list(tmp_path, text)) == 0
     samples = read_samples(tmp_path / "table")
     assert (paths(samples), numbers(samples)) == (["w.bmp"], [(3, 4)])
+
+
+def test_a_path_of_a_sample_list_is_taken_as_it_is_written(builder, monkeypatch, tmp_path):
+    """
+    White space at the ends of a path belongs to the name of the file, and a
+    listed file needs no ending. A list that names " x.png" must not get a
+    row of x.png, with the numbers of the other file.
+    """
+    images = tmp_path / "images"
+    sizes = {
+        " x.png": (144, 200),
+        "x.png": (128, 160),  # the twin of the first without the white space
+        "y.png ": (136, 176),
+        "a/z.png\n": (152, 184),
+        "scans/0007": (120, 168),
+    }
+    for name, (width, height) in sizes.items():
+        # Written under a name that tells the image library the format
+        written = save(images / "written.png", ridge_image(height, width))
+        os.makedirs(dirname(str(images / name)), exist_ok=True)
+        os.rename(written, images / name)
+    rows = '" x.png",5,0\n"y.png ",6,0\n"a/z.png\n",7,0\nscans/0007,8,0\n'
+    # ... and a file that is not there is not found under a name that is like it
+    rows += "x.png ,9,0\n"
+    assert build(builder, monkeypatch, tmp_path, *with_list(tmp_path, HEADER + rows)) == 1
+
+    samples = read_samples(tmp_path / "table")
+    assert dict(zip(numbers(samples), paths(samples))) == {
+        (5, 0): " x.png",
+        (6, 0): "y.png ",
+        (7, 0): "a/z.png\n",
+        (8, 0): "scans/0007",
+    }
+    for subject, name in ((5, " x.png"), (6, "y.png "), (7, "a/z.png\n"), (8, "scans/0007")):
+        row = row_of(samples, subject, 0)
+        assert row["source_size"] == sizes[name], name
+        assert row["file_size"] == os.path.getsize(images / name)
+    failures = log(tmp_path / "table", FAILURES_LOG)
+    assert list(failures) == ["x.png "]
+    assert failures["x.png "].startswith("no row: FileNotFoundError")
 
 
 @pytest.mark.parametrize(
@@ -588,6 +657,8 @@ def test_a_sample_list_can_begin_with_a_byte_order_mark_and_pad_its_cells(
         (HEADER + "w.bmp,2147483648,1\n", ["line 2: the subject 2147483648 is above 2147483647"]),
         (HEADER + "w.bmp,1," + "9" * 5000 + "\n", ["line 2: the impression 9999", "is above 2147"]),
         (HEADER + "\n,1,2\n", ["line 3: the path is empty"]),
+        # A path of white space is not empty, it is a name: this line lacks a number
+        (HEADER + '"  ",1\n', ["line 2: it names no impression"]),
         (HEADER + "./,1,2\n", ["line 2: the path './' names no file"]),
         (HEADER + "../w.bmp,1,2\n", ["line 2: the path '../w.bmp' leaves the image directory"]),
         (HEADER + "x/../../w.bmp,1,2\n", ["line 2: the path 'x/../../w.bmp' leaves the image"]),
@@ -876,6 +947,74 @@ def test_a_worker_that_dies_costs_the_file_it_was_loading_and_no_other(
     assert multiprocessing.active_children() == children
 
 
+def test_a_worker_that_dies_while_it_has_no_file_is_replaced_and_costs_no_file(
+    builder, monkeypatch, tmp_path
+):
+    """
+    A worker has no file while files are left when one file takes long: with
+    two workers no file is handed out that is 32 or more files behind the
+    one that is waited for. Here the first file takes as long as the other
+    worker needs for the 31 files after it, that worker is killed when it
+    has returned the last of them, and the files behind are held back until
+    then, so that one of them is handed to the worker that is dead.
+    """
+    window, count = 32, 36
+    for subject in range(1, count + 1):
+        save(tmp_path / "images" / f"{subject}_1.png")
+    slow, loaded, killed = tmp_path / "slow", tmp_path / "loaded", tmp_path / "killed"
+    record = tmp_path / "record"
+    load_sample = builder.load_sample
+
+    def staged(source, subject, impression, image_path):
+        with open(record, "a") as file:
+            file.write(f"{subject} {os.getpid()}\n")
+        if subject == 0:
+            slow.write_text(str(os.getpid()))
+            wait_until(loaded.exists)
+        if subject >= window:
+            wait_until(killed.exists)
+        result = load_sample(source, subject, impression, image_path)
+        if subject == window - 1:
+            loaded.touch()
+        return result
+
+    write_part = builder.write_part
+    children = multiprocessing.active_children()
+
+    def killing(directory, index, *arguments):
+        # With one file per part, the part of file 31 is written when the
+        # files 0 to 31 are done: the worker that loaded 1 to 31 has returned
+        # them all, and has been handed no other file since
+        if index == window - 1:
+            (idle,) = [
+                process
+                for process in multiprocessing.active_children()
+                if process not in children and process.pid != int(slow.read_text())
+            ]
+            idle.kill()
+            idle.join()
+            killed.write_text(str(idle.pid))
+        return write_part(directory, index, *arguments)
+
+    # The workers are forked from this process, so they have the function that is put in here
+    monkeypatch.setattr(builder, "load_sample", staged)
+    monkeypatch.setattr(builder, "write_part", killing)
+    monkeypatch.setattr(builder, "FILES_PER_PART", 1)
+    assert build(builder, monkeypatch, tmp_path, "--workers", 2) == 0
+
+    samples = read_samples(tmp_path / "table")
+    assert numbers(samples) == [(subject, 0) for subject in range(count)]
+    assert samples.build["failed"] == 0 and not (tmp_path / "table" / FAILURES_LOG).exists()
+    loads = [line.split() for line in record.read_text().splitlines()]
+    # Every file was loaded once, also the one that was handed to the dead worker
+    assert sorted(int(subject) for subject, _ in loads) == list(range(count))
+    # ... by the two workers of the start and by the one that took the place
+    # of the dead one, which had loaded the 31 files
+    workers = [pid for _, pid in loads]
+    assert len(set(workers)) == 3 and workers.count(killed.read_text()) == window - 1
+    assert multiprocessing.active_children() == children
+
+
 # ---------------------------------------------------------------------------
 # The .mnt file of an image
 # ---------------------------------------------------------------------------
@@ -902,7 +1041,10 @@ def info_of(tmp_path, name: str = "1_2.png"):
         ("swapped size", ["states an image of 200x144 pixels, and the prepared image has 144x"]),
         ("size 0", ["states an image of 0x0 pixels"]),
         ("other polarity", ["names light ridges, and this build took the image to have dark"]),
+        ("other polarity, then empty lines", ["names light ridges, and this build took the"]),
         ("other source", ["names a source image of 288x400 pixels, and the image file has 144x"]),
+        ("other source width", ["names a source image of 288x200 pixels, and the image file"]),
+        ("other source height", ["names a source image of 144x400 pixels, and the image file"]),
         ("no .mnt file", ["the .mnt file cannot be read (ValueError"]),
         ("no text", ["the .mnt file cannot be read (UnicodeDecodeError"]),
         ("a directory", ["the .mnt file cannot be read (IsADirectoryError"]),
@@ -929,7 +1071,12 @@ def test_a_mnt_file_that_is_refused_leaves_its_image_in_the_table_without_minuti
         "swapped size": good.replace("144 200\n", "200 144\n"),
         "size 0": "0\n0 0\n",
         "other polarity": good.replace("ridges dark (argument)", "ridges light (argument)"),
+        # The comment of the extraction is the last line that is not empty
+        "other polarity, then empty lines": good.replace("ridges dark (", "ridges light (")
+        + "\n   \n\n",
         "other source": good.replace("source 144x200", "source 288x400"),
+        "other source width": good.replace("source 144x200", "source 288x200"),
+        "other source height": good.replace("source 144x200", "source 144x400"),
         "no .mnt file": "These are no minutiae.\nNot at all.\n",
         "three numbers": good.replace("144 200\n", "144 200 3\n"),
         # The comment line is then read as the fourth minutia
@@ -1001,6 +1148,19 @@ def test_a_mnt_file_without_minutiae_gives_an_empty_list(builder, monkeypatch, t
     assert f"{note} They are named in {tmp_path / 'table' / WARNINGS_LOG}." in lines
 
 
+def test_two_warnings_about_one_file_are_one_line_of_the_warnings_log(
+    builder, monkeypatch, tmp_path
+):
+    # An image that looks inverted, with a .mnt file that holds no header
+    save(tmp_path / "images" / "1_1.png", 255 - ridge_image())
+    write_mnt(tmp_path / "minutiae" / "1_1.mnt", "")
+    assert build(builder, monkeypatch, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 0
+    warnings = log(tmp_path / "table", WARNINGS_LOG)
+    assert list(warnings) == ["1_1.png"]
+    assert "looks like light ridges" in warnings["1_1.png"]
+    assert "the .mnt file holds no header (0 line(s))" in warnings["1_1.png"]
+
+
 def test_without_a_minutiae_directory_every_row_has_null_minutiae(
     builder, monkeypatch, tmp_path, capsys
 ):
@@ -1049,6 +1209,45 @@ def test_fewer_minutiae_than_a_mnt_file_announces_are_stored_and_named(
     warnings = log(tmp_path / "table", WARNINGS_LOG)
     assert "announces 5 minutiae, and 3 could be read" in warnings["1_2.png"]
     assert "announces 2 minutiae, and 0 could be read" in warnings["1_3.png"]
+
+
+def test_a_reason_that_quotes_a_file_is_cut_in_the_log_and_on_the_terminal(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """One file must not fill the log: here its .mnt file holds a value of 100,000 characters."""
+    write_pair(tmp_path)
+
+    def reason(value: str) -> str:
+        """Why a .mnt file with this text in the place of a number is refused."""
+        cause = f"ValueError: could not convert string to float: '{value}'"
+        return f"null minutiae: the .mnt file cannot be read ({cause})"
+
+    # Values with which the reason has 100,000 characters and more, exactly
+    # 1,000 characters, and one more than that
+    values = {"1_2.png": "9" * 100_000 + "x"}
+    for name, length in (("1_3.png", 1000), ("1_4.png", 1001)):
+        save(tmp_path / "images" / name, ridge_image(200, 144))
+        values[name] = "9" * (length - len(reason("x"))) + "x"
+        assert len(reason(values[name])) == length
+    for name, value in values.items():
+        text = mnt_text(info_of(tmp_path)).replace("10.5000", value)
+        write_mnt(tmp_path / "minutiae" / name.replace(".png", ".mnt"), text)
+    assert build(builder, monkeypatch, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 1
+
+    failures = log(tmp_path / "table", FAILURES_LOG)
+    # A reason of 1,000 characters is whole. Of a longer one the log holds
+    # the first 1,000 characters, and how many more there are.
+    assert failures["1_3.png"] == reason(values["1_3.png"])
+    assert failures["1_4.png"] == reason(values["1_4.png"])[:1000] + "... (1 more characters)"
+    whole = reason(values["1_2.png"])
+    assert len(whole) == 100_096
+    assert failures["1_2.png"] == whole[:1000] + "... (99,096 more characters)"
+    assert os.path.getsize(tmp_path / "table" / FAILURES_LOG) < 3300
+    lines = printed(capsys)
+    for name in values:
+        assert f"{name}: {failures[name]}" in lines
+    assert max(len(line) for line in lines) < 1100
+    assert len(read_samples(tmp_path / "table")) == 4
 
 
 def test_a_mnt_file_with_thousands_of_minutiae_is_stored_whole(builder, monkeypatch, tmp_path):
@@ -1117,6 +1316,18 @@ def test_minutiae_of_another_ridge_polarity_than_the_build_takes_are_refused(
     assert "names light ridges, and this build took the image to have dark ridges" in message
     assert "looks like light ridges" in log(tmp_path / "table_dark", WARNINGS_LOG)["1_1.png"]
 
+    # The other way round: the extraction was told that the ridges are dark,
+    # and the build finds out from the image that they are light
+    path = extracted(tmp_path, "1_1.png", SensorNormalizer())
+    with open(path) as file:
+        assert file.read().splitlines()[-1].endswith("ridges dark (argument), prepared 128x160")
+    assert build(builder, monkeypatch, tmp_path, *options, "--ridges", "auto", table="auto") == 1
+    samples = read_samples(tmp_path / "auto")
+    assert samples.ridges_light.tolist() == [True] and samples.minutiae_known.tolist() == [False]
+    message = log(tmp_path / "auto", FAILURES_LOG)["1_1.png"]
+    assert "names dark ridges, and this build took the image to have light ridges" in message
+    assert "(estimated)" in message
+
 
 # ---------------------------------------------------------------------------
 # Images that cannot be loaded
@@ -1163,17 +1374,88 @@ def test_an_image_that_cannot_be_loaded_has_a_line_in_the_failures_log_and_no_ro
     assert paths(read_samples(tmp_path / "table_assumed")) == ["1_1.png", "2_1.png", "2_2.png"]
 
 
+@pytest.mark.parametrize("minutiae", ["no minutiae directory", "a minutiae directory"])
 def test_a_build_in_which_no_image_could_be_loaded_writes_no_table(
-    builder, monkeypatch, tmp_path, capsys
+    builder, monkeypatch, tmp_path, capsys, minutiae
 ):
     for name in ("1_1.png", "1_2.png", "2_1.png"):
         save(tmp_path / "images" / name, ppi=None)
-    message = refused(builder, monkeypatch, capsys, tmp_path)
+    options = []
+    if minutiae == "a minutiae directory":
+        os.makedirs(tmp_path / "minutiae")
+        options = ["--minutiae_dir", tmp_path / "minutiae"]
+    message = refused(builder, monkeypatch, capsys, tmp_path, *options)
     assert "None of the 3 listed files could be loaded as an image" in message
     # A log is not kept without its table: the message gives the first reasons, and what to do
     assert "1_1.png: no row: UnknownResolutionError: Resolution unknown" in message
     assert "1_2.png: no row: UnknownResolutionError" in message and "; and 1 more." in message
     assert "give --ppi, --ppi_manifest or --assume_ppi" in message
+    assert tables(tmp_path) == []
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_build_is_given_up_when_none_of_its_first_files_could_be_loaded(
+    builder, monkeypatch, tmp_path, capsys, workers
+):
+    """
+    What keeps every file from loading is a mistake of the options (here:
+    no resolution is known). A build of millions of files must not load them
+    all to say so: it stops after its first files, here after 3 of 7.
+    """
+    monkeypatch.setattr(builder, "FILES_BEFORE_GIVING_UP", 3)
+    names = [f"{subject}_{impression}.png" for subject in (1, 2, 3) for impression in (1, 2)]
+    for name in names + ["4_1.png"]:
+        save(tmp_path / "images" / name, ppi=None)
+    loaded = []
+    load_sample = builder.load_sample
+
+    def counting(source, subject, impression, image_path):
+        loaded.append(image_path)
+        return load_sample(source, subject, impression, image_path)
+
+    monkeypatch.setattr(builder, "load_sample", counting)
+    before = set(multiprocessing.active_children())
+    message = refused(builder, monkeypatch, capsys, tmp_path, "--workers", workers)
+    assert "None of the first 3 of the 7 listed files could be loaded as an image" in message
+    assert "the build was given up and no table was written" in message
+    assert "1_1.png: no row: UnknownResolutionError: Resolution unknown" in message
+    assert "1_2.png: no row: UnknownResolutionError" in message and "; and 1 more." in message
+    assert "give --ppi, --ppi_manifest or --assume_ppi" in message
+    assert tables(tmp_path) == []
+    assert set(multiprocessing.active_children()) == before
+    if workers == 1:
+        # The files after the third were not loaded at all
+        assert loaded == names[:3]
+
+
+def test_one_image_among_the_first_files_that_loads_lets_the_build_go_on(
+    builder, monkeypatch, tmp_path
+):
+    """The third of five files is an image with a resolution: the build is not given up."""
+    monkeypatch.setattr(builder, "FILES_BEFORE_GIVING_UP", 3)
+    for name in ("1_1.png", "1_2.png", "2_2.png", "3_1.png"):
+        save(tmp_path / "images" / name, ppi=None)
+    save(tmp_path / "images" / "2_1.png")
+    assert build(builder, monkeypatch, tmp_path) == 1
+    assert paths(read_samples(tmp_path / "table")) == ["2_1.png"]
+    assert sorted(log(tmp_path / "table", FAILURES_LOG)) == [
+        "1_1.png",
+        "1_2.png",
+        "2_2.png",
+        "3_1.png",
+    ]
+
+
+def test_a_build_of_no_more_files_than_the_limit_says_that_none_could_be_loaded(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """Then all files were loaded, and the refusal says so instead of naming the first ones."""
+    monkeypatch.setattr(builder, "FILES_BEFORE_GIVING_UP", 3)
+    for name in ("1_1.png", "1_2.png", "2_1.png"):
+        save(tmp_path / "images" / name, ppi=None)
+    message = refused(builder, monkeypatch, capsys, tmp_path)
+    assert "None of the 3 listed files could be loaded as an image" in message
+    assert "given up" not in message
     assert tables(tmp_path) == []
 
 
@@ -1331,6 +1613,48 @@ def test_a_directory_without_image_files_refuses_the_build(builder, monkeypatch,
     assert tables(tmp_path) == []
 
 
+@pytest.mark.parametrize("closed", [["b", "c/deep"], ["."]])
+def test_a_directory_of_images_that_cannot_be_listed_refuses_the_build(
+    builder, monkeypatch, tmp_path, capsys, closed
+):
+    """
+    Such a directory is not passed over: the table would lack its files
+    without a word. The tests may run as a user for whom no directory is
+    closed, so the listing of the directories fails here as it does for a
+    directory that the user may not read.
+    """
+    images = tmp_path / "images"
+    for name in ("a/1_1.png", "b/2_1.png", "c/3_1.png", "c/deep/4_1.png"):
+        save(images / name)
+    closed = [os.path.normpath(images / name) for name in closed]
+    scandir = os.scandir
+
+    def scan(path):
+        if path in closed:
+            raise PermissionError(errno.EACCES, "Permission denied", path)
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    # Control: the listing of the extraction leaves out the files of these directories
+    listed = list(builder.iter_image_paths(str(images)))
+    assert listed == ([] if closed == [str(images)] else ["a/1_1.png", "c/3_1.png"])
+
+    with monkeypatch.context() as patch:
+        forbid_loading(builder, patch)
+        message = refused(builder, patch, capsys, tmp_path)
+    assert f"{images} cannot be listed completely" in message
+    for directory in closed:
+        assert f"{directory} (PermissionError: Permission denied)" in message
+    assert "Make these directories readable" in message and "--sample_list" in message
+    assert "No image file was found" not in message
+    assert tables(tmp_path) == []
+
+    # A sample list names the files itself: no directory is listed for it
+    options = with_list(tmp_path, HEADER + "a/1_1.png,0,0\n")
+    assert build(builder, monkeypatch, tmp_path, *options) == 0
+    assert paths(read_samples(tmp_path / "table")) == ["a/1_1.png"]
+
+
 # ---------------------------------------------------------------------------
 # The settings of the extraction
 # ---------------------------------------------------------------------------
@@ -1464,7 +1788,10 @@ def test_a_missing_settings_file_is_said_and_the_build_goes_on(
     assert snapshot(tmp_path / "minutiae") == before
 
 
-@pytest.mark.parametrize("content", ["{ no JSON", "[1, 2]", ""])
+@pytest.mark.parametrize(
+    "content",
+    ["{ no JSON", "[1, 2]", "", pytest.param("[" * 100_000, id="brackets without end")],
+)
 def test_a_settings_file_that_cannot_be_read_refuses_the_build(
     builder, monkeypatch, tmp_path, capsys, content
 ):
@@ -1505,15 +1832,39 @@ def test_a_table_gets_its_name_only_when_it_is_complete(builder, monkeypatch, tm
     assert tables(tmp_path) == ["table"]
 
 
-@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError, "SIGTERM"])
+@pytest.fixture
+def signals_of_a_terminal():
+    """
+    SIGINT and SIGHUP as a program has them that was started in a terminal:
+    not ignored. The tests themselves may run in a process that ignores one
+    of them (a background job of a shell script ignores SIGINT, a process
+    that was started with nohup ignores SIGHUP), and so does every program
+    that such a process starts; a build leaves an ignored SIGHUP ignored.
+    While a test runs, a signal that is ignored is taken by a handler here:
+    a program that the test starts then has the signal at its default, and a
+    build in this process finds a signal that is not ignored.
+    """
+    handlers = {signal.SIGINT: signal.default_int_handler, signal.SIGHUP: lambda *_: None}
+    ignored = [number for number in handlers if signal.getsignal(number) is signal.SIG_IGN]
+    for number in ignored:
+        signal.signal(number, handlers[number])
+    yield
+    for number in ignored:
+        signal.signal(number, signal.SIG_IGN)
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError, "SIGTERM", "SIGHUP"])
 @pytest.mark.parametrize("workers", [1, 2])
 def test_a_build_that_is_interrupted_or_fails_leaves_nothing_behind(
-    builder, monkeypatch, tmp_path, capsys, error, workers
+    builder, monkeypatch, tmp_path, capsys, signals_of_a_terminal, error, workers
 ):
     write_many(tmp_path)
     monkeypatch.setattr(builder, "FILES_PER_PART", 4)
     before = snapshot(tmp_path, with_itself=False)
-    handler = signal.getsignal(signal.SIGTERM)
+    # A signal: what kill and a job scheduler send, or what a build gets
+    # when its terminal is closed
+    number = getattr(signal, error) if isinstance(error, str) else None
+    handlers = [signal.getsignal(taken) for taken in (signal.SIGTERM, signal.SIGHUP)]
     children = multiprocessing.active_children()
     write_part = builder.write_part
     written = []
@@ -1522,29 +1873,54 @@ def test_a_build_that_is_interrupted_or_fails_leaves_nothing_behind(
         written.append(index)
         if index == 1:  # the first part is written, the second is not
             assert f"table.tmp{os.getpid()}" in os.listdir(tmp_path / "new")
-            if error != "SIGTERM":
+            if number is None:
                 raise error("in the middle of the build")
-            # What kill and a job scheduler send. Only if the build takes
-            # the signal: with the handler of before it would end the tests.
-            assert signal.getsignal(signal.SIGTERM) is not handler
-            os.kill(os.getpid(), signal.SIGTERM)
+            # Only if the build takes the signal: with the handler of before
+            # it would end the tests, or do nothing
+            assert signal.getsignal(number) not in handlers
+            os.kill(os.getpid(), number)
         return write_part(directory, index, *arguments)
 
     monkeypatch.setattr(builder, "write_part", failing)
     arguments = ["--dataset_dir", tmp_path / "images", "--samples", tmp_path / "new" / "table"]
-    with pytest.raises(SystemExit if error == "SIGTERM" else error) as raised:
+    with pytest.raises(SystemExit if number else error) as raised:
         run(builder, monkeypatch, *arguments, "--workers", workers)
-    if error == "SIGTERM":
-        assert raised.value.code == 128 + signal.SIGTERM
+    if number:
+        assert raised.value.code == 128 + number
     else:
         assert str(raised.value) == "in the middle of the build"
     assert written == [0, 0, 1]  # control: the trial part, the first part, the part that failed
     # No table, no temporary directory, and not the directory that was made for the table
     assert snapshot(tmp_path, with_itself=False) == before
     assert "The build did not finish: no table was written" in capsys.readouterr().err
-    # The handler of the signal is the one that was there, and the workers are ended
-    assert signal.getsignal(signal.SIGTERM) is handler
+    # The handlers of the signals are those that were there, and the workers are ended
+    assert [signal.getsignal(taken) for taken in (signal.SIGTERM, signal.SIGHUP)] == handlers
     assert multiprocessing.active_children() == children
+
+
+def test_a_build_that_was_started_to_outlive_its_terminal_goes_on_when_it_is_closed(
+    builder, monkeypatch, tmp_path
+):
+    """nohup starts a program with SIGHUP ignored, and a build leaves it ignored."""
+    write_pair(tmp_path)
+    load_sample = builder.load_sample
+    sent = []
+
+    def hung_up(*arguments):
+        # Only if the build left the signal ignored: its own handler would end the build here
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        os.kill(os.getpid(), signal.SIGHUP)
+        sent.append(signal.SIGHUP)
+        return load_sample(*arguments)
+
+    monkeypatch.setattr(builder, "load_sample", hung_up)
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        assert build(builder, monkeypatch, tmp_path) == 0
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+    assert len(sent) == 2 and len(read_samples(tmp_path / "table")) == 2
 
 
 def test_an_output_directory_that_appears_during_the_build_is_not_replaced(
@@ -1563,6 +1939,206 @@ def test_an_output_directory_that_appears_during_the_build_is_not_replaced(
     assert "build it again" in message
     # What is there is left as it is, and the table that was built is not kept
     assert tables(tmp_path) == ["table"] and os.listdir(tmp_path / "table") == []
+
+
+@pytest.mark.parametrize(
+    "fault, expected",
+    [
+        (
+            "a part that lost its end",
+            ["does not pass its own check, and it was not kept", "cannot be read as a Parquet"],
+        ),
+        ("a part without its rows", ["holds 0 rows of 2 files where 2 rows of 2 files were"]),
+        ("a part of other files", ["holds 2 rows of 3 files where 2 rows of 2 files were"]),
+    ],
+)
+def test_a_table_that_does_not_come_back_as_it_was_written_is_not_published(
+    builder, monkeypatch, tmp_path, capsys, fault, expected
+):
+    """
+    At its end a build reads its table as a reader does, and only a table
+    that passes gets its name. Here the part is not what the build wrote,
+    as on a disk that does not keep what it is given.
+    """
+    write_pair(tmp_path)
+    write_part = builder.write_part
+
+    def faulty(directory, index, count, samples, build):
+        if len(samples) == 0:  # the part without rows that a build tries pyarrow with
+            return write_part(directory, index, count, samples, build)
+        if fault == "a part without its rows":
+            samples = samples_from_rows([])
+        if fault == "a part of other files":
+            build = dict(build, files=build["files"] + 1)
+        path = write_part(directory, index, count, samples, build)
+        if fault == "a part that lost its end":
+            os.truncate(path, os.path.getsize(path) - 4)
+        return path
+
+    monkeypatch.setattr(builder, "write_part", faulty)
+    message = refused(builder, monkeypatch, capsys, tmp_path)
+    for part in expected:
+        assert part in message, message
+    if fault == "a part that lost its end":
+        # The message of the reader, and what to do about a build of which nothing is left
+        assert f"{tmp_path / 'table'}.tmp{os.getpid()}/part-00000-of-00001.parquet" in message
+        assert "Of this build nothing is left to copy or to read again" in message
+        assert "Build the table again." in message
+    else:
+        assert "It was not kept." in message
+    assert tables(tmp_path) == []
+
+
+def test_a_table_is_written_also_where_what_it_holds_cannot_be_printed(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """
+    The reader of the output can go away while a build runs, as the reader
+    of a pipe. The table has its name before its summary is printed, so the
+    status says that it is written: 1 here, for the image without a .mnt file.
+    """
+    write_pair(tmp_path)
+
+    def no_reader(directory, samples):
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+    monkeypatch.setattr(builder, "describe_table", no_reader)
+    assert build(builder, monkeypatch, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 1
+    assert len(read_samples(tmp_path / "table")) == 2
+    errors = " ".join(capsys.readouterr().err.split())
+    table = tmp_path / "table"
+    assert f"The table {table} is written, but what it holds could not be printed" in errors
+    assert f"(BrokenPipeError: [Errno 32] Broken pipe). To see it: --check {table}" in errors
+
+
+def test_a_table_is_written_also_where_its_summary_fails_for_another_reason(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """Not an error of the system: a name that the output cannot encode, for example."""
+    write_pair(tmp_path)
+
+    def not_encoded(directory, samples):
+        raise UnicodeEncodeError("ascii", "t\xe4ble", 1, 2, "ordinal not in range(128)")
+
+    monkeypatch.setattr(builder, "describe_table", not_encoded)
+    assert build(builder, monkeypatch, tmp_path) == 0
+    assert len(read_samples(tmp_path / "table")) == 2
+    errors = " ".join(capsys.readouterr().err.split())
+    assert "is written, but what it holds could not be printed (UnicodeEncodeError: " in errors
+    assert f"To see it: --check {tmp_path / 'table'}" in errors
+
+
+def test_a_table_is_written_also_where_nothing_can_be_printed_any_more(
+    builder, monkeypatch, tmp_path
+):
+    """
+    A build can outlive its terminal: it was started to go on when the
+    terminal is closed, and its output still goes there. Then nothing can be
+    written any more: not what the table holds, and not that it could not be
+    printed. The status still says that the table is written, and here that
+    no file failed.
+    """
+    write_pair(tmp_path)
+    describe_table = builder.describe_table
+    closed = []
+
+    class Terminal:
+        """Takes what is written to it until it is closed, and refuses it from then on."""
+
+        refused = 0
+
+        def write(self, text):
+            if closed:
+                self.refused += 1
+                raise OSError(errno.EIO, "Input/output error")
+            return len(text)
+
+        def flush(self):
+            pass
+
+    def closing(directory, samples):
+        closed.append(directory)  # the terminal goes when the table has its name
+        return describe_table(directory, samples)
+
+    monkeypatch.setattr(builder, "describe_table", closing)
+    output, errors = Terminal(), Terminal()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    assert build(builder, monkeypatch, tmp_path) == 0
+    # Control: the table had its name, and neither stream took what was written to it then
+    assert closed == [str(tmp_path / "table")]
+    assert output.refused and errors.refused
+    assert len(read_samples(tmp_path / "table")) == 2
+
+
+def test_a_temporary_directory_that_is_there_already_is_left_as_it_is(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """
+    It is the work of another build: one that runs under the same process
+    number (on another machine that writes to the same disk), or one that
+    was killed. The build that finds it is refused and removes nothing.
+    """
+    write_pair(tmp_path)
+    theirs = tmp_path / f"table.tmp{os.getpid()}"
+    theirs.mkdir()
+    (theirs / "part-00000-of-00002.parquet").write_text("the work of another build")
+    (theirs / FAILURES_LOG).write_text("its log\n")
+    before = snapshot(tmp_path)
+    forbid_loading(builder, monkeypatch)
+    message = refused(builder, monkeypatch, capsys, tmp_path)
+    assert f"The temporary directory {theirs}, in which the table would be built, exists" in message
+    assert f"another build into {tmp_path / 'table'} is running, or one was killed" in message
+    assert "It was not touched. If no build is running, remove it" in message
+    assert snapshot(tmp_path) == before
+
+
+def test_a_temporary_directory_that_cannot_be_made_is_not_taken_for_one_that_exists(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """
+    The directory in which the table is to lie cannot be written to. The
+    tests may run as a user for whom no directory is closed, so the making
+    of the temporary directory fails here as it does for a user who may not
+    write there.
+    """
+    write_pair(tmp_path)
+    before = snapshot(tmp_path)
+    forbid_loading(builder, monkeypatch)
+    temporary = f"{tmp_path / 'table'}.tmp{os.getpid()}"
+    mkdir = os.mkdir
+
+    def closed(path, *arguments, **options):
+        if str(path) == temporary:
+            raise PermissionError(errno.EACCES, "Permission denied", temporary)
+        return mkdir(path, *arguments, **options)
+
+    monkeypatch.setattr(os, "mkdir", closed)
+    message = refused(builder, monkeypatch, capsys, tmp_path)
+    assert f"The temporary directory {temporary}, in which the table is built, cannot" in message
+    assert "cannot be made (PermissionError: [Errno 13] Permission denied" in message
+    assert f"{tmp_path} must be a directory that can be written to" in message
+    # Not the refusal of a temporary directory that is there: nothing is to be removed
+    assert "exists already" not in message and "remove" not in message
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("below", ["notes", "notes/new"])
+def test_a_table_below_a_file_is_refused_and_the_file_is_left_alone(
+    builder, monkeypatch, tmp_path, capsys, below
+):
+    write_pair(tmp_path)
+    (tmp_path / "notes").write_text("a file, not a directory")
+    before = snapshot(tmp_path)
+    forbid_loading(builder, monkeypatch)
+    options = ["--samples", tmp_path / below / "table"]
+    message = refused(builder, monkeypatch, capsys, tmp_path, *options)
+    assert f"The directory {tmp_path / below}, in which the table is to be written" in message
+    assert "cannot be made (" in message
+    assert "Give as --samples a path in a directory that exists or can be made" in message
+    # Nothing in the message tells the user to remove what is there
+    assert "remove" not in message
+    assert snapshot(tmp_path) == before
 
 
 def test_directories_above_the_table_are_made_and_removed_again_if_no_table_is_written(
@@ -1754,6 +2330,10 @@ def test_options_that_do_not_fit_are_refused_before_anything_is_done(
     # Nothing is written into the directories of the images and of the minutiae
     message = error("--dataset_dir", images, "--samples", images / "table")
     assert "lies in --dataset_dir" in message and "give a directory outside of them" in message
+    # ... also where the path leads into one of them through a link
+    os.symlink(images, tmp_path / "link")
+    message = error("--dataset_dir", images, "--samples", tmp_path / "link" / "table")
+    assert f"--samples {tmp_path / 'link' / 'table'} lies in --dataset_dir {images}" in message
     minutiae = tmp_path / "minutiae"
     inside = ["--samples", minutiae / "new" / "table", "--minutiae_dir", minutiae]
     assert "lies in --minutiae_dir" in error("--dataset_dir", images, *inside)
@@ -1824,6 +2404,103 @@ def test_the_script_runs_as_a_program_from_any_directory(tmp_path):
     assert f"Checksum (samples_sha256): {samples_checksum(samples)}" in result.stdout
 
 
+def test_an_error_that_is_no_refusal_ends_the_program_with_the_status_2(
+    builder, monkeypatch, tmp_path
+):
+    """
+    The status 1 stands for a table that was written, so it is not the
+    status of an error that leaves none. Here a part cannot be written: the
+    program may not write a file of its size, which stands for a disk that
+    is full.
+    """
+    write_pair(tmp_path)
+    rng = np.random.default_rng(5)
+    many = rng.uniform((0, 0, 0), (144, 200, 6.28), (20_000, 3)).tolist()
+    extracted(tmp_path, "1_2.png", minutiae=many)
+    options = ["--minutiae_dir", tmp_path / "minutiae"]
+    limit = 50_000
+    # Control: the part is larger than the limit, and without a limit it is written
+    assert build(builder, monkeypatch, tmp_path, *options, table="table_whole") == 0
+    assert os.path.getsize(tmp_path / "table_whole" / "part-00000-of-00001.parquet") > 2 * limit
+
+    arguments = ["--dataset_dir", "images", "--samples", "table", "--minutiae_dir", "minutiae"]
+    code = (
+        "import resource, runpy, sys\n"
+        f"resource.setrlimit(resource.RLIMIT_FSIZE, ({limit}, {limit}))\n"
+        f"sys.argv = {[SCRIPT] + arguments!r}\n"
+        f"runpy.run_path({SCRIPT!r}, run_name='__main__')\n"
+    )
+    # -B: the interpreter writes no file of its own under the limit
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode == 2, result.stderr
+    # Not a refusal: the error is printed as it was raised, after what became of the build
+    assert "ERROR: " not in result.stderr
+    assert "The build did not finish: no table was written" in result.stderr
+    assert "Traceback (most recent call last)" in result.stderr
+    assert "OSError" in result.stderr.splitlines()[-1]
+    assert tables(tmp_path) == ["table_whole"]
+
+
+def test_an_error_that_cannot_be_printed_ends_the_program_with_the_status_2_as_well(tmp_path):
+    """
+    Standard error has no reader any more, as after "2>&1 | head". The build
+    fails when it writes its progress, and neither that it did not finish
+    nor the traceback of the error can be written, as they cannot in a
+    terminal that was closed. The status is still not 1, which stands for a
+    table that was written.
+    """
+    pytest.importorskip("pyarrow")
+    write_pair(tmp_path)
+    reader, writer = os.pipe()
+    os.close(reader)
+    # The progress bar is what the build writes to standard error: a setting
+    # of the environment that switches the bar off (TQDM_DISABLE) is not passed on
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("TQDM_")
+    }
+    try:
+        # -u: nothing waits in a buffer for the end of the interpreter, which
+        # has a status of its own for what it cannot write then
+        result = subprocess.run(
+            [sys.executable, "-u", SCRIPT, "--dataset_dir", "images", "--samples", "table"],
+            cwd=tmp_path,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=writer,
+        )
+    finally:
+        os.close(writer)
+    assert result.returncode == 2
+    assert tables(tmp_path) == []
+
+
+def test_an_error_of_any_kind_that_is_no_refusal_ends_the_program_with_the_status_2(tmp_path):
+    """Not only an error of the system: here one that a function of the table module raises."""
+    pytest.importorskip("pyarrow")
+    write_pair(tmp_path)
+    arguments = ["--dataset_dir", "images", "--samples", "table"]
+    code = (
+        "import runpy, sys\n"
+        f"sys.path.insert(0, {REPOSITORY!r})\n"
+        "from flx.preparation import sample_table\n"
+        "def not_foreseen(path):\n"
+        "    raise RuntimeError('not foreseen')\n"
+        "sample_table.normalize_image_path = not_foreseen\n"
+        f"sys.argv = {[SCRIPT] + arguments!r}\n"
+        f"runpy.run_path({SCRIPT!r}, run_name='__main__')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode == 2, result.stderr
+    assert "ERROR: " not in result.stderr
+    assert "The build did not finish: no table was written" in result.stderr
+    assert result.stderr.splitlines()[-1] == "RuntimeError: not foreseen"
+    assert tables(tmp_path) == []
+
+
 def children(pid: int) -> list:
     """The processes that run the script as children of a process: its worker processes."""
     found = []
@@ -1853,14 +2530,23 @@ def running(pids: list) -> list:
 
 
 def wait_until(condition, seconds: float = 60) -> bool:
+    """
+    Asks the condition again and again until it is true or the time is
+    over, and says whether it became true. A condition that was true is not
+    asked once more: it need not stay true (a pipe can be written to as long
+    as its reader waits, and no longer).
+    """
     end = time.monotonic() + seconds
-    while not condition() and time.monotonic() < end:
+    while True:
+        if condition():
+            return True
+        if time.monotonic() >= end:
+            return False
         time.sleep(0.05)
-    return bool(condition())
 
 
 @pytest.fixture
-def stuck_program(tmp_path):
+def stuck_program(tmp_path, signals_of_a_terminal):
     """
     The script as a program with two workers, in the middle of a build that
     gets no further: one of its image files is a pipe that nothing writes to,
@@ -1911,6 +2597,24 @@ def test_an_interruption_from_the_keyboard_ends_the_program_and_its_workers(
     # Ended by the signal, with the traceback of the main process and no other
     assert process.returncode == -signal.SIGINT
     assert errors.count("KeyboardInterrupt") == 1
+    assert "The build did not finish: no table was written" in errors
+    assert tables(tmp_path) == []
+    assert running(workers) == []
+
+
+def test_a_terminal_that_is_closed_ends_the_program_and_its_workers(stuck_program, tmp_path):
+    process, workers = stuck_program
+    # The signal of a closed terminal can reach the whole process group, as
+    # an interruption does. The workers leave it to the main process as well.
+    for pid in workers:
+        os.kill(pid, signal.SIGHUP)
+    time.sleep(0.5)
+    assert running(workers) == workers and process.poll() is None
+    os.killpg(process.pid, signal.SIGHUP)
+    _, errors = process.communicate(timeout=60)
+    # Ended as by the signal, without a traceback, and nothing is left
+    assert process.returncode == 128 + signal.SIGHUP
+    assert "Traceback" not in errors
     assert "The build did not finish: no table was written" in errors
     assert tables(tmp_path) == []
     assert running(workers) == []

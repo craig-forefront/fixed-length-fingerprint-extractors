@@ -31,11 +31,15 @@ Which files, and which finger each one shows:
     lists: .png, .jpg, .jpeg, .bmp, .tif, .tiff). The name of a file without
     its ending must be <subject>_<impression> with whole numbers from 1, and
     the table holds each number minus 1, as the training reads these names:
-    17_3.png is subject 16, impression 2. A "subject" is one finger.
+    17_3.png is subject 16, impression 2. A "subject" is one finger. A
+    directory below --dataset_dir that cannot be listed refuses the build:
+    the table would lack its files without saying so.
 
     --sample_list FILES.csv     for files with other names: a CSV file with a
                                 header line and the columns path, subject and
-                                impression. path is relative to --dataset_dir.
+                                impression. path is relative to --dataset_dir
+                                and is taken as it is written: white space at
+                                its ends belongs to the name of the file.
                                 The two numbers are whole numbers of 0 or
                                 more, and they go into the table as they are
                                 written (nothing is subtracted). Further
@@ -102,6 +106,12 @@ Failures and warnings:
     line in the failures log and no row. The two logs are written into the
     table directory, one line per file: path, tab, message.
 
+    A build in which no image at all can be loaded writes no table. It is
+    given up after its first 1,000 files if not one of them could be loaded:
+    that is a mistake of the options (no resolution is known for the files,
+    or --dataset_dir is not the directory of the images), and a build of
+    millions of files does not have to load them all to say so.
+
         build_failures.txt      "no row: ..." for an image that could not be
                                 loaded, "null minutiae: ..." for a .mnt file
                                 that is missing or was refused
@@ -115,7 +125,17 @@ Failures and warnings:
     if the build or the check was refused: options that do not fit, an
     output directory that exists, files that cannot be told apart, other
     settings than those of the extraction, no image file, no image that
-    could be loaded, pyarrow missing, a table that cannot be read.
+    could be loaded, pyarrow missing, a table that cannot be read. An error
+    that the script does not foresee (a disk that is full while a part is
+    written, for example) is printed with its traceback and ends the script
+    with the status 2 as well. So a build that ends with 0 or 1 has written
+    its table, and one that ends with 2 has not. A build that is interrupted
+    ends with neither 0 nor 1, and so does a build that fails because its
+    output cannot be written any more (the reader of a pipe went away).
+    These are the statuses of a script that started: where a package that it
+    imports is missing (PyTorch in the environment of the minutiae
+    extractor, for example), Python ends with a traceback and its own status
+    1 before a build begins.
 
 The table:
     --samples TABLE             the directory to write. It must not exist: a
@@ -125,7 +145,13 @@ The table:
                                 If a worker process dies, the file that it
                                 was loading is loaded once more; if that
                                 worker dies as well, the file gets a line in
-                                the failures log and no row.
+                                the failures log and no row. There is no time
+                                limit for a file. A build that stands still
+                                on a file that is never read to its end can
+                                be helped along: end the worker process that
+                                holds the file (kill). The file is then
+                                loaded once more; when that worker is ended
+                                as well, the build goes on without the file.
 
     The files are put into the order of (subject, impression) and cut into
     parts of 250,000 files; each part is one Parquet file. The parts are
@@ -133,10 +159,13 @@ The table:
     id>). When all are written, the table is read back as a reader reads it,
     and only then is the directory renamed to TABLE: a directory TABLE that
     exists holds a whole table. If the build fails or is interrupted (from
-    the keyboard, or by the signal that kill sends), the temporary directory
-    is removed; only a build that is killed outright (kill -9) leaves it
-    behind, and it can be removed then. Nothing is written into
-    --dataset_dir or --minutiae_dir, and TABLE must not lie in them.
+    the keyboard, by the signal that kill sends, or by the one that a build
+    gets when its terminal is closed), the temporary directory is removed. A
+    build that is ended without the time for that (kill -9, the quit key of
+    the terminal, a machine that goes down) leaves it behind, and it can be
+    removed then. A build that was started with nohup goes on when its
+    terminal is closed. Nothing is written into --dataset_dir or
+    --minutiae_dir, and TABLE must not lie in them.
 
     At its end the script prints what the table holds: files, rows and
     failed files, the rows with, with empty and with null minutiae, the
@@ -163,6 +192,7 @@ import shutil
 import signal
 import sys
 import threading
+import traceback
 from pathlib import PurePosixPath
 from typing import Iterator, Optional
 
@@ -202,6 +232,11 @@ from flx.preparation.sensor_normalization import (
 # hold none.
 FILES_PER_PART = 250_000
 
+# Listed files after which a build is given up if not one of them could be
+# loaded as an image. What keeps every file from loading is a mistake of the
+# options, and a build of millions of files must not load them all to say so.
+FILES_BEFORE_GIVING_UP = 1_000
+
 # The two logs of a build, in the directory of the table
 FAILURES_LOG = "build_failures.txt"
 WARNINGS_LOG = "build_warnings.txt"
@@ -224,12 +259,20 @@ _MAX_NAMED = 5
 # Failures that are printed at the end of a build; the log holds all of them
 _MAX_PRINTED_FAILURES = 10
 
+# Characters of the message of a line of a log. A message can quote what a
+# file holds, and one file must not fill the log and the terminal.
+_MAX_MESSAGE = 1000
+
 # Resolutions that the summary lists before it gives the number of the rest
 _MAX_RESOLUTIONS = 20
 
 # How long a worker process is waited for when the build is over and the
 # worker has been told so, before it is ended from outside
 _SECONDS_TO_END = 10
+
+# The signal that a build gets when its terminal is closed or the connection
+# to it is lost; None on a system that does not have it
+_SIGHUP = getattr(signal, "SIGHUP", None)
 
 # The last line of a .mnt file as scripts/extract_minutiae.py writes it:
 # "# " and PreparedImageInfo.describe() of the image it extracted from
@@ -277,6 +320,13 @@ def _named(names: list, total: int) -> str:
     """The names, and how many more there are of `total`."""
     more = f"; and {total - len(names):,} more" if total > len(names) else ""
     return "; ".join(names) + more
+
+
+def _cut(message: str) -> str:
+    """The message, or its first _MAX_MESSAGE characters and how many more there are."""
+    if len(message) <= _MAX_MESSAGE:
+        return message
+    return f"{message[:_MAX_MESSAGE]}... ({len(message) - _MAX_MESSAGE:,} more characters)"
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +405,26 @@ def _numbers_of_name(path: str) -> Optional[tuple[int, int]]:
 
 def list_directory(dataset_dir: str) -> _Files:
     """The image files below the directory, named <subject>_<impression>."""
+    # The image files are listed as the extraction lists them
+    # (iter_image_paths), and that walk passes over a directory that cannot
+    # be listed: its files would be missing in the table without a word. So
+    # the directories are walked once before, for the errors alone.
+    unlisted = []
+    for _ in os.walk(dataset_dir, onerror=unlisted.append):
+        pass
+    if unlisted:
+        named = [
+            f"{_shown(str(error.filename))} ({type(error).__name__}: {error.strerror})"
+            for error in unlisted[:_MAX_NAMED]
+        ]
+        raise BuildRefused(
+            f"{dataset_dir} cannot be listed completely, so a table of it would lack image files "
+            f"without saying so. What could not be listed: {_named(named, len(unlisted))}. Make "
+            "these directories readable, or move them out of --dataset_dir if they hold no "
+            "images of the training set, or say in a sample list which files the table is to "
+            "hold: no directory is listed then (--sample_list, see docs/sample-table.md)."
+        )
+
     paths, subjects, impressions = [], [], []
     problems, unusable = [], 0
     for listed in iter_image_paths(dataset_dir):
@@ -447,7 +517,10 @@ def read_sample_list(sample_list: str) -> tuple[_Files, list[str]]:
                 )
             for row in reader:
                 subject = impression = None
-                text = (row["path"] or "").strip()
+                # As it is written: white space at the ends of a path belongs
+                # to the name of the file, and without it the path could name
+                # another file, whose row would then hold these numbers
+                text = row["path"] or ""
                 path = normalize_image_path(text)
                 if row.get(None) is not None:
                     problem = (
@@ -609,7 +682,8 @@ def check_extraction_settings(minutiae_dir: str, settings: dict, allow_other: bo
             stored = json.load(file)
         if not isinstance(stored, dict):
             raise ValueError("it does not hold a JSON object")
-    except (OSError, ValueError) as error:
+    # RecursionError: what a file raises that opens brackets without end
+    except (OSError, ValueError, RecursionError) as error:
         problem = (
             f"{path} cannot be read ({type(error).__name__}: {error}), so the settings of the "
             "extraction cannot be compared with those of this build."
@@ -823,10 +897,13 @@ def _serve(connection, inherited: tuple, source: tuple) -> None:
     through its pipe, one at a time, and sends back the result of each, until
     the pipe is closed.
     """
-    # An interruption from the keyboard reaches all processes of the build.
-    # The main process ends the workers; a worker that raised an error of its
-    # own in the middle of a file would only add its traceback.
+    # An interruption from the keyboard reaches all processes of the build,
+    # and so does the signal of a terminal that is closed. The main process
+    # ends the workers; a worker that raised an error of its own in the
+    # middle of a file would only add its traceback.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if _SIGHUP is not None:
+        signal.signal(_SIGHUP, signal.SIG_IGN)
     # The main process turns SIGTERM into an exception; a worker is to end at once
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     # A forked worker holds the ends of the pipes that the main process held
@@ -1035,11 +1112,13 @@ class _Log:
         self._file = open(path, "w", encoding="utf-8", errors="backslashreplace")
         self.lines = 0
 
-    def add(self, image_path: str, message: str) -> None:
-        message = " ".join(str(message).split())
+    def add(self, image_path: str, message: str) -> str:
+        """Writes the line of a file. Returns its message as it was written: on one line, cut."""
+        message = _cut(" ".join(str(message).split()))
         self._file.write(f"{_shown(image_path)}\t{message}\n")
         self._file.flush()
         self.lines += 1
+        return message
 
     def close(self) -> None:
         self._file.close()
@@ -1197,11 +1276,15 @@ def _check_pyarrow(directory: str) -> None:
 
 
 @contextlib.contextmanager
-def _ended_by_sigterm():
+def _ended_by_signals():
     """
-    While a build runs, SIGTERM (what kill and a job scheduler send) ends it
-    as an interruption from the keyboard does: with an exception, so that the
+    While a build runs, SIGTERM (what kill and a job scheduler send) and
+    SIGHUP (what a build gets when its terminal is closed) end it as an
+    interruption from the keyboard does: with an exception, so that the
     workers are ended and the temporary directory is removed.
+
+    SIGHUP is left alone where the process ignores it: that is how nohup
+    starts a program that is to go on when its terminal is closed.
     """
     if threading.current_thread() is not threading.main_thread():
         yield  # a signal handler can only be set in the main thread
@@ -1210,66 +1293,20 @@ def _ended_by_sigterm():
     def end(number, frame):
         raise SystemExit(128 + number)
 
-    previous = signal.signal(signal.SIGTERM, end)
+    previous = {signal.SIGTERM: signal.signal(signal.SIGTERM, end)}
+    if _SIGHUP is not None and signal.getsignal(_SIGHUP) is not signal.SIG_IGN:
+        previous[_SIGHUP] = signal.signal(_SIGHUP, end)
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
-def build_table(args, normalizer: SensorNormalizer) -> int:
-    """Builds the table of --samples. Returns the exit status 0 or 1; BuildRefused stands for 2."""
-    samples_dir = os.path.normpath(args.samples)
-    if os.path.lexists(samples_dir):
-        raise BuildRefused(
-            f"{samples_dir} exists. A table is not changed or overwritten: give a directory "
-            "that does not exist yet as --samples, or remove the old one first. (To check a "
-            f"table that exists: --check {samples_dir})"
-        )
-    temporary = f"{samples_dir}.tmp{os.getpid()}"
-    # Directories above the table that are missing are made, and removed
-    # again if no table is written
-    parent = os.path.dirname(os.path.abspath(samples_dir))
-    made, directory = [], parent
-    while not os.path.lexists(directory):
-        made.append(directory)
-        directory = os.path.dirname(directory)
-    published = False
-    try:
-        try:
-            os.makedirs(parent, exist_ok=True)
-            os.mkdir(temporary)
-        except OSError as error:
-            raise BuildRefused(
-                f"The temporary directory {temporary}, in which the table is built, cannot be "
-                f"made ({type(error).__name__}: {error}). If it exists, another build into "
-                f"{samples_dir} is running, or one was killed and left it: remove it then."
-            ) from None
-        with _ended_by_sigterm():
-            samples, failed, first_failures, accepted = _build(args, normalizer, temporary)
-            if os.path.lexists(samples_dir):
-                raise BuildRefused(
-                    f"{samples_dir} was made by something else while the table was built. The "
-                    "table was not kept: build it again, into a directory that nothing else "
-                    "writes to."
-                )
-            os.rename(temporary, samples_dir)
-            published = True
-    except BaseException as error:
-        if not isinstance(error, BuildRefused):
-            print(
-                f"\nThe build did not finish: no table was written, and {temporary} is removed.",
-                file=sys.stderr,
-            )
-        raise
-    finally:
-        if not published:
-            shutil.rmtree(temporary, ignore_errors=True)
-            for directory in made:
-                with contextlib.suppress(OSError):
-                    os.rmdir(directory)
-
-    # The table has its name: nothing that is printed from here on can cost it
+def _print_summary(
+    samples_dir: str, samples: Samples, failed: int, first_failures: list, accepted: dict
+) -> None:
+    """Prints what a build wrote: the table, the notes about its .mnt files, the first failures."""
     print("\n".join(describe_table(samples_dir, samples)))
     if accepted[_NO_HEADER]:
         print(
@@ -1295,6 +1332,92 @@ def build_table(args, normalizer: SensorNormalizer) -> int:
             "without minutiae, because its .mnt file is missing or was refused. Remove the "
             "causes and build the table again, into a new directory."
         )
+
+
+def build_table(args, normalizer: SensorNormalizer) -> int:
+    """Builds the table of --samples. Returns the exit status 0 or 1; BuildRefused stands for 2."""
+    samples_dir = os.path.normpath(args.samples)
+    if os.path.lexists(samples_dir):
+        raise BuildRefused(
+            f"{samples_dir} exists. A table is not changed or overwritten: give a directory "
+            "that does not exist yet as --samples, or remove the old one first. (To check a "
+            f"table that exists: --check {samples_dir})"
+        )
+    temporary = f"{samples_dir}.tmp{os.getpid()}"
+    # Directories above the table that are missing are made, and removed
+    # again if no table is written
+    parent = os.path.dirname(os.path.abspath(samples_dir))
+    made, directory = [], parent
+    while not os.path.lexists(directory):
+        made.append(directory)
+        directory = os.path.dirname(directory)
+    published = made_temporary = False
+    try:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as error:
+            raise BuildRefused(
+                f"The directory {parent}, in which the table is to be written, cannot be made "
+                f"({type(error).__name__}: {error}). Give as --samples a path in a directory "
+                "that exists or can be made."
+            ) from None
+        try:
+            os.mkdir(temporary)
+        except FileExistsError:
+            raise BuildRefused(
+                f"The temporary directory {temporary}, in which the table would be built, "
+                f"exists already: another build into {samples_dir} is running, or one was "
+                "killed and left it. It was not touched. If no build is running, remove it and "
+                "start this build again."
+            ) from None
+        except OSError as error:
+            raise BuildRefused(
+                f"The temporary directory {temporary}, in which the table is built, cannot be "
+                f"made ({type(error).__name__}: {error}). The table is built next to its place: "
+                f"{parent} must be a directory that can be written to."
+            ) from None
+        made_temporary = True
+        with _ended_by_signals():
+            samples, failed, first_failures, accepted = _build(args, normalizer, temporary)
+            if os.path.lexists(samples_dir):
+                raise BuildRefused(
+                    f"{samples_dir} was made by something else while the table was built. The "
+                    "table was not kept: build it again, into a directory that nothing else "
+                    "writes to."
+                )
+            os.rename(temporary, samples_dir)
+            published = True
+    except BaseException as error:
+        if not isinstance(error, BuildRefused):
+            print(
+                f"\nThe build did not finish: no table was written, and {temporary} is removed.",
+                file=sys.stderr,
+            )
+        raise
+    finally:
+        if not published:
+            # Only the temporary directory that this build made: one that
+            # was there is the work of another build
+            if made_temporary:
+                shutil.rmtree(temporary, ignore_errors=True)
+            for directory in made:
+                with contextlib.suppress(OSError):
+                    os.rmdir(directory)
+
+    # The table has its name: nothing that is printed from here on can cost
+    # it. The exit status says that it is written, also where what it holds
+    # could not be printed (the reader of the output went away, as the reader
+    # of a pipe can), and where not even that could be said (a build that
+    # outlived its terminal can write nothing to it).
+    try:
+        _print_summary(samples_dir, samples, failed, first_failures, accepted)
+    except Exception as error:
+        with contextlib.suppress(Exception):
+            print(
+                f"\nThe table {samples_dir} is written, but what it holds could not be printed "
+                f"({type(error).__name__}: {error}). To see it: --check {samples_dir}",
+                file=sys.stderr,
+            )
     return 1 if failed else 0
 
 
@@ -1348,6 +1471,12 @@ def _build(args, normalizer: SensorNormalizer, temporary: str) -> tuple:
     accepted = {_NO_HEADER: 0, _COMPARED: 0, _HEADER_ONLY: 0}
     written = 0
     rows, failed_of_part = [], 0
+    any_row = False
+    # What to do where no file could be loaded as an image
+    no_image = (
+        "If the resolution of the files is not known, give --ppi, --ppi_manifest or "
+        "--assume_ppi; if the files were not found, check --dataset_dir."
+    )
     try:
         with contextlib.ExitStack() as stack:
             pool = None
@@ -1360,7 +1489,7 @@ def _build(args, normalizer: SensorNormalizer, temporary: str) -> tuple:
             for index, (row, failure, warning, how_accepted) in enumerate(results):
                 path = files.paths[int(order[index])]
                 if failure is not None:
-                    failures.add(path, failure)
+                    failure = failures.add(path, failure)
                     failed_of_part += 1
                     if len(first_failures) < _MAX_PRINTED_FAILURES:
                         first_failures.append(f"{_shown(path)}: {failure}")
@@ -1368,8 +1497,15 @@ def _build(args, normalizer: SensorNormalizer, temporary: str) -> tuple:
                     warnings.add(path, warning)
                 if row is not None:
                     rows.append(row)
+                    any_row = True
                 if how_accepted is not None:
                     accepted[how_accepted] += 1
+                if not any_row and index + 1 == FILES_BEFORE_GIVING_UP and index + 1 < total:
+                    raise BuildRefused(
+                        f"None of the first {index + 1:,} of the {total:,} listed files could "
+                        "be loaded as an image, so the build was given up and no table was "
+                        f"written: {_named(first_failures[:2], index + 1)}. {no_image}"
+                    )
                 if (index + 1) % FILES_PER_PART == 0 or index + 1 == total:
                     # The rows of one part are all the rows that are held at a time
                     write_part(
@@ -1394,8 +1530,7 @@ def _build(args, normalizer: SensorNormalizer, temporary: str) -> tuple:
         named = _named(first_failures[:2], total)
         raise BuildRefused(
             f"None of the {total:,} listed files could be loaded as an image, so no table was "
-            f"written: {named}. If the resolution of the files is not known, give --ppi, "
-            "--ppi_manifest or --assume_ppi; if the files were not found, check --dataset_dir."
+            f"written: {named}. {no_image}"
         )
 
     # The table as a reader gets it, with every rule of the format. Only a
@@ -1403,8 +1538,16 @@ def _build(args, normalizer: SensorNormalizer, temporary: str) -> tuple:
     try:
         samples = read_samples(temporary)
     except SampleTableError as error:
+        # The message of the reader says what to do with a table that is
+        # kept. Of this one nothing is left, so the refusal says what to do
+        # about the build.
         raise BuildRefused(
-            f"The table that was built does not pass its own check, and it was not kept: {error}"
+            f"The table that was built does not pass its own check, and it was not kept: {error} "
+            "That is the message of the reader, for a table that it is given. Of this build "
+            "nothing is left to copy or to read again: its temporary directory is removed. Build "
+            "the table again. If it ends like this once more, something changes the parts "
+            "between their writing and their reading: another program that writes to the "
+            "directory of the table, or a fault of the disk or of the memory of this machine."
         ) from None
     if len(samples) != written or samples.build.get("files") != total:
         raise BuildRefused(
@@ -1430,7 +1573,8 @@ def _is_inside(path: str, directory: str) -> bool:
 def main() -> int:
     """
     Returns the exit status: 0, 1 if a file has a line in the failures log,
-    2 if the build or the check was refused.
+    2 if the build or the check was refused. An error that is no refusal is
+    raised; the script, run as a program, ends with the status 2 for it too.
     """
     parser = argparse.ArgumentParser(
         description="Build a sample table from image files and their .mnt files, or check one",
@@ -1529,4 +1673,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        status = main()
+    except Exception:
+        # An error that is no refusal. Without this the interpreter would
+        # end with the status 1, which stands for a table that was written.
+        # It would as well if the traceback raised an error of its own,
+        # where standard error cannot be written to any more (its reader
+        # went away, or its terminal was closed).
+        with contextlib.suppress(Exception):
+            traceback.print_exc()
+        status = 2
+    sys.exit(status)
