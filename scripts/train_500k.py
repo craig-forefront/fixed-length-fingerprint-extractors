@@ -1,9 +1,9 @@
 """
 Training script for DeepPrint on a large fingerprint dataset, with or without
 learned alignment (LocalizationNetwork). The name is historical: the script
-was first written for 500,000 images. TRAINING_PIPELINE_GUIDE.md walks
-through its use; the section "Above about one million subjects" there says
-what it cannot do today.
+was first written for 500,000 images. docs/training-guide.md walks
+through its use; the section "Above about one million subjects" of
+docs/large-datasets.md says what it cannot do today.
 
 One GPU (or the CPU):
     python scripts/train_500k.py \
@@ -61,14 +61,15 @@ Continuing and starting again:
 
     training_settings.json holds the settings of the last run that trained
     an epoch. A start that is refused (settings, missing files) or that
-    trains nothing does not write it.
+    trains nothing does not write it. A first start that passes these checks
+    and then fails in its first step (for example on a file whose resolution
+    is unknown) leaves the settings files and no model.pyt.
 
     --batch_size 64                 images per step on each GPU (default 64)
     --allow_changed_settings        continue although settings that must stay
                                     the same differ (at your own risk)
 
-Images from different sensors (see "Dataset Preparation" in
-TRAINING_PIPELINE_GUIDE.md):
+Images from different sensors (see Step 2 of docs/training-guide.md):
     Every image is loaded like scripts/extract_minutiae.py loads it: resampled
     to 500 pixels per inch (ppi) and brought to dark ridges. The minutiae in
     the .mnt files are in the pixels of that image. Give this script the same
@@ -96,7 +97,7 @@ TRAINING_PIPELINE_GUIDE.md):
     The settings are written to data_preparation.json in --output_dir. Images
     must be prepared in the same way when the model is used later.
 
-Learned alignment (see "Learned alignment" in TRAINING_PIPELINE_GUIDE.md):
+Learned alignment (see "Learned alignment" in docs/tuning.md):
     The localization network is a small network in front of the model. It
     proposes a rotation and a shift for every image, and the image is
     resampled with them before the model sees it, so that the model sees every
@@ -114,7 +115,8 @@ Learned alignment (see "Learned alignment" in TRAINING_PIPELINE_GUIDE.md):
 
     Whether the localization network makes matching more accurate on your
     data is not known: train both ways with the same settings and compare the
-    validation equal error rates (the guide has the recipe). A model must be
+    validation equal error rates (docs/tuning.md, "How to find out whether it
+    helps on your data", has the recipe). A model must be
     loaded with the variant it was trained with.
 
 Validation (on by default):
@@ -147,14 +149,14 @@ Validation (on by default):
     then the epoch with the lowest training loss, which cannot detect
     overfitting, and early stopping is off.
 
-    torchrun --nproc_per_node=4 scripts/train_500k.py \
-        --dataset_dir /path/to/fingerprints \
-        --output_dir /path/to/model \
-        --validation_split 0.1 \
-        --max_validation_subjects 5000 \
-        --patience 3
+    --patience 3                    stop after this many epochs without a
+                                    lower validation error rate (default 3;
+                                    0 = never stop early)
 
-Learning rate (see "Choosing the learning rate" in TRAINING_PIPELINE_GUIDE.md):
+    These options are added to the command at the top, for example
+        --validation_split 0.1 --max_validation_subjects 5000 --patience 3
+
+Learning rate (see "Choosing the learning rate" in docs/tuning.md):
     The learning rate is the size of the change that the optimizer makes to
     the model in every step (one batch). The right value depends on the data,
     the model variant and the batch size. Find it with
@@ -225,16 +227,18 @@ NUM_SUBJECTS = 50000          # Number of unique fingerprint subjects
 NUM_IMPRESSIONS = 10          # Impressions per subject (50000 * 10 = 500K)
 
 # Training hyperparameters
-NUM_EPOCHS = 10               # Fewer epochs needed with large dataset
-EMBEDDING_DIM = 256           # Dimension of the fixed-length representation
+NUM_EPOCHS = 10               # Upper limit; how many epochs a large set needs was not measured
+EMBEDDING_DIM = 256           # Values per branch (512 per print for variants with minutiae)
 
 # Learned alignment: "on" trains with the localization network, "off" without
 DEFAULT_LOCALIZATION = "on"
 
 # Image preprocessing
-BINARIZATION_THRESHOLD = 5.0  # Adjust based on your image quality
+# Despite its name this is not a threshold: it is the ridge width in pixels
+# that the binarisation (LazilyAllocatedBinarizer, a Gabor filter) assumes
+BINARIZATION_THRESHOLD = 5.0
 
-# Data augmentation - helps LocalizationNetwork learn robust alignment
+# Data augmentation: random rotation and shift of the training images
 POSE_AUGMENTATION = RandomPoseTransform(
     pad=0,
     angle_min=-30,            # Random rotation range (degrees)
@@ -348,7 +352,7 @@ DEFAULT_MAX_VALIDATION_SUBJECTS = 5000
 
 # Above this number of training subjects the script prints what grows with
 # the number of subjects (see "Above about one million subjects" in
-# TRAINING_PIPELINE_GUIDE.md)
+# docs/large-datasets.md)
 MANY_SUBJECTS = 1_000_000
 
 # File in --output_dir with the settings of the training
@@ -1007,7 +1011,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train DeepPrint on a large fingerprint dataset",
         epilog="See the docstring at the top of this script and "
-               "TRAINING_PIPELINE_GUIDE.md.",
+               "docs/training-guide.md.",
     )
     parser.add_argument("--dataset_dir", type=str, required=True,
                         help="Path to fingerprint images directory")
@@ -1245,7 +1249,7 @@ def main():
             f"measurement), so about {num_train_subjects * 10 / 1e6:,.0f} GB here, in "
             "every GPU process, and model.pyt grows with it. This script was never "
             "run at this size. See \"Above about one million subjects\" in "
-            "TRAINING_PIPELINE_GUIDE.md."
+            "docs/large-datasets.md."
         )
 
     print(f"\nCreated {len(training_ids):,} training identifiers")

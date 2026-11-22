@@ -1,3 +1,20 @@
+> **Note for this repository.** What follows is the original readme of the DET plotting code by Andreas
+> Nautsch, which is bundled here as `flx/visualization/det_curve_plotting/DET.py`. It is kept for its
+> attribution and licence notes. Three things in it do not apply here:
+>
+> - **Do not follow its "Install" section.** The module is installed with the `flx` package
+>   (`docs/installation.md`); it needs Python 3.11 or higher and imports `tikzplotlib`, not `matplotlib2tikz`.
+>   `tikzplotlib` is one of the optional tools. With the versions that are installed today (`tikzplotlib`
+>   0.10.1 with matplotlib 3.11.2) `import tikzplotlib` fails, and with it the import of this module and of
+>   `flx.visualization.plot_DET_curve`.
+> - In this repository the import is `from flx.visualization.det_curve_plotting.DET import DET`, not
+>   `from DET import DET`.
+> - The example images that the text refers to (`examples/...`) are not included.
+>
+> Two slips of the original text are corrected below, nothing else is changed: in the example for the axis
+> labels `self.x_label` and `self.y_label` now read `det.x_label` and `det.y_label`, and a missing quotation
+> mark in the last `<img>` tag is added.
+
 # Detection Error Tradeoff (DET) plots
 by Andreas Nautsch, Hochschule Darmstadt, 2018.
 
@@ -114,8 +131,8 @@ We use virtual environments in order to keep our system tidy.
 
   ```python
   det = DET()
-  self.x_label = 'False Alarm probability (in %)'
-  self.y_label = 'Miss probability (in %)'
+  det.x_label = 'False Alarm probability (in %)'
+  det.y_label = 'Miss probability (in %)'
   ```
 
 * DETs can be saved as: *pdf*, *png*, *tex*
@@ -211,7 +228,7 @@ The DET script will solely generate *tikzpicture* (i.e., without any LaTeX pream
 
 An edited LaTeX pdf, persisting LaTeX fonts and image quality, could look like:
 <br>
-<img src="examples/3systems-standalone-edited.png" alt="Edited LaTeX DET> 
+<img src="examples/3systems-standalone-edited.png" alt="Edited LaTeX DET"> 
 
 ## Inspired by
 > A. Nautsch, D. Meuwly, D. Ramos, J. Lindh, and C. Busch:

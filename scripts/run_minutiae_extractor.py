@@ -1,6 +1,14 @@
 """
-Run minutiae_extractor-main (modernised FingerFlow) on a directory of
-fingerprint images.
+Run the minutiae extractor (package fingerflow of the minutiae_extractor
+repository) on a directory of fingerprint images.
+
+Development tool for comparing minutiae extractors. It is NOT part of the
+training route; the route is scripts/extract_minutiae.py (see
+docs/training-guide.md). It looks for a copy of the minutiae_extractor
+repository in <repository>/minutiae_extractor-main (not part of this
+repository) and puts its src directory first on the Python path; --models_dir
+defaults to its models directory. This script was not run for the documents in
+docs/.
 
 Uses the Extractor of that package, i.e. MinutiaeNet (CoarseNet + FineNet),
 the image-based refinement of the minutia direction and ClassifyNet, which

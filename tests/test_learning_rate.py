@@ -39,7 +39,7 @@ def test_defaults_come_from_the_config_module(monkeypatch):
 
 def test_default_settings():
     # 0.025 diverged in the second step on real images; see "Choosing the
-    # learning rate" in TRAINING_PIPELINE_GUIDE.md for the measurements
+    # learning rate" in docs/measurements.md for the measurements
     lr = LearningRateConfig()
     assert lr.learning_rate == 0.0001
     assert lr.warmup_steps == 500

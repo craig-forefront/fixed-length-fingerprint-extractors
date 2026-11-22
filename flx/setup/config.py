@@ -5,7 +5,7 @@ INTERACTIVE_VIS = False
 # to the model parameters in every training step. The right value depends on
 # the data, the model variant and the batch size: find it with
 # scripts/find_learning_rate.py (see "Choosing the learning rate" in
-# TRAINING_PIPELINE_GUIDE.md). These values are only the defaults of
+# docs/tuning.md). These values are only the defaults of
 # flx.models.learning_rate.LearningRateConfig.
 
 # Learning rate after the warm-up. 0.0001 trained DeepPrint_TexMinu and
@@ -62,7 +62,7 @@ LOSS_WEIGHT_CROSS_ENTROPY = 1.0
 # about 30 times more gradient into the shared first layers than the cross
 # entropy (one batch of 8 images, DeepPrint_TexMinu, texture branch). Whether
 # a lower value gives better accuracy was not measured. See "Loss weights"
-# in TRAINING_PIPELINE_GUIDE.md.
+# in docs/tuning.md and in docs/measurements.md.
 LOSS_WEIGHT_CENTER = 8.0
 
 # Minutia map loss (variants with minutiae only): the squared difference
@@ -78,7 +78,7 @@ LOSS_WEIGHT_CENTER = 8.0
 # factor 0.3, which equals 0.3 / 98,304 = 0.00000305 here; with it the map
 # loss made up about 0.001 % of the gradient on these layers, so the minutia
 # maps hardly influenced what the shared layers learn. See "Loss weights" in
-# TRAINING_PIPELINE_GUIDE.md for the measurement and its limits.
+# docs/measurements.md for the measurement and its limits.
 LOSS_WEIGHT_MINUTIA_MAP = 0.095
 
 # --- Localization network (learned alignment, the Loc* variants) --------------

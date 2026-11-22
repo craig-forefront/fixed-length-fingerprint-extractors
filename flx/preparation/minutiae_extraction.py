@@ -17,8 +17,19 @@ imported when the first extractor is made.
     resampled to 500 pixels per inch (see sensor_normalization.py). x is the
     column and y the row (y pointing down). The angle is the direction of the
     minutia, the direction vector is (cos(angle), sin(angle)) in these axes.
-    The class index is -1 if the minutiae were not classified. Readers take
-    the number of minutiae from line 1 and ignore what follows the minutiae.
+    For a ridge ending it points back along the ridge, for a bifurcation into
+    the valley between the two branches (as in ISO 19794-2); it is between 0
+    and 2 pi.
+    The class index is the minutia type of ClassifyNet: 0 ending,
+    1 bifurcation, 2 fragment, 3 enclosure, 4 crossbar, 5 other; -1 if the
+    minutiae were not classified. DeepPrint does not read it.
+    direction_confidence (0 to 1) rates the direction only. It is NOT the
+    extractor's score: the score (how sure the extractor is that the point is
+    a minutia) is not written. Every minutia that the extractor returns with
+    its default settings is in the file, and the minutiae cannot be filtered
+    by score afterwards.
+    Readers take the number of minutiae from line 1 and ignore what follows
+    the minutiae.
 
     A .mnt file is written under a temporary name and renamed when it is
     complete, so a file with the name .mnt is always a finished one.
@@ -83,12 +94,12 @@ def write_mnt_file(
 
 # What scripts/extract_minutiae.py needs of the minutiae extractor
 EXTRACTOR_REQUIREMENT = (
-    "the fingerflow package of the minutiae_extractor repository in a revision "
-    "whose Extractor has the image_dpi option and accepts None for the "
-    "ClassifyNet and CoreNet paths: branch claude/serene-albattani-s6ehsj "
-    "(commit \"Make ClassifyNet and CoreNet optional in the Extractor\" or "
-    "later), or main once that branch is merged. Older checkouts and the "
-    "fingerflow release on PyPI do not work. See AIRGAP_INSTALLATION.md."
+    "the fingerflow package of the minutiae_extractor repository "
+    "(https://github.com/craig-forefront/minutiae_extractor), whose Extractor "
+    "has the image_dpi option and accepts None for the ClassifyNet and CoreNet "
+    "paths: its main branch, commit 420b6e5 (\"Merge pull request #3\") or "
+    "later. Older clones, the upstream repository and the fingerflow release "
+    "on PyPI do not work. See docs/installation.md."
 )
 
 

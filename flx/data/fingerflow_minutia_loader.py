@@ -1,5 +1,5 @@
 """
-Custom MinutiaMapLoader for minutiae extracted with the minutiae_extractor (FingerFlow).
+Custom MinutiaMapLoader for minutiae extracted with the minutiae extractor.
 
 This loader reads .mnt files created by scripts/extract_minutiae.py and converts
 them to minutia maps for DeepPrint training.
@@ -22,7 +22,12 @@ these axes. This is also what the SFingeMinutiaMapLoader returns, so the minutia
 maps of both loaders use the same layers for the same directions.
 
 Only x, y and the angle are used. In particular the minutiae are not filtered by
-their direction confidence.
+their direction confidence. The full description of the file format (class
+codes, what the fifth column is, and that the extractor's score is not in the
+file) is in the docstring of flx/preparation/minutiae_extraction.py.
+
+The classes are named after the Python package `fingerflow` of the
+minutiae_extractor repository, which scripts/extract_minutiae.py calls.
 """
 
 import os
