@@ -173,6 +173,70 @@ def test_reading_and_writing_a_table_without_pyarrow_say_how_to_install_it(tmp_p
     assert normalize_image_path("sensor_a/../sensor_b/4_1.png") == samples.image_path(0)
 
 
+def test_the_loaders_of_a_table_do_not_need_pyarrow():
+    """
+    flx/data/sample_table_loader.py serves a table that is in memory without
+    pyarrow; only reading one from its files needs it. The loaders need
+    torch, like everything in flx/data, so only pyarrow is blocked here, and
+    this one test is skipped where torch is not installed, as in the
+    environment of the minutiae extraction.
+    """
+    pytest.importorskip("torch")
+    code = (
+        "import sys\n"
+        "sys.modules['pyarrow'] = None\n"
+        "import json\n"
+        "import numpy as np\n"
+        "from flx.data.dataset import Identifier\n"
+        "from flx.data.sample_table_loader import (\n"
+        "    SampleTable, SampleTableImageLoader, SampleTableMinutiaMapLoader,\n"
+        ")\n"
+        "from flx.preparation.sample_table import SampleRow, SampleTableError, samples_from_rows\n"
+        "rows = []\n"
+        "for values in json.load(sys.stdin):\n"
+        "    if values['minutiae'] is not None:\n"
+        "        values['minutiae'] = np.array(values['minutiae'], np.float32).reshape(-1, 3)\n"
+        "    rows.append(SampleRow(**values))\n"
+        "table = SampleTable(samples_from_rows(rows), 'images')\n"
+        "images, minutiae = SampleTableImageLoader(table), SampleTableMinutiaMapLoader(table)\n"
+        "print(table.num_rows, table.subjects.tolist(), table.row(Identifier(16, 2)))\n"
+        "print(table.checksum)\n"
+        "locations, angles = minutiae.get_minutiae(Identifier(16, 2))\n"
+        "print(locations.shape, angles.tolist(), minutiae.get_frame_size(Identifier(16, 2)))\n"
+        "print([minutiae.get(Identifier(s, i))[1] for s, i in ((3, 0), (3, 1), (16, 2))])\n"
+        "try:\n"
+        "    images.get(Identifier(3, 1))\n"
+        "except FileNotFoundError as error:\n"
+        "    print(str(error)[:14], 'sensor_b/4_2.png' in str(error))\n"
+        "try:\n"
+        "    SampleTable.read('table', 'images')\n"
+        "except SampleTableError as error:\n"
+        "    print('needs the package pyarrow' in str(error))\n"
+        "print(sys.modules['pyarrow'])\n"
+    )
+    given = []
+    for row in rows():
+        minutiae = None if row.minutiae is None else row.minutiae.tolist()
+        given.append(dict(dataclasses.asdict(row), minutiae=minutiae))
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPOSITORY,
+        input=json.dumps(given),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "3 [3, 16] 2",
+        samples_checksum(samples_from_rows(rows())),
+        "(2, 2) [1.25, -0.5] (413, 637)",
+        "[0.0, 0.0, 1.0]",  # minutiae not known, an image without minutiae, two minutiae
+        "The image file True",
+        "True",
+        "None",  # pyarrow was blocked to the end
+    ]
+
+
 def test_the_requirement_of_pyarrow_is_the_same_wherever_it_is_stated():
     """pyproject.toml, requirements.txt and the message that says how to install it."""
     with open(join(REPOSITORY, "pyproject.toml"), "rb") as file:
