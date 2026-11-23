@@ -41,6 +41,7 @@ table is built and used is described in docs/sample-table.md.
 import os
 from typing import Iterable, Union
 
+import cv2
 import numpy as np
 import torch
 import torchvision.transforms.functional as VTF
@@ -55,7 +56,12 @@ from flx.preparation.sample_table import (
     samples_checksum,
     validate_samples,
 )
-from flx.preparation.sensor_normalization import RIDGES_DARK, RIDGES_LIGHT, SensorNormalizer
+from flx.preparation.sensor_normalization import (
+    RIDGES_DARK,
+    RIDGES_LIGHT,
+    ImageReadError,
+    SensorNormalizer,
+)
 
 # The script that writes tables, for the messages that say what to do
 _BUILDER = "scripts/build_sample_table.py"
@@ -67,6 +73,16 @@ _MAX_NORMALIZERS = 64
 
 # How many subjects a message names before it gives the number of the rest
 _MAX_NAMED = 5
+
+
+class UnreadableImageError(SampleTableError, ImageReadError):
+    """
+    An image file of a table for which OpenCV raised an error of its own. It
+    is an ImageReadError, the error of the preparation for a file that cannot
+    be read as an image, and a SampleTableError like the other errors of
+    SampleTableImageLoader.get whose message names the file, its row and what
+    to do.
+    """
 
 
 class SampleTable:
@@ -488,7 +504,9 @@ class SampleTableImageLoader(DataLoader):
         table has no such row, FileNotFoundError if the file is missing,
         SampleTableError if the file is not the one the row describes, and
         the ValueError of the preparation, with the file named, if the file
-        cannot be read as an image.
+        cannot be read as an image. Where OpenCV raises an error of its own
+        for such a file, that is an UnreadableImageError, which names the
+        row as well.
         """
         table = self._table
         samples = table.samples
@@ -519,6 +537,18 @@ class SampleTableImageLoader(DataLoader):
         except ValueError as error:
             # Name the file: the message of the preparation does not
             raise type(error)(f"{path}: {error}") from error
+        except cv2.error as error:
+            # For most files that are no image OpenCV returns nothing, and the
+            # preparation raises its ImageReadError. For some it raises an
+            # error of its own, which is no ValueError and names no file: a
+            # BMP file whose header states a width that OpenCV refuses is one.
+            raise UnreadableImageError(
+                f"{path}: Could not read the file as an image: OpenCV stopped with an error "
+                f"of its own ({' '.join(str(error).split())}). The sample table names the "
+                f"file as {table.describe_row(row)}, and {table.image_dir} was given as the "
+                "directory of its images. Put the file back as it was when the table was "
+                f"built, or build the table again from the files as they are now ({_BUILDER})."
+            ) from error
 
         source = (int(samples.source_width[row]), int(samples.source_height[row]))
         if (info.source_width, info.source_height) != source:

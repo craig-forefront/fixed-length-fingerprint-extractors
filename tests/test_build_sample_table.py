@@ -2290,6 +2290,45 @@ def test_check_reads_a_table_that_this_script_did_not_build(builder, monkeypatch
         assert line in lines, line
 
 
+def test_the_note_about_metadata_counts_the_files_of_all_resolutions(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """
+    A table with more resolutions than the summary lists. The note about the
+    files that took the resolution of their own metadata, although the build
+    was given an assumption, counts all of them, also those whose resolution
+    is not among the listed ones, and it stands behind the line about the
+    resolutions that are not listed.
+    """
+    rows = ["path,ppi"]
+    for subject in range(1, 26):
+        for impression in (1, 2):
+            name = f"{subject}_{impression}.png"
+            if subject <= 23:
+                # A resolution of its own for each of 23 subjects, by a manifest
+                save(tmp_path / "images" / name, ppi=None)
+                rows.append(f"{name},{400 + subject}")
+            else:
+                # Two subjects whose files state 300 and 600 ppi themselves
+                save(tmp_path / "images" / name, ppi=300 * (subject - 23))
+    (tmp_path / "resolutions.csv").write_text("\n".join(rows) + "\n")
+    options = ["--ppi_manifest", tmp_path / "resolutions.csv", "--assume_ppi", 500]
+    assert build(builder, monkeypatch, tmp_path, *options) == 0
+    built = printed(capsys)
+    assert run(builder, monkeypatch, "--check", tmp_path / "table") == 0
+    for lines in (built, printed(capsys)):
+        first = lines.index("Resolution of the 50 image file(s) of the table:")
+        # Twenty of the 25 resolutions, which have two files each, are listed
+        assert lines[first + 1] == "2 401 ppi from manifest (resampled to 500 ppi)"
+        assert lines[first + 20] == "2 420 ppi from manifest (resampled to 500 ppi)"
+        assert lines[first + 21] == "10 with 5 further resolutions"
+        assert lines[first + 22].startswith(
+            "Note: 4 file(s) took the resolution from their own metadata, not from "
+            "--assume_ppi 500."
+        )
+        assert lines[first + 23] == "Ridge polarity:"
+
+
 # ---------------------------------------------------------------------------
 # The command line
 # ---------------------------------------------------------------------------

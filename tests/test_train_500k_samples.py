@@ -14,21 +14,26 @@ of the prepared image.
 
 The other tests are about what only a table can describe (other names,
 uneven numbers of impressions, gaps, missing minutiae), about every start
-that is refused, about continuing a training, and about using the model.
+that is refused, about continuing a training, about a run without a table,
+which prints what it printed before, and about using the model.
 
 The tables are built by scripts/build_sample_table.py through its main(), so
 that the way from the builder to the training is what is tested; where a
 test needs rows that the builder does not make, they are written with
-samples_from_rows and write_part. The .mnt files are written as text, and
-both scripts are imported from their files: no test module is imported.
+samples_from_rows and write_part, or made in memory without any file
+(table_of) where a function is tested that reads none. The .mnt files are
+written as text, and both scripts are imported from their files: no test
+module is imported.
 """
 
 import dataclasses
 import importlib.util
 import json
+import multiprocessing
 import os
 import random
 import shutil
+import subprocess
 import sys
 from os.path import abspath, dirname, exists, join
 from typing import NamedTuple, Optional
@@ -102,6 +107,18 @@ def builder():
 def default_batch_size():
     yield
     torch_helpers.set_training_batch_size(torch_helpers.DEFAULT_TRAINING_BATCH_SIZE)
+
+
+@pytest.fixture(autouse=True)
+def forked_workers(monkeypatch):
+    """
+    A start from a table warns where worker processes are not forked, and
+    whether they are is a default of the Python and of the system that run
+    the tests. Every test tells the script that they are forked, so that what
+    it says about the output of a start holds wherever it runs; the test of
+    that warning tells the script what it needs itself.
+    """
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=False: "fork")
 
 
 class _FakeExtractor:
@@ -218,6 +235,18 @@ def printed(capsys) -> list:
     return [" ".join(line.split()) for line in capsys.readouterr().out.splitlines()]
 
 
+def minutiae_of(images: int, filled: int, empty: int = 0, null: int = 0) -> str:
+    """
+    What the start says about the minutiae that the table holds for the
+    training images: how many of them have minutiae, an empty list, and null.
+    """
+    assert filled + empty + null == images
+    return (
+        f"of the {images} training images: {filled} with minutiae, {empty} with an empty list "
+        f"(an image without minutiae), {null} with null (minutiae not known)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Files: prints and .mnt files
 # ---------------------------------------------------------------------------
@@ -261,8 +290,9 @@ def write_mnt_file(path, minutiae, size: tuple, comment: Optional[str] = None) -
 def write_small_prints(image_dir, names, ppi=500, size=(48, 64)) -> None:
     """
     Small prints (width, height) under the given names below the image
-    directory, each another image. They are too small for the binariser:
-    for the tests that do not fetch a sample from the datasets.
+    directory, each another image. They are small, so that the tests are
+    quick, and they have the pixels that the binariser of the training needs
+    (LARGEST_BINARISER_KERNEL per side).
     """
     for number, name in enumerate(names):
         save(image_dir / name, ridge_image(size[1], size[0], slant=0.05 * (number + 1)), ppi)
@@ -762,6 +792,78 @@ def test_a_training_from_a_table_is_the_training_from_the_directories(
 
     assert_same_samples(fetch(table_fit), expected)
     assert_same_samples(fetch(table_fit, seed=1), other_poses)
+
+
+def test_the_pairs_of_many_held_out_subjects_are_those_of_a_training_from_the_directories(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    main() in both modes on a grid with more held-out subjects than the ten
+    that every subject is compared with: the other subjects of a subject are
+    drawn then, and they are drawn alike. (The comparison above holds out two
+    subjects, where each has one other subject and nothing is drawn.)
+    """
+    write_small_prints(tmp_path / "images", grid(30, 3))
+    assert build(builder, tmp_path) == 0
+    drawn = {}
+    for seed in (42, 7):
+        options = ["--validation_split", 0.5, "--validation_seed", seed]
+        directory = run_directory(
+            train_500k, monkeypatch, tmp_path, "--num_subjects", 30, "--num_impressions", 3,
+            *options, output=f"directory {seed}",
+        )
+        capsys.readouterr()
+        table = run_table(train_500k, monkeypatch, tmp_path, *options, output=f"table {seed}")
+        lines = printed(capsys)
+        (fit,), (table_fit,) = directory.fits, table.fits
+        held_out = numbers(fit["validation_fingerprints"].ids)
+        assert numbers(table_fit["validation_fingerprints"].ids) == held_out
+        assert fit["validation_fingerprints"].num_subjects == 15 and len(held_out) == 45
+        expected = pairs(fit["validation_benchmark"])
+        assert pairs(table_fit["validation_benchmark"]) == expected
+        # The three pairs of the three impressions of each of the 15 subjects,
+        # and for each of them a pair with ten of the fourteen others
+        mated = [pair for pair in expected if pair[0][0] == pair[1][0]]
+        assert (len(mated), len(expected) - len(mated)) == (45, 150)
+        for subject in {number[0] for number in held_out}:
+            others = [second[0] for first, second in expected[45:] if first[0] == subject]
+            assert len(others) == len(set(others)) == 10 and subject not in others
+        # The start counts the pairs that the training is given
+        assert (
+            "Validation set: 45 images of 15 subjects (3 to 3 per subject), compared after "
+            "every epoch in 45 mated and 150 non-mated pairs." in lines
+        )
+        drawn[seed] = (held_out, expected)
+    # Control: both the subjects and the pairs depend on the seed
+    assert drawn[42][0] != drawn[7][0] and drawn[42][1] != drawn[7][1]
+
+
+def test_a_training_from_a_table_makes_the_datasets_of_one_from_the_directories_and_no_more(
+    train_500k, grid_set, tmp_path, monkeypatch
+):
+    """
+    A Dataset compares its identifiers with all those of its loader when it
+    is made, which takes time in a large set. Table mode makes the four that
+    directory mode makes: images, minutia maps, labels and validation images.
+    """
+    made = []
+
+    class Counted(train_500k.Dataset):
+        def __init__(self, data_loader, *args, **kwargs):
+            made.append(type(data_loader).__name__)
+            super().__init__(data_loader, *args, **kwargs)
+
+    monkeypatch.setattr(train_500k, "Dataset", Counted)
+    split = ["--validation_split", 0.5]
+    run_directory(
+        train_500k, monkeypatch, grid_set, "--num_subjects", 4, "--num_impressions", 2, *split,
+        "--minutiae_dir", grid_set / "minutiae", output=tmp_path / "directory",
+    )
+    of_directory_mode = list(made)
+    made.clear()
+    run_table(train_500k, monkeypatch, grid_set, *split, output=tmp_path / "table")
+    assert len(made) == len(of_directory_mode) == 4, (made, of_directory_mode)
+    assert made == of_directory_mode
 
 
 # ---------------------------------------------------------------------------
@@ -1272,9 +1374,17 @@ def test_a_training_stored_without_a_table_continues_without_one_and_not_with_on
     settings = write_training_of_main(tmp_path)
     capsys.readouterr()
 
-    # With a table of the very same files it is another training
+    # With a table of the very same files it is another training. The
+    # refusal says so in words, and then it lists the values as ever.
     message = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *NO_VALIDATION)
-    assert "holds a training with other settings" in message
+    assert message.startswith(
+        f"ERROR: The training in {tmp_path / 'model'} read no sample table: it found the images "
+        f"by the names of their files. This command reads the sample table {tmp_path / 'table'} "
+        "(--samples). That is another training, also if the table describes the same files. To "
+        "continue the stored training, leave --samples out and give the options of its first "
+        f"start. {tmp_path / 'model'} holds a training with other settings, and the same "
+        "--output_dir continues that training: num_subjects: stored 4, now null"
+    )
     assert "num_subjects: stored 4, now null" in message
     assert "num_impressions: stored 2, now null" in message
     table = SampleTable.read(str(tmp_path / "table"), str(tmp_path / "images"))
@@ -1290,6 +1400,26 @@ def test_a_training_stored_without_a_table_continues_without_one_and_not_with_on
     assert "Training complete! 1 epoch(s) trained in this run, 3 in the log." in output
     assert stored_settings(tmp_path) == dict(settings, num_epochs=3)
 
+    # And where no table has a part in a refusal, its message is the one of
+    # check_training_settings, with nothing in front of it, and the stored
+    # settings are read once, as they always were
+    read = []
+    load = json.load
+    monkeypatch.setattr(json, "load", lambda file: read.append(file.name) or load(file))
+    message = refused(
+        run_directory, train_500k, monkeypatch, capsys, tmp_path, *GRID_OPTIONS,
+        "--num_epochs", 3, "--batch_size", 16,
+    )
+    monkeypatch.setattr(json, "load", load)
+    assert read == [str(tmp_path / "model" / "training_settings.json")]
+    with pytest.raises(train_500k.SettingsChangedError) as error:
+        train_500k.check_training_settings(
+            str(tmp_path / "model"), dict(settings, num_epochs=3, batch_size=16)
+        )
+    assert message == " ".join(f"ERROR: {error.value}".split())
+    assert message.startswith(f"ERROR: {tmp_path / 'model'} holds a training with other settings")
+    assert "batch_size: stored 64, now 16" in message and "sample table" not in message
+
 
 def test_a_training_before_the_settings_file_existed_is_refused_with_a_table(
     train_500k, builder, tmp_path, monkeypatch, capsys
@@ -1300,6 +1430,7 @@ def test_a_training_before_the_settings_file_existed_is_refused_with_a_table(
     write_training_of_main(tmp_path)
     (tmp_path / "model" / "training_settings.json").unlink()
     message = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *NO_VALIDATION)
+    assert message.startswith(f"ERROR: The training in {tmp_path / 'model'} read no sample table")
     assert "preparation: stored " in message and '"samples_sha256"' in message
     assert "data_preparation.json)" in message
 
@@ -1346,6 +1477,13 @@ def test_a_training_from_a_table_continues_with_the_same_rows_and_with_nothing_e
         run_directory, train_500k, monkeypatch, capsys, tmp_path, *GRID_OPTIONS, "--num_epochs", 5,
         *("--minutiae_dir", tmp_path / "minutiae"),
     )
+    assert message.startswith(
+        f"ERROR: The training in {tmp_path / 'model'} read its training set from a sample table "
+        f"(--samples {tmp_path / 'again'}), and this command reads none: it finds the images by "
+        "the names of their files. That is another training, also on the same files. To "
+        "continue the stored training, give --samples with a table of the same rows. "
+        f"{tmp_path / 'model'} holds a training with other settings"
+    )
     assert "num_subjects: stored null, now 4" in message
     assert "num_impressions: stored null, now 2" in message
     assert f'preparation: stored {json.dumps(stored["preparation"], sort_keys=True)}' in message
@@ -1361,7 +1499,16 @@ def test_a_training_from_a_table_continues_with_the_same_rows_and_with_nothing_e
         run_table, train_500k, monkeypatch, capsys, tmp_path, *split, "--num_epochs", 5,
         table="smaller",
     )
-    # The message shows both checksums and the numbers of rows and subjects
+    # The message says that the table is another one, and shows both
+    # checksums and the numbers of rows and subjects
+    assert message.startswith(
+        f"ERROR: The training in {tmp_path / 'model'} read a sample table with other rows than "
+        f"the table of this command ({tmp_path / 'smaller'}): 8 rows of 4 subjects then, 7 rows "
+        "of 4 subjects now, and the checksums of the rows (samples_sha256) differ. A training "
+        "continues only with a table that holds the same rows; where the table lies and how "
+        f"its files are split does not count. {tmp_path / 'model'} holds a training with other "
+        "settings, and the same --output_dir continues that training: preparation: stored "
+    )
     assert "variant" not in message and "num_subjects" not in message
     assert f'"samples_rows": 8, "samples_sha256": "{table.checksum}"' in message
     assert f'"samples_rows": 7, "samples_sha256": "{smaller.checksum}"' in message
@@ -1386,6 +1533,7 @@ def test_a_training_from_a_table_continues_with_the_same_rows_and_with_nothing_e
     )
     assert message.count(": stored ") == 1 and "preparation: stored " in message
     assert f'"samples_rows": 8, "samples_sha256": "{one_value.checksum}"' in message
+    assert "8 rows of 4 subjects then, 8 rows of 4 subjects now, and the checksums" in message
 
     # ... and one whose rows hold other values for the same files: here the
     # table that was built without the minutiae (the variant is another, too)
@@ -1398,6 +1546,28 @@ def test_a_training_from_a_table_continues_with_the_same_rows_and_with_nothing_e
     assert 'variant: stored "LocTexMinu", now "LocTex"' in message
     assert f'"samples_rows": 8, "samples_sha256": "{without.checksum}"' in message
     assert without.checksum != table.checksum
+    assert f"with other rows than the table of this command ({tmp_path / 'without'})" in message
+
+    # The same table and another setting: the refusal is not about the table
+    message = refused(
+        run_table, train_500k, monkeypatch, capsys, tmp_path, *split, "--num_epochs", 5,
+        "--batch_size", 16, table="again",
+    )
+    assert message.startswith(f"ERROR: {tmp_path / 'model'} holds a training with other settings")
+    assert "batch_size: stored 64, now 16" in message and "sample table" not in message
+
+    # A training from a table whose settings file is gone is known by its
+    # data_preparation.json, which holds the table as well
+    kept = (tmp_path / "model" / "training_settings.json").read_bytes()
+    (tmp_path / "model" / "training_settings.json").unlink()
+    message = refused(
+        run_directory, train_500k, monkeypatch, capsys, tmp_path, *GRID_OPTIONS, "--num_epochs", 5,
+    )
+    assert message.startswith(
+        f"ERROR: The training in {tmp_path / 'model'} read its training set from a sample "
+        "table, and this command reads none: "
+    )
+    (tmp_path / "model" / "training_settings.json").write_bytes(kept)
 
     # It can be continued all the same, at the user's own risk
     run_table(
@@ -1456,6 +1626,20 @@ def test_table_mode_stores_the_settings_of_directory_mode_with_the_table_in_thei
         assert json.load(file) == dict(table["preparation"], canvas_size=512, ppi_manifest=None)
 
 
+def test_the_paths_are_stored_as_the_command_gave_them(train_500k, builder, tmp_path, monkeypatch):
+    """Paths that are given from the working directory are stored as they were given."""
+    write_grid(tmp_path)
+    assert build(builder, tmp_path) == 0
+    monkeypatch.chdir(tmp_path)
+    fake = run(
+        train_500k, monkeypatch, "--dataset_dir", "images", "--samples", "table",
+        "--output_dir", "model", "--num_epochs", 2, *NO_VALIDATION,
+    )
+    assert len(fake.fits) == 1
+    stored = stored_settings(tmp_path)
+    assert (stored["dataset_dir"], stored["samples"]) == ("images", "table")
+
+
 # ---------------------------------------------------------------------------
 # What only a table can describe
 # ---------------------------------------------------------------------------
@@ -1489,10 +1673,23 @@ def uneven_impressions() -> dict:
     return impressions
 
 
+def uneven_minutiae(number: int) -> list:
+    """
+    The minutiae (x, y, angle) of the file with this number among those of
+    UNEVEN: one to three of them, at other places in every file.
+    """
+    return [
+        (4.0 + 2 * number + 5 * index, 6.5 + 3 * number + 4 * index, 0.25 * (number + index + 1))
+        for index in range(1 + number % 3)
+    ]
+
+
 def write_uneven(builder, root, *options) -> SampleTable:
     """The files of UNEVEN, their .mnt files and their sample list, and the table root/table."""
     write_small_prints(root / "images", UNEVEN)
-    write_small_minutiae(root / "minutiae", UNEVEN)
+    for number, name in enumerate(UNEVEN):
+        mnt_path = root / "minutiae" / (os.path.splitext(name)[0] + ".mnt")
+        write_mnt_file(mnt_path, uneven_minutiae(number), (48, 64))
     lines = ["path,subject,impression"]
     lines += [f"{path},{subject},{impression}" for path, (subject, impression) in UNEVEN.items()]
     (root / "files.csv").write_text("\n".join(lines) + "\n")
@@ -1504,18 +1701,13 @@ def write_uneven(builder, root, *options) -> SampleTable:
     return SampleTable.read(str(root / "table"), str(root / "images"))
 
 
-def identity(image: torch.Tensor) -> torch.Tensor:
-    return image
-
-
 def test_other_file_names_gaps_and_uneven_numbers_of_impressions_train(
     train_500k, builder, tmp_path, monkeypatch, capsys
 ):
     table = write_uneven(builder, tmp_path)
     capsys.readouterr()
-    # The prints are too small for the binariser, and a random shift would
-    # move their minutiae out of them: this test needs neither
-    monkeypatch.setattr(train_500k, "LazilyAllocatedBinarizer", lambda _: identity)
+    # A random shift would move the minutiae of these small prints out of
+    # them, and this test does not need it
     monkeypatch.setattr(train_500k, "POSE_AUGMENTATION", None)
     fake = run_table(train_500k, monkeypatch, tmp_path, "--validation_split", 0.34)
     lines = printed(capsys)
@@ -1559,6 +1751,26 @@ def test_other_file_names_gaps_and_uneven_numbers_of_impressions_train(
         assert fit["fingerprints"].get(Identifier(*number)).shape == (1, INPUT_SIZE, INPUT_SIZE)
         minutia_map, weight = fit["minutia_maps"].get(Identifier(*number))
         assert weight == 1.0 and minutia_map.any()
+    # The minutiae of every training image are those of the .mnt file of its
+    # own file, as the loader of .mnt files would hand them out, ...
+    of_the_table = fit["minutia_maps"].data_loader._minutia_maps
+    assert type(of_the_table) is SampleTableMinutiaMapLoader
+    served = []
+    for number, (name, numbers_of_file) in enumerate(UNEVEN.items()):
+        if numbers_of_file not in training_numbers:
+            continue
+        in_file, angles_in_file, (width, height) = read_mnt_file(
+            str(tmp_path / "minutiae" / (os.path.splitext(name)[0] + ".mnt"))
+        )
+        assert in_file.tolist() == [[x, y] for x, y, _ in uneven_minutiae(number)], name
+        expected = transform_to_input_size(in_file, original_height=height, original_width=width)
+        locations, angles = of_the_table.get_minutiae(Identifier(*numbers_of_file))
+        assert locations.dtype == expected.dtype and np.array_equal(locations, expected), name
+        assert angles.dtype == angles_in_file.dtype and np.array_equal(angles, angles_in_file)
+        served.append(locations.tolist())
+    # ... and they are other minutiae for every file
+    assert len(served) == len(training_numbers)
+    assert not any(a == b for index, a in enumerate(served) for b in served[:index])
     for number in validation_numbers:
         image = fit["validation_fingerprints"].get(Identifier(*number))
         assert image.shape == (1, INPUT_SIZE, INPUT_SIZE)
@@ -1581,10 +1793,8 @@ def test_other_file_names_gaps_and_uneven_numbers_of_impressions_train(
         f"Total images: 14 ({len(training_numbers)} for training, "
         f"{len(validation_numbers)} for validation)" in lines
     )
-    assert (
-        f"Minutiae: from the sample table, for all {len(training_numbers)} training images"
-        in lines
-    )
+    count = len(training_numbers)
+    assert f"Minutiae: from the sample table, {minutiae_of(count, filled=count)}" in lines
     assert (
         f"Validation set: {len(validation_numbers)} images of 2 subjects ({held_counts[0]} to "
         f"{held_counts[1]} per subject), compared after every epoch in {mated} mated and 2 "
@@ -1633,6 +1843,33 @@ def test_rows_of_other_image_formats_are_loaded_as_their_rows_say(
     # Control: the four files are four different images
     images = [files.get(identifier) for identifier in fit["fingerprints"].ids]
     assert not any(torch.equal(images[0], other) for other in images[1:])
+
+
+def test_a_file_is_prepared_as_its_row_says_and_not_as_its_own_metadata_say(
+    train_500k, builder, tmp_path, monkeypatch
+):
+    """
+    Resolution and polarity come from the table. Files that state 500 ppi
+    themselves, in a table that was built with --ppi 1000, which overrules
+    what a file states: the training halves them, as the build did.
+    """
+    write_small_prints(tmp_path / "images", GRID, ppi=500, size=(96, 128))
+    assert build(builder, tmp_path, "--ppi", 1000) == 0
+    table = SampleTable.read(str(tmp_path / "table"), str(tmp_path / "images"))
+    assert table.samples.ppi.tolist() == [1000.0] * 8
+    assert set(zip(table.samples.width.tolist(), table.samples.height.tolist())) == {(48, 64)}
+    # Control: left to themselves, the files are taken at the 500 ppi they state
+    _, info = SensorNormalizer().load(str(tmp_path / "images" / GRID[0]))
+    assert (info.ppi, info.ppi_origin, info.width, info.height) == (500.0, "metadata", 96, 128)
+
+    fake = run_table(train_500k, monkeypatch, tmp_path, "--validation_split", 0.5)
+    (fit,) = fake.fits
+    for dataset in ("fingerprints", "validation_fingerprints"):
+        files = fit[dataset].data_loader._images
+        assert type(files) is SampleTableImageLoader
+        assert len(fit[dataset].ids) == 4
+        for identifier in fit[dataset].ids:
+            assert files.get(identifier).shape == (1, 64, 48), str(identifier)
 
 
 # ---------------------------------------------------------------------------
@@ -1720,9 +1957,9 @@ def test_all_options_that_the_table_replaces_are_named_and_without_them_the_run_
 @pytest.mark.parametrize(
     "options",
     [
-        ["--allow_missing_minutiae"],
+        ["--tolerate_missing_minutiae"],
         ["--ignore_minutiae"],
-        ["--ignore_minutiae", "--allow_missing_minutiae"],
+        ["--ignore_minutiae", "--tolerate_missing_minutiae"],
     ],
 )
 def test_the_options_of_a_table_are_refused_without_a_table(
@@ -1761,9 +1998,9 @@ def test_the_help_states_the_defaults_of_the_new_options_and_of_the_old_ones(
             option = line.split()[0]
         if option is not None:
             entries[option] = entries.get(option, "") + " " + " ".join(line.split())
-    for option in ("--samples", "--allow_missing_minutiae", "--ignore_minutiae"):
+    for option in ("--samples", "--tolerate_missing_minutiae", "--ignore_minutiae"):
         assert "(default: " in entries[option], option
-    assert "--samples" in entries["--allow_missing_minutiae"]
+    assert "--samples" in entries["--tolerate_missing_minutiae"]
     assert "--samples" in entries["--ignore_minutiae"]
     assert "Number of subjects (default: 50000)" in help_text
     assert "Impressions per subject (default: 10)" in help_text
@@ -1820,7 +2057,7 @@ def test_the_options_of_the_two_modes_are_told_apart_for_any_parser_with_these_o
         parser.add_argument("--num_subjects", type=int, default=7)
         parser.add_argument("--minutiae_dir", default=None)
         parser.add_argument("--ridges", default="auto")
-        parser.add_argument("--allow_missing_minutiae", action="store_true")
+        parser.add_argument("--tolerate_missing_minutiae", action="store_true")
         parser.add_argument("--max_subjects", type=int, default=2000)
         withheld = train_500k.withhold_defaults(parser)
         # Only the options that a table replaces, and of them those with a default
@@ -1836,18 +2073,91 @@ def test_the_options_of_the_two_modes_are_told_apart_for_any_parser_with_these_o
     args = parse("--num_subjects", 3, "--ridges", "auto", "--minutiae_dir", "m")
     assert (args.num_subjects, args.ridges, args.minutiae_dir) == (3, "auto", "m")
     # With a table the replaced options stay None, and the others keep their values
-    args = parse("--samples", "table", "--allow_missing_minutiae", "--max_subjects", 5)
+    args = parse("--samples", "table", "--tolerate_missing_minutiae", "--max_subjects", 5)
     assert (args.num_subjects, args.ridges, args.minutiae_dir) == (None, None, None)
-    assert args.allow_missing_minutiae and args.max_subjects == 5
+    assert args.tolerate_missing_minutiae and args.max_subjects == 5
     for arguments in (
         ["--samples", "table", "--num_subjects", 7],
         ["--samples", "table", "--ridges", "auto"],
         ["--samples", "table", "--minutiae_dir", "m"],
-        ["--allow_missing_minutiae"],
+        ["--tolerate_missing_minutiae"],
     ):
         with pytest.raises(SystemExit) as stop:
             parse(*arguments)
         assert stop.value.code == 2, arguments
+
+
+def test_every_beginning_of_an_option_that_selected_it_before_tables_still_selects_it(
+    train_500k, monkeypatch, capsys
+):
+    """
+    argparse takes every beginning of an option that no other option begins
+    with. So a new option whose name begins like an old one takes beginnings
+    away from it: the option for rows without minutiae had a name that began
+    with --allow_ at first, and with it --allow was refused as ambiguous,
+    which had selected --allow_changed_settings. Every beginning of an option
+    that the script had before it knew sample tables, and that selected that
+    option then, is put through the parser of main() here.
+    """
+    import argparse
+
+    class Taken(Exception):
+        pass
+
+    def take(parser, *args, **kwargs):
+        raise Taken(parser)
+
+    # The parser as main() builds it, taken where main() would use it
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(argparse.ArgumentParser, "parse_args", take)
+        with pytest.raises(Taken) as taken:
+            train_500k.main()
+    (parser,) = taken.value.args
+    actions = {
+        option: action
+        for option, action in parser._option_string_actions.items()
+        if option.startswith("--")
+    }
+    of_tables = {"--samples"} | {f"--{name}" for name in train_500k.OPTIONS_OF_SAMPLES}
+    assert of_tables == {"--samples", "--tolerate_missing_minutiae", "--ignore_minutiae"}
+    before = sorted(set(actions) - of_tables)
+    assert of_tables < set(actions) and "--allow_changed_settings" in before
+    # An option that is added to the script later is not one of before: leave
+    # it out of `before` like the options of tables, so that this test says
+    # whether its name takes a beginning away from one of these
+    assert len(before) == 28, f"The script had 28 options before tables, found: {before}"
+
+    selected = {}
+    for option in before:
+        action = actions[option]
+        for length in range(len("--") + 1, len(option) + 1):
+            beginning = option[:length]
+            others = [other for other in before if other.startswith(beginning) and other != option]
+            if beginning in others or (others and beginning != option):
+                continue  # it was another option, or ambiguous
+            arguments = ["--dataset_dir", "images", "--output_dir", "model", beginning]
+            if action.nargs != 0:
+                # A value that is not the default of the option
+                arguments.append(str(action.choices[-1]) if action.choices else "7")
+            try:
+                args = parser.parse_args(arguments)
+            except SystemExit as stop:
+                # --help ends the program with 0, an error of the options with 2
+                assert option == "--help" and stop.code == 0, f"{beginning} for {option}"
+            else:
+                value = getattr(args, action.dest)
+                assert value is not None and value != action.default, f"{beginning} for {option}"
+            selected[beginning] = option
+    capsys.readouterr()
+    # Among them the beginnings that the first name of the new option took away
+    for beginning in ("--al", "--all", "--allo", "--allow", "--allow_"):
+        assert selected[beginning] == "--allow_changed_settings"
+    assert len(selected) > 200 and set(before) <= set(selected)
+    # Control: such a beginning is refused when two options begin with it
+    with pytest.raises(SystemExit) as stop:
+        parser.parse_args(["--dataset_dir", "images", "--output_dir", "model", "--a"])
+    assert stop.value.code == 2
+    assert "ambiguous option: --a could match" in capsys.readouterr().err
 
 
 def test_missing_image_files_are_named_with_their_number(
@@ -2029,6 +2339,295 @@ def test_a_file_that_changed_after_the_table_was_built_stops_the_run_before_the_
     assert len(run_table(train_500k, monkeypatch, tmp_path, *split).fits) == 1
 
 
+def test_the_files_of_held_out_subjects_are_checked_at_the_start_like_the_others(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    The images of the held-out subjects are first read when the first epoch
+    is over. The checks of the start are about every row of the table, not
+    about the training rows: a missing file of a held-out subject is found
+    in the listing of its directory, and a changed one is among the images
+    that are loaded.
+    """
+    write_grid(tmp_path)
+    assert build(builder, tmp_path) == 0
+    split = ["--validation_split", 0.5]
+    assert train_500k.split_subjects(4, 0.5)[1] == [1, 2]
+
+    # Two images are loaded at the start: the first and the last one of the
+    # table, of subjects that train. So only the listing can miss a file.
+    monkeypatch.setattr(train_500k, "IMAGES_LOADED_AT_THE_START", 2)
+    missing = tmp_path / "images" / "2_2.png"
+    kept = missing.read_bytes()
+    missing.unlink()
+    message = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *split)
+    assert message.startswith(
+        "ERROR: 1 of the 8 image files that the sample table names are missing below "
+        f"{tmp_path / 'images'} (--dataset_dir). The first ones: '2_2.png' (subject 1, "
+        "impression 1). "
+    )
+    missing.write_bytes(kept)
+    capsys.readouterr()
+    assert len(run_table(train_500k, monkeypatch, tmp_path, *split, output="two").fits) == 1
+    assert "Loaded 2 image files spread over the table" in capsys.readouterr().out
+
+    # Four images: rows 0, 2, 4 and 7, of which rows 2 and 4 belong to the
+    # held-out subjects. The file of row 4 is written again as another image.
+    monkeypatch.setattr(train_500k, "IMAGES_LOADED_AT_THE_START", 4)
+    changed = tmp_path / "images" / "3_1.png"
+    save(changed, ridge_image(80, 60), 500)
+    message = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *split)
+    assert message.startswith(
+        f"ERROR: {changed} is not the file that its row of the sample table describes: "
+    )
+    assert "'3_1.png' (subject 2, impression 0)" in message
+
+
+def test_a_file_for_which_opencv_raises_an_error_stops_the_run_with_the_file_named(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    For most files that are no image OpenCV returns nothing, and the loader
+    says that the file could not be read. For some it raises an error of its
+    own, which names no file: here a BMP file whose header was damaged after
+    the table was built and states a width that OpenCV refuses. Such a file
+    stops the start like every file that is not the one of its row, and the
+    training gets the same message if it is the first to load the file.
+    """
+    names = ["1_1.bmp", "1_2.bmp", "2_1.bmp", "2_2.bmp"]
+    write_small_prints(tmp_path / "images", names)
+    assert build(builder, tmp_path) == 0
+    damaged = tmp_path / "images" / "2_1.bmp"
+    content = bytearray(damaged.read_bytes())
+    content[18:22] = (2**30).to_bytes(4, "little")  # the width in the header of a BMP file
+    damaged.write_bytes(bytes(content))
+
+    message = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *NO_VALIDATION)
+    assert message.startswith(
+        f"ERROR: {damaged}: Could not read the file as an image: OpenCV stopped with an error "
+        "of its own (OpenCV("
+    )
+    assert (
+        f"The sample table names the file as '2_1.bmp' (subject 1, impression 0), and "
+        f"{tmp_path / 'images'} was given as the directory of its images. Put the file back as "
+        "it was when the table was built, or build the table again from the files as they are "
+        "now (scripts/build_sample_table.py)." in message
+    )
+    monkeypatch.setenv("RANK", "1")
+    assert refused(
+        run_table, train_500k, monkeypatch, capsys, tmp_path, *NO_VALIDATION
+    ) == message
+    monkeypatch.delenv("RANK")
+
+    # Where the file is not among the images of the start (the first and the
+    # last of these four), the training is the first to load it
+    monkeypatch.setattr(train_500k, "IMAGES_LOADED_AT_THE_START", 2)
+    fake = run_table(train_500k, monkeypatch, tmp_path, *NO_VALIDATION)
+    (fit,) = fake.fits
+    assert fit["fingerprints"].get(Identifier(0, 0)).shape == (1, INPUT_SIZE, INPUT_SIZE)
+    with pytest.raises(ValueError) as error:
+        fit["fingerprints"].get(Identifier(1, 0))
+    assert f"ERROR: {error.value}" == message
+
+
+def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reason(
+    train_500k, builder, tmp_path, monkeypatch
+):
+    """
+    A table holds the paths of its images as text. A process whose file names
+    are ASCII (the C locale, where Python is told not to take UTF-8 in its
+    place) cannot hand a path with other characters to the file system. The
+    start is refused with the encoding and with what to do: no traceback for
+    a directory with such a name, and a file with such a name is not called
+    missing.
+    """
+    sets = {
+        "in a directory": ["größe/1_1.png", "größe/1_2.png", "größe/2_1.png", "größe/2_2.png"],
+        "in the image directory": ["指紋 a.png", "指紋 b.png", "c.png", "d.png"],
+    }
+    assert sys.getfilesystemencoding() == "utf-8"  # this process can write these names
+    for name, paths in sets.items():
+        root = tmp_path / name
+        write_small_prints(root / "images", paths)
+        lines = ["path,subject,impression"]
+        lines += [f"{path},{index // 2},{index % 2}" for index, path in enumerate(paths)]
+        (root / "files.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assert build(builder, root, "--sample_list", root / "files.csv") == 0
+        # Control: in this process, whose file names are UTF-8, the set trains
+        assert len(run_table(train_500k, monkeypatch, root, *NO_VALIDATION).fits) == 1
+
+    # The child process. It runs main() on both sets if its file names are
+    # ASCII; if not, it has nothing to show and ends before it loads the
+    # script. It cannot train: a start that is not refused gets an error in
+    # the place of a model.
+    code = (
+        "import importlib.util\n"
+        "import sys\n"
+        "print(sys.getfilesystemencoding())\n"
+        "if sys.getfilesystemencoding() != 'ascii':\n"
+        "    sys.exit()\n"
+        "spec = importlib.util.spec_from_file_location('train_500k', 'scripts/train_500k.py')\n"
+        "train_500k = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(train_500k)\n"
+        "def no_model(*args, **kwargs):\n"
+        "    raise AssertionError('The start was not refused: the script asked for a model')\n"
+        "for name in dir(train_500k):\n"
+        "    if name.startswith('get_DeepPrint_'):\n"
+        "        setattr(train_500k, name, no_model)\n"
+        "for root in sys.argv[1:]:\n"
+        "    sys.argv = ['train_500k.py', '--dataset_dir', root + '/images', '--samples',\n"
+        "                root + '/table', '--output_dir', root + '/refused',\n"
+        "                '--validation_split', '0']\n"
+        "    try:\n"
+        "        train_500k.main()\n"
+        "    except SystemExit as stop:\n"
+        "        print('stopped with the status', stop.code)\n"
+        "    print('END OF A RUN', file=sys.stderr)\n"
+    )
+
+    def child(**environment) -> subprocess.CompletedProcess:
+        """The child process, with these variables added to the environment of this process."""
+        return subprocess.run(
+            [sys.executable, "-c", code, *(str(tmp_path / name) for name in sets)],
+            cwd=dirname(SCRIPTS_DIR),
+            env=dict(os.environ, **environment),
+            capture_output=True,
+            text=True,
+        )
+
+    # Control: a child whose file names are UTF-8 says so and does nothing
+    # else. That is what the skip below costs where the C locale gives such
+    # names.
+    control = child(PYTHONUTF8="1")
+    assert (control.returncode, control.stdout) == (0, "utf-8\n"), control.stderr
+
+    result = child(LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+    assert result.returncode == 0, result.stderr
+    output = result.stdout.splitlines()
+    if output[0] == "utf-8":
+        pytest.skip("The file names of the C locale are UTF-8 on this system")
+    assert output[0] == "ascii"
+    assert output.count("stopped with the status 2") == 2 and "Traceback" not in result.stderr
+    # What the process cannot express is written with escapes in its messages
+    in_messages = ["'gr\\xf6\\xdfe/1_1.png'", "'\\u6307\\u7d0b a.png'"]
+    messages = [" ".join(message.split()) for message in result.stderr.split("END OF A RUN")]
+    for name, named, message in zip(sets, in_messages, messages):
+        # What comes before the message is not of the script (a warning of a package)
+        assert message[message.index("ERROR: ") :].startswith(
+            f"ERROR: The image file {named} (subject 0, impression 0) of the sample table "
+            f"cannot be looked for below {tmp_path / name / 'images'}: this process writes the "
+            "names of files in the encoding ascii, which cannot express the path ('ascii' codec "
+        ), name
+        assert message.endswith(
+            "Start the script in an environment whose file names are UTF-8, for example with "
+            "LC_ALL=C.UTF-8 or with PYTHONUTF8=1."
+        ), name
+        assert not exists(tmp_path / name / "refused")
+
+
+def test_images_that_are_too_small_for_the_binariser_stop_the_run_with_their_rows_named(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    The binariser of the training raises an error for an image that has
+    fewer pixels in width or in height than its largest filter: when the
+    training loads the image, and for an image of a held-out subject when
+    the first epoch is over. The table holds the size of every prepared
+    image, so the start names such rows of both sets.
+    """
+    limit = LARGEST_BINARISER_KERNEL
+    write_grid(tmp_path)
+    # Subjects 1 and 2 (from 0) are held out of the four. A print of a subject
+    # that trains, like the others but stated at 600 ppi: too narrow when it
+    # is prepared. An image of a held-out subject that is too low. And one
+    # that has just the pixels that are needed.
+    assert train_500k.split_subjects(4, 0.5)[1] == [1, 2]
+    write_small_prints(tmp_path / "images", ["1_2.png"], ppi=600)
+    save(tmp_path / "images" / "3_1.png", ridge_image(limit - 1, 300), 500)
+    save(tmp_path / "images" / "4_2.png", ridge_image(limit, limit), 500)
+    assert build(builder, tmp_path) == 0
+    table = SampleTable.read(str(tmp_path / "table"), str(tmp_path / "images"))
+    sizes = dict(zip(numbers(table.identifiers), zip(table.samples.width, table.samples.height)))
+    assert sizes[(0, 0)] == (48, 64) and sizes[(0, 1)] == (limit - 1, 53)
+    assert sizes[(2, 0)] == (300, limit - 1) and sizes[(3, 1)] == (limit, limit)
+    split = ["--validation_split", 0.5]
+
+    for rank in ("0", "1"):
+        monkeypatch.setenv("RANK", rank)
+        message = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *split)
+        assert message.startswith(
+            "ERROR: 2 of the 8 images of the sample table are too small for the binarisation "
+            f"of the training, which needs {limit} pixels in width and in height of the image "
+            "prepared at 500 ppi. The first ones: '1_2.png' (subject 0, impression 1); "
+            "'3_1.png' (subject 2, impression 0). For an empty image of "
+            f"{limit - 1}x{limit - 1} pixels the binarisation stops with: "
+        )
+        assert "Check the resolution of these files" in message
+        assert "(scripts/build_sample_table.py)." in message
+    monkeypatch.delenv("RANK")
+
+    # For some rows of a table, as a run needs it that uses some of its subjects
+    from flx.preparation.sample_table import SampleTableError
+
+    train_500k.check_table_image_sizes(table, table.rows_of([1, 3]))
+    with pytest.raises(SampleTableError) as error:
+        train_500k.check_table_image_sizes(table, table.rows_of([2, 0]))
+    assert str(error.value).startswith(
+        "2 of the 4 images that are needed of the sample table are too small for the "
+        f"binarisation of the training, which needs {limit} pixels in width and in height of "
+        "the image prepared at 500 ppi. The first ones: '3_1.png' (subject 2, impression 0); "
+        "'1_2.png' (subject 0, impression 1). "
+    )
+    # Where the binariser takes none of the sizes of the rows, all are too small
+    tiny = dataclasses.replace(
+        table.samples,
+        width=np.full(8, 9, dtype=np.int32),
+        height=np.arange(10, 18, dtype=np.int32),
+    )
+    with pytest.raises(SampleTableError) as error:
+        train_500k.check_table_image_sizes(SampleTable(tiny, "images", validate=False))
+    assert str(error.value).startswith(
+        "8 of the 8 images of the sample table are too small for the binarisation of the "
+        "training, which needs more than 9 pixels in width and in height"
+    )
+
+    # Control: this is what the training would get for these images, and an
+    # image that has just the pixels that are needed is binarised
+    monkeypatch.setattr(train_500k, "check_table_image_sizes", lambda table, rows=None: None)
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split)
+    (fit,) = fake.fits
+    for dataset, number in (("fingerprints", (0, 1)), ("validation_fingerprints", (2, 0))):
+        with pytest.raises(RuntimeError):
+            fit[dataset].get(Identifier(*number))
+    assert fit["fingerprints"].get(Identifier(3, 1)).shape == (1, INPUT_SIZE, INPUT_SIZE)
+    assert fit["fingerprints"].get(Identifier(0, 0)).shape == (1, INPUT_SIZE, INPUT_SIZE)
+
+
+def test_an_empty_text_in_the_place_of_the_table_is_an_error_of_the_options(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys
+):
+    """As a variable of the shell gives it that is not set: --samples "$TABLE"."""
+
+    def run_with_an_empty_text(train_500k, monkeypatch, root, *options, output, fake):
+        return run(
+            train_500k, monkeypatch, "--dataset_dir", root / "images", "--samples", "",
+            "--output_dir", output, *options, fake=fake,
+        )
+
+    for options in ([], ["--num_subjects", 4, "--tolerate_missing_minutiae"]):
+        message = refused(
+            run_with_an_empty_text, train_500k, monkeypatch, capsys, grid_set, *options,
+            output=tmp_path / "model",
+        )
+        assert message.endswith(
+            "train_500k.py: error: --samples was given an empty text, where the directory of a "
+            "sample table belongs (a variable of the shell that is not set gives that). Give "
+            "the directory of the table, or leave --samples out to find the images by the "
+            "names of their files."
+        )
+    assert not exists(tmp_path / "model")
+
+
 def test_the_images_that_are_loaded_at_the_start_are_spread_over_the_table(train_500k):
     class Loader:
         """Keeps which rows it is asked for."""
@@ -2188,17 +2787,25 @@ def test_training_images_without_minutiae_stop_the_run_unless_they_are_allowed(
     )
     assert "build_failures.txt" in message
     assert "build the table again (scripts/build_sample_table.py)" in message
-    assert "or pass --allow_missing_minutiae: these images then train without a minutia map" in (
-        message
+    assert (
+        "or pass --tolerate_missing_minutiae: these images then train without a minutia map"
+        in message
     )
     assert "--ignore_minutiae trains the texture-only variant instead." in message
+    # As that message says: without the minutiae nothing is missing
+    capsys.readouterr()
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split, "--ignore_minutiae", output="tex")
+    assert [variant for variant, _ in fake.built] == ["LocTex"]
+    assert (
+        "Minutiae: not used (--ignore_minutiae); the sample table holds them, "
+        + minutiae_of(8, filled=6, null=2)
+    ) in printed(capsys)
 
     # With the option the run trains, and exactly these two images have the
     # weight 0 and a map of zeros
-    monkeypatch.setattr(train_500k, "LazilyAllocatedBinarizer", lambda _: identity)
     monkeypatch.setattr(train_500k, "POSE_AUGMENTATION", None)
     capsys.readouterr()
-    fake = run_table(train_500k, monkeypatch, tmp_path, *split, "--allow_missing_minutiae")
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split, "--tolerate_missing_minutiae")
     lines = printed(capsys)
     (fit,) = fake.fits
     assert [variant for variant, _ in fake.built] == ["LocTexMinu"]
@@ -2209,14 +2816,11 @@ def test_training_images_without_minutiae_stop_the_run_unless_they_are_allowed(
         known = (identifier.subject, identifier.impression) not in without
         assert weight == (1.0 if known else 0.0), str(identifier)
         assert minutia_map.shape == (6, 128, 128) and bool(minutia_map.any()) == known
-    assert (
-        "Minutiae: from the sample table, for 6 of the 8 training images; it holds none "
-        "(null) for the other 2" in lines
-    )
+    assert f"Minutiae: from the sample table, {minutiae_of(8, filled=6, null=2)}" in lines
     assert (
         "Note: training images without minutiae in the sample table: 2 of 8. They train "
-        "without a minutia map (--allow_missing_minutiae), with weight 0 in the minutia map "
-        "loss, and count in the other parts of the loss as every image does." in lines
+        "without a minutia map (--tolerate_missing_minutiae), with weight 0 in the minutia "
+        "map loss, and count in the other parts of the loss as every image does." in lines
     )
     # The start says what the build of the table recorded about these files
     assert (
@@ -2243,14 +2847,31 @@ def test_training_images_without_minutiae_stop_the_run_unless_they_are_allowed(
     )
     assert numbers(fake.fits[0]["minutia_maps"].ids) == [(0, 0), (0, 1), (3, 0), (3, 1)]
     lines = printed(capsys)
-    assert "Minutiae: from the sample table, for all 4 training images" in lines
-    assert not any("--allow_missing_minutiae" in line for line in lines)
+    assert f"Minutiae: from the sample table, {minutiae_of(4, filled=4)}" in lines
+    assert not any("--tolerate_missing_minutiae" in line for line in lines)
     # Control: when these subjects train, their images stop the run
     message = refused(
         run_table, train_500k, monkeypatch, capsys, tmp_path, *split, table="held",
         output="all train",
     )
     assert "for 2 of the 8 training images" in message and "'2_1.png'" in message
+
+    # Rows without minutiae in both sets: the refusal counts and names those
+    # of the training set, and not those of the held-out subjects
+    (tmp_path / "minutiae" / "4_2.mnt").unlink()
+    assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae", table="both") == 1
+    both = SampleTable.read(str(tmp_path / "both"), str(tmp_path / "images"))
+    assert numbers(both.identifiers[row] for row in both.rows_without_minutiae()) == [
+        (1, 0), (2, 1), (3, 1),
+    ]
+    message = refused(
+        run_table, train_500k, monkeypatch, capsys, tmp_path, "--validation_split", 0.5,
+        table="both", output="both",
+    )
+    assert message.startswith(
+        "ERROR: The sample table holds no minutiae (null) for 1 of the 4 training images. "
+        "The first ones: '4_2.png' (subject 3, impression 1). "
+    )
 
 
 def test_the_start_says_how_many_files_failed_when_the_table_was_built(
@@ -2263,7 +2884,7 @@ def test_the_start_says_how_many_files_failed_when_the_table_was_built(
     assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 1
     capsys.readouterr()
     fake = run_table(
-        train_500k, monkeypatch, tmp_path, "--validation_split", 0, "--allow_missing_minutiae"
+        train_500k, monkeypatch, tmp_path, "--validation_split", 0, "--tolerate_missing_minutiae"
     )
     assert len(fake.fits[0]["fingerprints"]) == 8
     lines = printed(capsys)
@@ -2308,7 +2929,9 @@ def test_an_image_without_minutiae_is_not_an_image_whose_minutiae_are_unknown(
     """
     A .mnt file that holds no minutiae gives a row with an empty list: the
     image has none, and that is known. Such rows need no permission, and a
-    table of nothing else still trains the minutia branch.
+    table of nothing else still trains the minutia branch. But no image has a
+    minutia map then, and the start says so: its header counts the rows with
+    minutiae, with an empty list and with null, and it warns.
     """
     write_grid(tmp_path)
     for name in GRID:
@@ -2318,14 +2941,69 @@ def test_an_image_without_minutiae_is_not_an_image_whose_minutiae_are_unknown(
     assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 0
     table = SampleTable.read(str(tmp_path / "table"), str(tmp_path / "images"))
     assert table.samples.minutiae_known.all() and len(table.samples.minutiae) == 0
-    monkeypatch.setattr(train_500k, "LazilyAllocatedBinarizer", lambda _: identity)
-    fake = run_table(train_500k, monkeypatch, tmp_path, "--validation_split", 0)
+    split = ["--validation_split", 0]
+    capsys.readouterr()
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split)
     assert [variant for variant, _ in fake.built] == ["LocTexMinu"]
-    assert "Minutiae: from the sample table, for all 8 training images" in printed(capsys)
+    lines = printed(capsys)
+    assert f"Minutiae: from the sample table, {minutiae_of(8, filled=0, empty=8)}" in lines
+    assert [line for line in lines if "WARNING" in line] == [
+        "WARNING: the minutia branch is trained, but no training image has a minutia: of the 8 "
+        "training images, the sample table holds an empty list for 8 and null for 0. Such an "
+        "image has the weight 0 in the minutia map loss, so no image counts in that part of "
+        "the loss. If the images have minutiae, extract them and build the table again "
+        "(scripts/build_sample_table.py); --ignore_minutiae trains the texture-only variant "
+        "instead."
+    ]
     (fit,) = fake.fits
     for identifier in fit["minutia_maps"].ids:
         fit["fingerprints"].get(identifier)
         assert fit["minutia_maps"].get(identifier)[1] == 0.0
+    # The texture-only variant, as the warning says, and nothing to warn about
+    capsys.readouterr()
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split, "--ignore_minutiae", output="tex")
+    assert [variant for variant, _ in fake.built] == ["LocTex"]
+    lines = printed(capsys)
+    assert (
+        "Minutiae: not used (--ignore_minutiae); the sample table holds them, "
+        + minutiae_of(8, filled=0, empty=8)
+    ) in lines
+    assert not any("WARNING" in line for line in lines)
+
+    # One image with minutiae among them, and one whose minutiae are not known
+    write_small_minutiae(tmp_path / "minutiae", ["3_1.png"])
+    (tmp_path / "minutiae" / "1_2.mnt").unlink()
+    assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae", table="three") == 1
+    capsys.readouterr()
+    monkeypatch.setattr(train_500k, "POSE_AUGMENTATION", None)
+    fake = run_table(
+        train_500k, monkeypatch, tmp_path, *split, "--tolerate_missing_minutiae", table="three",
+        output="three",
+    )
+    lines = printed(capsys)
+    assert (
+        f"Minutiae: from the sample table, {minutiae_of(8, filled=1, empty=6, null=1)}" in lines
+    )
+    assert not any("WARNING" in line for line in lines)
+    (fit,) = fake.fits
+    weights = {}
+    for identifier in fit["minutia_maps"].ids:
+        fit["fingerprints"].get(identifier)
+        _, weight = fit["minutia_maps"].get(identifier)
+        weights[(identifier.subject, identifier.impression)] = weight
+    assert [number for number, weight in weights.items() if weight == 1.0] == [(2, 0)]
+    assert set(weights.values()) == {0.0, 1.0} and len(weights) == 8
+    # Without that one image no training image has a minutia, with whatever
+    # is known about the others: the warning counts both kinds
+    (tmp_path / "minutiae" / "3_1.mnt").write_text("0\n48 64\n")
+    assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae", table="two") == 1
+    capsys.readouterr()
+    run_table(
+        train_500k, monkeypatch, tmp_path, *split, "--tolerate_missing_minutiae", table="two",
+        output="two",
+    )
+    (warning,) = [line for line in printed(capsys) if "WARNING" in line]
+    assert "the sample table holds an empty list for 7 and null for 1. " in warning
 
 
 def test_the_texture_only_variant_is_trained_on_request_and_from_a_table_without_minutiae(
@@ -2362,7 +3040,11 @@ def test_the_texture_only_variant_is_trained_on_request_and_from_a_table_without
     assert [variant for variant, _ in control.built] == ["LocTexMinu"]
     assert stored_settings(grid_set, tmp_path / "with")["loss_weights"]["minutia_map"] is not None
     lines = texture_only(grid_set, "--ignore_minutiae", output=tmp_path / "ignored")
-    assert "Minutiae: not used (--ignore_minutiae)" in lines
+    assert (
+        "Minutiae: not used (--ignore_minutiae); the sample table holds them, of the 8 training "
+        "images: 8 with minutiae, 0 with an empty list (an image without minutiae), 0 with null "
+        "(minutiae not known)" in lines
+    )
     # With --localization off the other texture-only variant
     capsys.readouterr()
     fake = run_table(
@@ -2374,11 +3056,58 @@ def test_the_texture_only_variant_is_trained_on_request_and_from_a_table_without
     # A table that was built without minutiae: the start says that it holds none
     write_grid(tmp_path)
     assert build(builder, tmp_path) == 0
-    expected = "Minutiae: none: the sample table holds no minutiae for the training images"
+    expected = (
+        "Minutiae: none: the sample table holds no minutiae for the training images (null for "
+        "all 8)"
+    )
     assert expected in texture_only(tmp_path, output="none")
     # Nothing is missing in such a training, with whatever option
-    assert expected in texture_only(tmp_path, "--allow_missing_minutiae", output="allowed")
+    assert expected in texture_only(tmp_path, "--tolerate_missing_minutiae", output="allowed")
     assert expected in texture_only(tmp_path, "--ignore_minutiae", output="nothing to ignore")
+
+
+def test_the_variant_follows_from_the_minutiae_of_the_training_images_alone(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    The minutia branch is trained if the table holds minutiae for TRAINING
+    images. A table that holds them for the images of held-out subjects only
+    trains the texture-only variant, and nothing is missing in it.
+    """
+    write_grid(tmp_path, minutiae=True)
+    held_out = train_500k.split_subjects(4, 0.5)[1]
+    assert held_out == [1, 2]
+    # Only the files of the held-out subjects (2_* and 3_*) keep their .mnt files
+    for name in ("1_1.mnt", "1_2.mnt", "4_1.mnt", "4_2.mnt"):
+        (tmp_path / "minutiae" / name).unlink()
+    assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae") == 1
+    table = SampleTable.read(str(tmp_path / "table"), str(tmp_path / "images"))
+    assert numbers(table.identifiers[row] for row in table.rows_without_minutiae()) == [
+        (0, 0), (0, 1), (3, 0), (3, 1),
+    ]
+    capsys.readouterr()
+    fake = run_table(train_500k, monkeypatch, tmp_path, "--validation_split", 0.5)
+    lines = printed(capsys)
+    assert [variant for variant, _ in fake.built] == ["LocTex"]
+    assert stored_settings(tmp_path)["variant"] == "LocTex"
+    assert (
+        "Minutiae: none: the sample table holds no minutiae for the training images (null for "
+        "all 4)" in lines
+    )
+    # The three training datasets have the identifiers of the training images:
+    # the training zips them, also the placeholder of the minutia maps
+    (fit,) = fake.fits
+    assert numbers(fit["fingerprints"].ids) == [(0, 0), (0, 1), (3, 0), (3, 1)]
+    assert numbers(fit["minutia_maps"].ids) == numbers(fit["fingerprints"].ids)
+    assert numbers(fit["labels"].ids) == numbers(fit["fingerprints"].ids)
+    assert numbers(fit["validation_fingerprints"].ids) == [(1, 0), (1, 1), (2, 0), (2, 1)]
+    # Control: when all subjects train, the minutia branch is trained, and the
+    # images without minutiae stop the run
+    message = refused(
+        run_table, train_500k, monkeypatch, capsys, tmp_path, "--validation_split", 0,
+        output="all train",
+    )
+    assert "holds no minutiae (null) for 4 of the 8 training images" in message
 
 
 # ---------------------------------------------------------------------------
@@ -2471,27 +3200,98 @@ def test_the_resolution_of_the_training_images_is_counted_from_the_table(
     ]
 
 
-def test_many_resolutions_are_summed_up_after_the_most_frequent_ones(train_500k):
-    table = table_of((subject, 0) for subject in range(60))
-    samples = table.samples
-    # 30 rows at 500 ppi, the others at a resolution of their own each
-    ppi = np.where(np.arange(60) < 30, 500.0, 600.0 + np.arange(60))
+def table_with_resolutions(ppi: np.ndarray) -> SampleTable:
+    """A table of one row per resolution, each row of a subject of its own; no files."""
+    table = table_of((subject, 0) for subject in range(len(ppi)))
     sizes = [resampled_size(48, 64, value) for value in ppi.tolist()]
-    table = SampleTable(
+    return SampleTable(
         dataclasses.replace(
-            samples,
+            table.samples,
             ppi=ppi,
             width=np.array([size[0] for size in sizes], dtype=np.int32),
             height=np.array([size[1] for size in sizes], dtype=np.int32),
         ),
         "images",
     )
+
+
+def test_many_resolutions_are_summed_up_after_the_most_frequent_ones(train_500k):
+    # 30 rows at 500 ppi, the others at a resolution of their own each
+    ppi = np.where(np.arange(60) < 30, 500.0, 600.0 + np.arange(60))
+    table = table_with_resolutions(ppi)
     lines = described_resolutions(train_500k, table, np.arange(60))
     assert lines[0] == "30 500 ppi from --ppi"
     assert lines[1] == "1 630 ppi from --ppi (resampled to 500 ppi)"
     assert lines[20] == "11 with 11 further resolutions"
     assert lines[21] == "Ridge polarity of these images, as the files hold it:"
     assert lines[22] == "60 dark ridges, from --ridges"
+
+    # The most frequent resolutions are listed, whatever their text is: here
+    # the one whose text comes last, 900 ppi
+    ppi = np.where(np.arange(60) < 30, 900.0, 600.0 + np.arange(60))
+    lines = described_resolutions(train_500k, table_with_resolutions(ppi), np.arange(60))
+    assert lines[0] == "30 900 ppi from --ppi (resampled to 500 ppi)"
+    assert lines[1] == "1 630 ppi from --ppi (resampled to 500 ppi)"
+    assert lines[20] == "11 with 11 further resolutions"
+
+    # Resolutions that are printed alike (the text has six digits) are one line
+    ppi = np.array([500.0000001, 500.0000002, 500.0000002, 1000.0])
+    assert len(np.unique(ppi)) == 3
+    lines = described_resolutions(train_500k, table_with_resolutions(ppi), np.arange(4))
+    assert lines[:3] == [
+        "3 500 ppi from --ppi",
+        "1 1000 ppi from --ppi (resampled to 500 ppi)",
+        "Ridge polarity of these images, as the files hold it:",
+    ]
+
+
+def test_the_note_about_metadata_counts_the_files_of_all_resolutions(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    Files that state a resolution themselves, in a set that was built with an
+    assumption for the others: the note about them counts all of them, also
+    where the training images have more resolutions than the start lists and
+    theirs are not among the listed ones, and it stands behind the line about
+    the resolutions that are not listed. It is the note that a run without a
+    table prints about the same files.
+    """
+    images = tmp_path / "images"
+    manifest = ["path,ppi"]
+    for subject in range(1, 26):
+        names = [f"{subject}_1.png", f"{subject}_2.png"]
+        if subject <= 23:
+            # A resolution of its own for each of 23 subjects, by a manifest
+            write_small_prints(images, names, ppi=None)
+            manifest += [f"{name},{400 + subject}" for name in names]
+        else:
+            # Two subjects whose files state 300 and 600 ppi themselves
+            write_small_prints(images, names, ppi=300 * (subject - 23), size=(96, 128))
+    (tmp_path / "resolutions.csv").write_text("\n".join(manifest) + "\n")
+    options = ["--ppi_manifest", tmp_path / "resolutions.csv", "--assume_ppi", 500]
+    assert build(builder, tmp_path, *options) == 0
+    capsys.readouterr()
+    run_table(train_500k, monkeypatch, tmp_path, *NO_VALIDATION)
+    lines = printed(capsys)
+    first = lines.index("Resolution of the 50 training images, as the sample table states it:")
+    # Twenty of the 25 resolutions, which have two files each, are listed, ...
+    assert lines[first + 1] == "2 401 ppi from manifest (resampled to 500 ppi)"
+    assert lines[first + 20] == "2 420 ppi from manifest (resampled to 500 ppi)"
+    # ... the others are one line, among them the two that files state, ...
+    assert lines[first + 21] == "10 with 5 further resolutions"
+    # ... and the note counts the four files that state a resolution
+    note = lines[first + 22]
+    assert note.startswith(
+        "Note: 4 file(s) took the resolution from their own metadata, not from --assume_ppi 500."
+    )
+    assert lines[first + 23] == "Ridge polarity of these images, as the files hold it:"
+    # A run without a table says the same about these files
+    capsys.readouterr()
+    run_directory(
+        train_500k, monkeypatch, tmp_path, "--num_subjects", 25, "--num_impressions", 2,
+        *NO_VALIDATION, *options, output="directory",
+    )
+    assert note in printed(capsys)
 
 
 def test_the_start_says_what_the_validation_set_holds_and_warns_when_it_is_large(
@@ -2628,6 +3428,42 @@ def test_a_validation_set_that_cannot_be_made_is_an_error_of_the_options(
     assert len(fake.fits[0]["fingerprints"]) == 5 and fake.fits[0]["validation_benchmark"] is None
 
 
+@pytest.mark.parametrize(
+    "options, says",
+    [
+        (["--loss_weight_center", -1], "error: The loss weight center must be a number"),
+        (["--learning_rate", 0], "error: learning_rate must be above 0"),
+        (["--warmup_steps", -1], "error: warmup_steps must not be negative"),
+    ],
+)
+def test_a_loss_weight_or_a_learning_rate_that_is_refused_is_an_error_of_the_options(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys, options, says
+):
+    """Table mode reads the options that both modes take as a run without a table reads them."""
+    message = refused(
+        run_table, train_500k, monkeypatch, capsys, grid_set, *NO_VALIDATION, *options,
+        output=tmp_path / "model",
+    )
+    assert says in message
+    without_a_table = refused(
+        run_directory, train_500k, monkeypatch, capsys, grid_set, *GRID_OPTIONS, *options,
+        output=tmp_path / "model",
+    )
+    assert message == without_a_table
+
+
+def test_the_impressions_per_training_subject_are_given_with_their_median(
+    train_500k, builder, tmp_path, monkeypatch, capsys
+):
+    names = ["1_1", "2_1", "3_1", "3_2", "3_3", "3_4", "3_5", "3_6"]
+    write_small_prints(tmp_path / "images", [name + ".png" for name in names])
+    assert build(builder, tmp_path) == 0
+    capsys.readouterr()
+    run_table(train_500k, monkeypatch, tmp_path, *NO_VALIDATION)
+    # One, one and six impressions: the median is 1, and their mean is 2.67
+    assert "Impressions: 1 to 6 per training subject (median 1)" in printed(capsys)
+
+
 def test_the_summary_of_the_start_is_that_of_directory_mode_with_the_table_in_it(
     train_500k, grid_set, tmp_path, monkeypatch, capsys
 ):
@@ -2650,9 +3486,10 @@ def test_the_summary_of_the_start_is_that_of_directory_mode_with_the_table_in_it
         "=" * 60,
         f"Samples: {grid_set / 'table'} (8 rows, 4 subjects)",
         f"Dataset: {grid_set / 'images'}",
-        "Minutiae: from the sample table, for all 4 training images",
-        "Images: prepared as the sample table states for every file: resampled from its "
-        "resolution to 500 ppi, dark ridges",
+        "Minutiae: from the sample table, of the 4 training images: 4 with minutiae, 0 with an "
+        "empty list (an image without minutiae), 0 with null (minutiae not known)",
+        "Images: resampled to 500 ppi and brought to dark ridges, each file from the "
+        "resolution and the ridge polarity that the sample table states for it",
         "Canvas: 512x512 pixels at 500 ppi for every image",
         "Batch size: 16 images per step and GPU",
         "Subjects: 4 total",
@@ -2754,10 +3591,10 @@ def test_only_the_first_process_prints_the_start_and_every_process_checks(
 ):
     """
     With several GPUs the script runs once per GPU. Every process reads the
-    table and stops by itself if files are missing; what the start prints
-    comes from the first process only.
+    table, makes every check and stops by itself if the start is refused;
+    what the start prints comes from the first process only.
     """
-    write_grid(tmp_path)
+    write_grid(tmp_path, minutiae=True)
     assert build(builder, tmp_path) == 0
     options = ["--validation_split", 0.5]
     monkeypatch.setenv("RANK", "1")
@@ -2781,32 +3618,214 @@ def test_only_the_first_process_prints_the_start_and_every_process_checks(
     run_table(train_500k, monkeypatch, tmp_path, *options, output="first")
     assert len(printed(capsys)) > 40 and exists(tmp_path / "first" / "training_settings.json")
 
-    # A file that changed is found by the first process, which loads files
-    # at the start; the others go on to the training
-    kept = (tmp_path / "images" / "1_1.png").read_bytes()
-    save(tmp_path / "images" / "1_1.png", ridge_image(80, 60), 500)
-    refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *options, output="changed")
-    monkeypatch.setenv("RANK", "1")
-    assert len(run_table(train_500k, monkeypatch, tmp_path, *options, output="changed").fits) == 1
-    (tmp_path / "images" / "1_1.png").write_bytes(kept)
+    def refusal(rank: str, table: str = "table") -> str:
+        """
+        The message with which the process of this rank refuses the start. It
+        builds no model and makes no --output_dir, and a process that is not
+        the first prints nothing but the message.
+        """
+        monkeypatch.setenv("RANK", rank)
+        fake = _FakeExtractor()
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as stop:
+            run_table(
+                train_500k, monkeypatch, tmp_path, *options, table=table, output="refused",
+                fake=fake,
+            )
+        output = capsys.readouterr()
+        assert stop.value.code == 2 and fake.fits == [] and fake.built == []
+        assert not exists(tmp_path / "refused")
+        assert (output.out == "") == (rank != "0")
+        return " ".join(output.err.split())
 
-    # A file that is missing stops every process, with the reason
+    # A file that changed stops every process: each one loads the images of
+    # the start, so none goes on to the training of a start that is refused
+    changed = tmp_path / "images" / "1_1.png"
+    kept = changed.read_bytes()
+    save(changed, ridge_image(80, 60), 500)
+    for rank in ("1", "0"):
+        assert refusal(rank).startswith(f"ERROR: {changed} is not the file that its row")
+    changed.write_bytes(kept)
+
+    # So does a training image without minutiae. Subjects 1 and 2 are held
+    # out of these four, so the first file is a training image.
+    (tmp_path / "minutiae" / "1_1.mnt").unlink()
+    assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae", table="null") == 1
+    for rank in ("1", "0"):
+        assert refusal(rank, table="null").startswith(
+            "ERROR: The sample table holds no minutiae (null) for 1 of the 4 training images. "
+            "The first ones: '1_1.png' (subject 0, impression 0). "
+        )
+
+    # So does a file that is missing, with the reason
     (tmp_path / "images" / "4_1.png").unlink()
     for rank in ("1", "0"):
-        monkeypatch.setenv("RANK", rank)
-        message = refused(
-            run_table, train_500k, monkeypatch, capsys, tmp_path, *options, output="missing"
-        )
+        message = refusal(rank)
         assert message.startswith("ERROR: 1 of the 8 image files that the sample table names")
         assert "'4_1.png' (subject 3, impression 0)" in message
     # So does a table that cannot be read
+    for rank in ("1", "0"):
+        assert refusal(rank, table="no table").startswith(
+            f"ERROR: {tmp_path / 'no table'} cannot be read"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Without a table: what the script printed before it knew sample tables
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_without_a_table_prints_what_it_printed_before_there_were_tables(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys
+):
+    """
+    Every line of a run without --samples, as the script printed it before it
+    knew sample tables: of the first process, from its first line to its
+    last, of a process that is not the first, which says nothing after the
+    training, and of a start that finds the training finished. A table adds
+    no line where none is used, and takes none away.
+    """
+    from flx.models.deep_print_loss import LossWeights
+    from flx.models.learning_rate import LearningRateConfig
+
+    images, minutiae = grid_set / "images", grid_set / "minutiae"
+    options = ["--num_subjects", 4, "--num_impressions", 2, "--validation_split", 0.5]
+    options += ["--minutiae_dir", minutiae]
+    rate, weights = LearningRateConfig(), LossWeights()
+    gpus = torch.cuda.device_count()
+
+    def start(model, first_process: bool) -> list:
+        """The lines from the first one to the one that says that the training starts."""
+        set_of_all_files = "Created IdentifierSet with 4 subjects and a total of 8 samples."
+        lines = [
+            "Created IdentifierSet with 2 subjects and a total of 4 samples.",
+            "Created IdentifierSet with 2 subjects and a total of 4 samples.",
+            "=" * 60,
+            "Training DeepPrint with Learned Alignment (LocTexMinu (texture + minutiae))",
+            "=" * 60,
+            f"Dataset:      {images}",
+            f"Minutiae:     {minutiae}",
+            "Images:       resampled to 500 ppi; resolution from file metadata, else the file "
+            "fails; ridges dark",
+            "Canvas:       square of the longer side of each image",
+            f"Batch size:   {torch_helpers.DEFAULT_TRAINING_BATCH_SIZE} images per step and GPU",
+            "Subjects:     4 total",
+            "  Training:   2 subjects",
+            "  Validation: 2 subjects held out (seed 42)",
+            "Impressions:  2",
+            "Total images: 8",
+            "Epochs:       2 (max)",
+            "Patience:     3 epochs (early stopping)",
+            "Best model:   lowest validation equal error rate",
+            "Embedding:    256 values per branch, 512 per print",
+            f"Optimizer:    Adam, {rate.describe()}",
+            "Alignment:    learned (--localization on), learning rate of the localization "
+            f"network times {rate.localization_factor:g}",
+            f"Loss weights: cross entropy {weights.cross_entropy:g}, center {weights.center:g}, "
+            f"minutia map {weights.minutia_map:g}",
+            f"Output:       {model}",
+            f"Device:       {'CUDA' if torch.cuda.is_available() else 'CPU'}",
+            *([f"GPUs:         {gpus}"] if torch.cuda.is_available() else []),
+            "=" * 60,
+            "",
+            "Created 4 training identifiers",
+            "Created 4 validation identifiers",
+            f"Scanning {images} for .png files...",
+            set_of_all_files,
+            set_of_all_files,
+        ]
+        if first_process:
+            lines += [
+                "Resolution of 4 training images spread over the set:",
+                "             4  500 ppi from metadata of the file",
+            ]
+        lines += [
+            "",
+            "Initializing DeepPrint_LocTexMinu model...",
+            f"Loading training image dataset from {images}...",
+            "Creating minutia dataset...",
+            f"Loading minutiae from {minutiae}",
+            set_of_all_files,
+            "Creating label dataset...",
+            "",
+            "Creating validation dataset...",
+            "Creating validation benchmark...",
+            "  Validation benchmark created successfully",
+            "",
+            "Starting training for up to 2 epochs...",
+        ]
+        if gpus > 1:
+            lines.append(
+                f"For multi-GPU, launch with: torchrun --nproc_per_node={gpus} "
+                "scripts/train_500k.py ..."
+            )
+        return lines + [""]
+
+    def end(model) -> list:
+        """The last lines of the first process, after what it says about the epochs."""
+        return [
+            "Model type: DeepPrint_LocTexMinu",
+            f"Model saved to: {model}",
+            f"Best model: {model / 'best_model.pyt'} (epoch 2)",
+            f"Settings:   {model / 'training_settings.json'}",
+            "=" * 60,
+        ]
+
+    def lines_of_a_run(model) -> list:
+        capsys.readouterr()
+        fake = run_directory(train_500k, monkeypatch, grid_set, *options, output=model)
+        output = capsys.readouterr()
+        assert output.err == "" and [variant for variant, _ in fake.built] == ["LocTexMinu"]
+        return output.out.splitlines()
+
+    model = tmp_path / "model"
+    assert lines_of_a_run(model) == [
+        *start(model, first_process=True),
+        "",
+        "=" * 60,
+        "Training complete! 2 epoch(s) trained in this run, 2 in the log.",
+        *end(model),
+    ]
+    # The same command again: the training is finished
+    assert lines_of_a_run(model) == [
+        *start(model, first_process=True),
+        "",
+        "=" * 60,
+        "Nothing was trained in this run: the training in the output directory",
+        "was already finished (2 epochs in its log, see the message above).",
+        "Options of this command that differ from that training had no effect",
+        "and were not stored in training_settings.json.",
+        "To train again with other settings, use a new --output_dir.",
+        *end(model),
+    ]
+    # A process that is not the first
     monkeypatch.setenv("RANK", "1")
-    message = refused(
-        run_table, train_500k, monkeypatch, capsys, tmp_path, *options, table="no table",
-        output="missing",
+    other = tmp_path / "other process"
+    assert lines_of_a_run(other) == start(other, first_process=False)
+
+
+def test_the_two_messages_about_files_that_do_not_fit_the_layout_name_the_sample_table(
+    train_500k, tmp_path, monkeypatch, capsys
+):
+    """Other names, gaps and uneven sets stop a run without a table, and a table describes them."""
+    # A grid that lacks a subject
+    write_small_prints(tmp_path / "images", grid(3, 2))
+    message = refused(run_directory, train_500k, monkeypatch, capsys, tmp_path, *GRID_OPTIONS)
+    assert "2 of the 8 files that are needed are missing" in message
+    assert message.endswith(
+        "see the docstring of scripts/train_500k.py for the layout. Files with other names, "
+        "with gaps in their numbers or with uneven numbers of impressions can be described in "
+        "a sample table and trained with --samples, see docs/sample-table.md."
     )
-    assert message.startswith(f"ERROR: {tmp_path / 'no table'} cannot be read")
-    assert capsys.readouterr().out == ""
+    # A file whose name is not <subject>_<impression>
+    write_small_prints(tmp_path / "images", ["finger a.png"])
+    message = refused(run_directory, train_500k, monkeypatch, capsys, tmp_path, *GRID_OPTIONS)
+    assert "finger a.png is not named <subject>_<impression>" in message
+    assert message.endswith(
+        "or change CustomFingerprintLoader in scripts/train_500k.py. Files with other names, "
+        "with gaps in their numbers or with uneven numbers of impressions can also be "
+        "described in a sample table and trained with --samples, see docs/sample-table.md."
+    )
 
 
 # ---------------------------------------------------------------------------

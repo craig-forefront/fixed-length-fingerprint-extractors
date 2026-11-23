@@ -38,6 +38,7 @@ import weakref
 from os.path import abspath, dirname, join
 from typing import NamedTuple, Optional
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -1296,6 +1297,53 @@ def test_a_file_that_is_no_image_fails_as_in_directory_mode(tmp_path, train_500k
     # The file is named in front of the message of the preparation
     assert str(error.value) == str(expected.value)
     assert str(error.value) == f"{path}: Could not read the file as an image: {path}"
+
+
+def test_a_file_for_which_opencv_raises_an_error_is_named_with_its_row(tmp_path):
+    """
+    For most files that are no image OpenCV returns nothing, and the
+    preparation raises its ImageReadError. For some it raises an error of its
+    own, which is no ValueError and names no file: here a BMP file whose
+    header was damaged after its row was made, and states a width that OpenCV
+    refuses. The loader of a table turns that into an error that is an
+    ImageReadError as well, and that names the file, its row and what to do.
+    """
+    image_dir = tmp_path / "images"
+    path = save(image_dir / "sensor" / "1_1.bmp", ridge_image(120, 96))
+    row = sample_row(
+        0, 0, image_path="sensor/1_1.bmp", file_size=os.path.getsize(path), ppi=500.0,
+        source_width=96, source_height=120, width=96, height=120,
+    )
+    table = SampleTable(samples_from_rows([row]), str(image_dir))
+    loader = SampleTableImageLoader(table)
+    assert loader.get(Identifier(0, 0)).shape == (1, 120, 96)
+
+    with open(path, "rb") as file:
+        content = bytearray(file.read())
+    content[18:22] = (2**30).to_bytes(4, "little")  # the width in the header of a BMP file
+    with open(path, "wb") as file:
+        file.write(content)
+    # Control: this is a file for which OpenCV raises its own error
+    with pytest.raises(cv2.error) as of_opencv:
+        SensorNormalizer(ppi=500).load(path)
+    assert not isinstance(of_opencv.value, ValueError) and path not in str(of_opencv.value)
+
+    with pytest.raises(ImageReadError) as error:
+        loader.get(Identifier(0, 0))
+    assert isinstance(error.value, SampleTableError)
+    assert type(error.value) is sample_table_loader.UnreadableImageError
+    message = str(error.value)
+    assert message.startswith(
+        f"{path}: Could not read the file as an image: OpenCV stopped with an error of its own "
+        "(OpenCV("
+    )
+    assert "\n" not in message and " ".join(str(of_opencv.value).split()) in message
+    assert message.endswith(
+        f"The sample table names the file as 'sensor/1_1.bmp' (subject 0, impression 0), and "
+        f"{image_dir} was given as the directory of its images. Put the file back as it was "
+        f"when the table was built, or build the table again from the files as they are now "
+        f"({BUILDER})."
+    )
 
 
 # ---------------------------------------------------------------------------

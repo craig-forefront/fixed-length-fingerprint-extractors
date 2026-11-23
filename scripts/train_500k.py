@@ -80,7 +80,7 @@ Other file names, gaps and uneven sets (a sample table):
     images. A training image for which it holds none (the .mnt file was
     missing or refused when the table was built) stops the run:
 
-    --allow_missing_minutiae    train such images without a minutia map
+    --tolerate_missing_minutiae train such images without a minutia map
                                 (weight 0 in the minutia map loss) instead
     --ignore_minutiae           train the texture-only variant although the
                                 table holds minutiae
@@ -92,11 +92,11 @@ Other file names, gaps and uneven sets (a sample table):
     its images count. The script prints the number of impressions per
     training subject and what the validation set holds, and it warns when
     that is large. Every process lists the directories of the images and
-    stops if files of the table are missing; the first one loads 100 images
-    spread over the table before it builds the model, so that another
-    --dataset_dir, or files that changed after the table was built, stop
-    the run at once. With several GPUs only the first process prints what
-    the start prints.
+    stops if files of the table are missing or images of the table are too
+    small for the binarisation, and it loads 100 images spread over the
+    table before it builds the model, so that another --dataset_dir, or
+    files that changed after the table was built, stop the run at once.
+    With several GPUs only the first process prints what the start prints.
 
     A model that was trained from a table is loaded with
     load_trained_model(output_dir, dataset_dir, samples=TABLE), where TABLE
@@ -466,7 +466,7 @@ OPTIONS_REPLACED_BY_SAMPLES = {
 }
 
 # The options that only have a meaning with a sample table
-OPTIONS_OF_SAMPLES = ("allow_missing_minutiae", "ignore_minutiae")
+OPTIONS_OF_SAMPLES = ("tolerate_missing_minutiae", "ignore_minutiae")
 
 # How many files a message about a sample table names before it gives the
 # number of the rest, and how many resolutions the start lists
@@ -660,6 +660,87 @@ def store_training_settings(output_dir: str, settings: dict) -> None:
     )
 
 
+def _describe_table_change(output_dir: str, settings: dict, refusal: str) -> str:
+    """
+    What a refusal of check_training_settings is about when a sample table
+    has a part in it, in words, for the front of its message: the training in
+    output_dir read a table and this command reads none, or the other way
+    round, or both read a table and the two tables hold other rows. The
+    message itself (refusal) lists the values that differ, the checksums
+    among them.
+
+    Returns "" if no table has a part in the refusal. The stored side is read
+    from where check_training_settings reads it: training_settings.json, or
+    data_preparation.json for a directory without that file.
+    """
+    # The message lists the preparation of both sides if they differ, and
+    # that of a training from a table holds the checksum of the table.
+    # Without one in it, no table has a part, and nothing is read: a refusal
+    # between two trainings without a table goes as it always went.
+    if '"samples_sha256"' not in refusal:
+        return ""
+    stored = {}
+    for name in (SETTINGS_FILE, "data_preparation.json"):
+        path = os.path.join(output_dir, name)
+        if os.path.exists(path):
+            with open(path) as file:
+                stored = json.load(file)
+            break
+    if not isinstance(stored, dict):
+        return ""
+    # training_settings.json holds the preparation under a key of its own;
+    # data_preparation.json is the preparation, with two more keys
+    before, now = stored.get("preparation", stored), settings["preparation"]
+    was_table = isinstance(before, dict) and "samples_sha256" in before
+    is_table = "samples_sha256" in now
+    if was_table and not is_table:
+        table = f" (--samples {stored['samples']})" if stored.get("samples") else ""
+        return (
+            f"The training in {output_dir} read its training set from a sample table{table}, "
+            "and this command reads none: it finds the images by the names of their files. "
+            "That is another training, also on the same files. To continue the stored "
+            "training, give --samples with a table of the same rows.\n"
+        )
+    if is_table and not was_table:
+        return (
+            f"The training in {output_dir} read no sample table: it found the images by the "
+            f"names of their files. This command reads the sample table {settings['samples']} "
+            "(--samples). That is another training, also if the table describes the same "
+            "files. To continue the stored training, leave --samples out and give the options "
+            "of its first start.\n"
+        )
+    if is_table and before["samples_sha256"] != now["samples_sha256"]:
+        return (
+            f"The training in {output_dir} read a sample table with other rows than the table "
+            f"of this command ({settings['samples']}): {before.get('samples_rows')} rows of "
+            f"{before.get('samples_subjects')} subjects then, {now['samples_rows']} rows of "
+            f"{now['samples_subjects']} subjects now, and the checksums of the rows "
+            "(samples_sha256) differ. A training continues only with a table that holds the "
+            "same rows; where the table lies and how its files are split does not count.\n"
+        )
+    return ""
+
+
+def check_continued_training(
+    output_dir: str, settings: dict, allow_change: bool = False
+) -> list[str]:
+    """
+    check_training_settings, which it calls, for both ways of reading the
+    training set. Where a sample table has a part in a refusal, the message
+    of the SettingsChangedError says so in words before it lists the values:
+    the training in output_dir read a table and this command reads none, or
+    the other way round, or the table is another one. A refusal between two
+    trainings without a table is raised as check_training_settings raised it.
+    """
+    try:
+        return check_training_settings(output_dir, settings, allow_change)
+    except SettingsChangedError as error:
+        words = _describe_table_change(output_dir, settings, str(error))
+        if not words:
+            raise
+        raise SettingsChangedError(words + str(error)) from error
+
+
 def describe_layout_problem(
     found: IdentifierSet,
     wanted: list[Identifier],
@@ -797,6 +878,23 @@ def _named_rows(table: SampleTable, rows: np.ndarray) -> str:
     return named
 
 
+def _path_that_cannot_be_expressed(
+    table: SampleTable, row: int, error: UnicodeError
+) -> SampleTableError:
+    """
+    The refusal for an image path of a sample table that the process cannot
+    hand to the file system: the table holds the paths as text, and the
+    encoding of file names of the process has no bytes for this one.
+    """
+    return SampleTableError(
+        f"The image file {table.describe_row(row)} of the sample table cannot be looked for "
+        f"below {table.image_dir}: this process writes the names of files in the encoding "
+        f"{sys.getfilesystemencoding()}, which cannot express the path ({error}). Start the "
+        "script in an environment whose file names are UTF-8, for example with LC_ALL=C.UTF-8 "
+        "or with PYTHONUTF8=1."
+    )
+
+
 def find_missing_table_files(table: SampleTable, rows: np.ndarray | None = None) -> np.ndarray:
     """
     The rows of a sample table whose image file is not in its directory, in
@@ -806,6 +904,10 @@ def find_missing_table_files(table: SampleTable, rows: np.ndarray | None = None)
 
     A file that is there is not opened here. Whether it is the file that its
     row describes is found out when it is loaded (check_table_images).
+
+    Raises SampleTableError if the encoding of file names of this process
+    cannot express a path of the table: such a file is not missing, it cannot
+    be asked for.
 
     Args:
         rows: The rows to look at; None for all rows of the table
@@ -826,6 +928,8 @@ def find_missing_table_files(table: SampleTable, rows: np.ndarray | None = None)
                 listed[directory] = set()
             except OSError:
                 listed[directory] = None
+            except UnicodeError as error:
+                raise _path_that_cannot_be_expressed(table, row, error) from error
         names = listed[directory]
         if names is None:
             # Files can be read from a directory that cannot be listed
@@ -833,6 +937,12 @@ def find_missing_table_files(table: SampleTable, rows: np.ndarray | None = None)
         else:
             there = name in names
         if not there:
+            try:
+                # A name that the process cannot express is in no listing,
+                # whether the file is there or not
+                os.fsencode(name)
+            except UnicodeError as error:
+                raise _path_that_cannot_be_expressed(table, row, error) from error
             missing.append(row)
     return np.array(missing, dtype=np.int64)
 
@@ -860,6 +970,65 @@ def check_table_files(table: SampleTable, rows: np.ndarray | None = None) -> Non
     )
 
 
+def check_table_image_sizes(table: SampleTable, rows: np.ndarray | None = None) -> None:
+    """
+    Raises SampleTableError if prepared images of the sample table are too
+    small for the binarisation that every image passes before the model gets
+    it (LazilyAllocatedBinarizer): with their number, the first ones by path,
+    and what to do. The binarisation raises an error for such an image when
+    it is loaded, which is during the first epoch, or after it for an image
+    of a held-out subject. The table holds the size of every prepared image,
+    so these rows are found here, without a look at a file.
+
+    The binarisation states no smallest size, so it is found by trying:
+    empty square images are given to it, from one pixel per side upwards,
+    until it takes one. The rows are large enough if their smaller sides
+    have that many pixels.
+
+    Args:
+        rows: The rows to look at; None for all rows of the table
+    """
+    samples = table.samples
+    if rows is None:
+        sides = np.minimum(samples.width, samples.height)
+    else:
+        sides = np.minimum(samples.width[rows], samples.height[rows])
+    if len(sides) == 0:
+        return
+    binarizer = LazilyAllocatedBinarizer(BINARIZATION_THRESHOLD)
+
+    def refusal(side: int) -> str | None:
+        """The error of the binarisation for an empty image of this side; None if it takes it."""
+        try:
+            binarizer(torch.zeros((1, side, side)))
+        except Exception as error:
+            return " ".join(str(error).split())
+        return None
+
+    # No side above the largest of the rows needs to be tried: if the
+    # binarisation takes none up to there, every row is too small
+    smallest, largest = int(sides.min()), int(sides.max())
+    needed = next((side for side in range(1, largest + 1) if refusal(side) is None), None)
+    if needed is not None and needed <= smallest:
+        return
+    reason = refusal(smallest)
+    too_small = np.flatnonzero(sides < (largest + 1 if needed is None else needed))
+    if rows is not None:
+        too_small = rows[too_small]
+    images = "of the sample table" if rows is None else "that are needed of the sample table"
+    pixels = f"more than {largest:,}" if needed is None else f"{needed:,}"
+    raise SampleTableError(
+        f"{len(too_small):,} of the {len(sides):,} images {images} are too small for the "
+        f"binarisation of the training, which needs {pixels} pixels in width and in height of "
+        f"the image prepared at {table.target_ppi:g} ppi. The first ones: "
+        f"{_named_rows(table, too_small)}. For an empty image of {smallest:,}x{smallest:,} "
+        f"pixels the binarisation stops with: {reason}. Check the resolution of these files: "
+        "a resolution that is stated too high makes the prepared image too small. Then build "
+        "the table again with their right resolution or without them "
+        "(scripts/build_sample_table.py)."
+    )
+
+
 def table_has_minutiae(table: SampleTable, rows: np.ndarray) -> bool:
     """
     Whether a sample table holds minutiae for any of the given rows. That is
@@ -868,6 +1037,21 @@ def table_has_minutiae(table: SampleTable, rows: np.ndarray) -> bool:
     a row with a null cell (they are not known) does not.
     """
     return bool(table.samples.minutiae_known[rows].any())
+
+
+def count_table_minutiae(table: SampleTable, rows: np.ndarray) -> tuple[int, int, int]:
+    """
+    How many of the given rows of a sample table hold (minutiae, an empty
+    list, null): rows whose image has minutiae, rows whose image is known to
+    have none, and rows whose minutiae are not known. Only a row of the first
+    kind gets a minutia map; the others have the weight 0 in the minutia map
+    loss.
+    """
+    samples = table.samples
+    offsets = samples.minutiae_offsets
+    with_minutiae = int(np.count_nonzero(offsets[rows + 1] > offsets[rows]))
+    known = int(np.count_nonzero(samples.minutiae_known[rows]))
+    return with_minutiae, known - with_minutiae, len(rows) - known
 
 
 def check_table_minutiae(
@@ -893,8 +1077,8 @@ def check_table_minutiae(
             "its image was missing or refused when the table was built (build_failures.txt "
             "in the directory of the table says which and why). Extract the minutiae of "
             "these images and build the table again (scripts/build_sample_table.py), or "
-            "pass --allow_missing_minutiae: these images then train without a minutia map, "
-            "with weight 0 in the minutia map loss. --ignore_minutiae trains the "
+            "pass --tolerate_missing_minutiae: these images then train without a minutia "
+            "map, with weight 0 in the minutia map loss. --ignore_minutiae trains the "
             "texture-only variant instead."
         )
     return len(unknown)
@@ -998,12 +1182,15 @@ def describe_table_resolutions(table: SampleTable, rows: np.ndarray) -> list[str
     assume_ppi = settings.get("assume_ppi") if isinstance(settings, dict) else None
     if isinstance(assume_ppi, bool) or not isinstance(assume_ppi, (int, float)):
         assume_ppi = None
-    lines = sensor_normalization.describe_resolution_sources(
-        dict(most), assume_ppi, table.target_ppi
-    )
+    # One line per resolution in the order of `most`, and behind them the note
+    # if there is one. The lines are made of all resolutions and cut then: the
+    # note counts the files of those that are not listed as well.
+    lines = sensor_normalization.describe_resolution_sources(counts, assume_ppi, table.target_ppi)
+    lines, note = lines[: len(most)], lines[len(counts) :]
     if len(counts) > len(most):
         rest = len(rows) - sum(number for _, number in most)
         lines.append(f"  {rest:>12,}  with {len(counts) - len(most):,} further resolutions")
+    lines += note
 
     lines.append("Ridge polarity of these images, as the files hold it:")
     light, ridges_origin = samples.ridges_light[rows], samples.ridges_origin[rows]
@@ -1705,8 +1892,15 @@ def check_options_of_the_mode(
     table says in its place; they stay None. Without --samples the options
     of table mode are refused, and the options whose defaults were withheld
     get them, so that everything after this call finds the values it always
-    found.
+    found. --samples with an empty text is refused: it is no directory, and
+    it would count as a table that was given.
     """
+    if args.samples == "":
+        parser.error(
+            "--samples was given an empty text, where the directory of a sample table belongs "
+            "(a variable of the shell that is not set gives that). Give the directory of the "
+            "table, or leave --samples out to find the images by the names of their files."
+        )
     if args.samples is None:
         given = [f"--{name}" for name in OPTIONS_OF_SAMPLES if getattr(args, name, False)]
         if given:
@@ -1755,7 +1949,6 @@ def _start_from_samples(
     """
     localization = args.localization == "on"
     table = read_sample_table(args.samples, args.dataset_dir)
-    samples = table.samples
 
     # Create identifiers for training and validation. Whole subjects are held
     # out for validation; the model gets one class per training subject.
@@ -1778,8 +1971,8 @@ def _start_from_samples(
     # The variant follows from the table: the minutia branch is trained if the
     # table holds minutiae for training images, unless they are to be ignored
     with_minutiae = table_has_minutiae(table, training_rows) and not args.ignore_minutiae
-    known_minutiae = int(np.count_nonzero(samples.minutiae_known[training_rows]))
-    unknown_minutiae = len(training_rows) - known_minutiae if with_minutiae else 0
+    filled_minutiae, empty_minutiae, null_minutiae = count_table_minutiae(table, training_rows)
+    unknown_minutiae = null_minutiae if with_minutiae else 0
     model_type = variant_name(localization, with_minutiae)
 
     # The settings of the training, with the keys of a training without a
@@ -1823,7 +2016,7 @@ def _start_from_samples(
         },
     }
     try:
-        notes = check_training_settings(
+        notes = check_continued_training(
             args.output_dir, settings, args.allow_changed_settings
         )
     except SettingsChangedError as error:
@@ -1834,17 +2027,21 @@ def _start_from_samples(
     log_path = os.path.join(args.output_dir, "log.json")
     epochs_before = len(TrainingLog(log_path)) if os.path.exists(log_path) else 0
 
-    if not with_minutiae:
-        minutiae = (
-            "not used (--ignore_minutiae)" if known_minutiae
-            else "none: the sample table holds no minutiae for the training images"
-        )
-    elif not unknown_minutiae:
-        minutiae = f"from the sample table, for all {len(training_rows):,} training images"
+    # What the table holds for the training images: minutiae, an empty list
+    # (an image without minutiae) or null (not known)
+    counted = (
+        f"of the {len(training_rows):,} training images: {filled_minutiae:,} with minutiae, "
+        f"{empty_minutiae:,} with an empty list (an image without minutiae), "
+        f"{null_minutiae:,} with null (minutiae not known)"
+    )
+    if with_minutiae:
+        minutiae = f"from the sample table, {counted}"
+    elif filled_minutiae or empty_minutiae:
+        minutiae = f"not used (--ignore_minutiae); the sample table holds them, {counted}"
     else:
         minutiae = (
-            f"from the sample table, for {known_minutiae:,} of the {len(training_rows):,} "
-            f"training images; it holds none (null) for the other {unknown_minutiae:,}"
+            "none: the sample table holds no minutiae for the training images (null for all "
+            f"{null_minutiae:,})"
         )
     training_impressions = _rows_per_subject(table, training_rows)
     num_val_images = len(validation_rows)
@@ -1860,8 +2057,8 @@ def _start_from_samples(
         print(f"Table build:  {failed_in_build}")
     print(f"Dataset:      {args.dataset_dir}")
     print(f"Minutiae:     {minutiae}")
-    print(f"Images:       prepared as the sample table states for every file: resampled "
-          f"from its resolution to {table.target_ppi:g} ppi, dark ridges")
+    print(f"Images:       resampled to {table.target_ppi:g} ppi and brought to dark ridges, each "
+          "file from the resolution and the ridge polarity that the sample table states for it")
     print(f"Canvas:       "
           + (f"{args.canvas_size}x{args.canvas_size} pixels at 500 ppi for every image"
              if args.canvas_size else "square of the longer side of each image"))
@@ -1951,22 +2148,36 @@ def _start_from_samples(
     if validation_ids:
         print(f"Created {len(validation_ids):,} validation identifiers")
 
-    # The files that are there, compared with the files that the table names.
-    # Every process checks them, so that each one stops by itself.
+    # The files that are there, compared with the files that the table names,
+    # and the sizes of the prepared images, which the table holds. Every
+    # process checks them, so that each one stops by itself.
     print(f"Listing the directories of the image files below {args.dataset_dir}...")
     check_table_files(table)
+    check_table_image_sizes(table)
     if with_minutiae:
-        check_table_minutiae(table, training_rows, args.allow_missing_minutiae)
+        check_table_minutiae(table, training_rows, args.tolerate_missing_minutiae)
         if unknown_minutiae:
             print(
                 f"Note: training images without minutiae in the sample table: "
                 f"{unknown_minutiae:,} of {len(training_rows):,}. They train without a "
-                "minutia map (--allow_missing_minutiae), with weight 0 in the minutia map "
+                "minutia map (--tolerate_missing_minutiae), with weight 0 in the minutia map "
                 "loss, and count in the other parts of the loss as every image does."
             )
+        if not filled_minutiae:
+            print(
+                "\nWARNING: the minutia branch is trained, but no training image has a "
+                f"minutia: of the {len(training_rows):,} training images, the sample table "
+                f"holds an empty list for {empty_minutiae:,} and null for {null_minutiae:,}. "
+                "Such an image has the weight 0 in the minutia map loss, so no image counts "
+                "in that part of the loss. If the images have minutiae, extract them and build "
+                "the table again (scripts/build_sample_table.py); --ignore_minutiae trains the "
+                "texture-only variant instead."
+            )
     files = SampleTableImageLoader(table)
+    # Every process loads them, as it makes every other check: each one stops
+    # by itself, and none goes on to the training of a start that is refused
+    loaded = check_table_images(files)
     if first_process:
-        loaded = check_table_images(files)
         print(
             f"Loaded {loaded:,} image files spread over the table: each has the size in "
             "bytes and in pixels that its row holds."
@@ -2123,7 +2334,7 @@ def main():
                              "--ridges are refused, because the table says what they say "
                              "(default: none, the images are found by their names "
                              "<subject>_<impression>.png)")
-    parser.add_argument("--allow_missing_minutiae", action="store_true",
+    parser.add_argument("--tolerate_missing_minutiae", action="store_true",
                         help="With --samples: train although the table holds no minutiae "
                              "(null) for some training images. These images train without a "
                              "minutia map, with weight 0 in the minutia map loss (default: "
@@ -2296,7 +2507,7 @@ def main():
         },
     }
     try:
-        notes = check_training_settings(
+        notes = check_continued_training(
             args.output_dir, settings, args.allow_changed_settings
         )
     except SettingsChangedError as error:

@@ -1217,12 +1217,17 @@ def describe_table(directory: str, samples: Samples) -> list[str]:
         assume_ppi = None
     lines.append("")
     lines.append(f"Resolution of the {rows:,} image file(s) of the table:")
-    lines.extend(
-        sensor_normalization.describe_resolution_sources(dict(most), assume_ppi, samples.target_ppi)
+    # One line per resolution in the order of `most`, and behind them the note
+    # if there is one. The lines are made of all resolutions and cut then: the
+    # note counts the files of those that are not listed as well.
+    described = sensor_normalization.describe_resolution_sources(
+        resolutions, assume_ppi, samples.target_ppi
     )
+    lines.extend(described[: len(most)])
     if len(resolutions) > len(most):
         rest = rows - sum(count for _, count in most)
         lines.append(f"  {rest:>12,}  with {len(resolutions) - len(most):,} further resolutions")
+    lines.extend(described[len(resolutions) :])
     lines.append("Ridge polarity:")
     polarities = []
     for light, ridges in ((False, RIDGES_DARK), (True, RIDGES_LIGHT)):
