@@ -1930,6 +1930,33 @@ def check_options_of_the_mode(
         )
 
 
+def warn_if_workers_are_not_forked(run: str = "the training") -> None:
+    """
+    Prints a warning if the worker processes that load the images are not
+    forked on this system: a worker that is started in another way gets a
+    copy of the arrays of a sample table, where a forked one shares them with
+    the process that read the table.
+
+    Args:
+        run: Whose worker processes they are, as the warning names it. The
+            range test (scripts/find_learning_rate.py) reads a sample table
+            and starts worker processes as well.
+    """
+    # The start method that worker processes get, asked for without
+    # fixing it: the first of the list is the default of the platform
+    start_method = (
+        multiprocessing.get_start_method(allow_none=True)
+        or multiprocessing.get_all_start_methods()[0]
+    )
+    if start_method != "fork":
+        print(
+            f"\nWARNING: worker processes are started with '{start_method}' here, not "
+            "forked. A forked worker shares the arrays of the sample table with the "
+            "process that read it; a worker that is started in another way gets a copy "
+            f"of them, so every worker process of {run} holds the table once more."
+        )
+
+
 def _start_from_samples(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
@@ -2188,19 +2215,7 @@ def _start_from_samples(
         )
         for line in describe_table_resolutions(table, training_rows):
             print(line)
-        # The start method that worker processes get, asked for without
-        # fixing it: the first of the list is the default of the platform
-        start_method = (
-            multiprocessing.get_start_method(allow_none=True)
-            or multiprocessing.get_all_start_methods()[0]
-        )
-        if start_method != "fork":
-            print(
-                f"\nWARNING: worker processes are started with '{start_method}' here, not "
-                "forked. A forked worker shares the arrays of the sample table with the "
-                "process that read it; a worker that is started in another way gets a copy "
-                "of them, so every worker process of the training holds the table once more."
-            )
+        warn_if_workers_are_not_forked()
 
     # Initialize the model: with or without learned alignment
     # (LocalizationNetwork), with the minutia branch when minutiae are trained
