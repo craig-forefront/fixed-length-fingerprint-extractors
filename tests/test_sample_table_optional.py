@@ -3,6 +3,8 @@ flx/preparation/sample_table.py where pyarrow is not installed: the module is
 imported, what needs no Parquet file works, and reading or writing a table
 says how to install pyarrow. The loaders of flx/data/sample_table_loader.py
 are imported and used without pyarrow as well (that test needs PyTorch).
+So is scripts/train_500k.py where it reads no table, and where it is given
+one it stops with what to install (these two tests need PyTorch as well).
 
 No test of this file needs pyarrow and none is skipped without it, because
 the environment without pyarrow is the one these tests are about. Where
@@ -260,3 +262,95 @@ def test_the_requirement_of_pyarrow_does_not_go_below_17():
     name, _, version = sample_table.PYARROW_REQUIREMENT.partition(">=")
     assert name == "pyarrow"
     assert int(version.split(".")[0]) >= 17
+
+
+def test_the_training_script_without_a_table_does_not_need_pyarrow(tmp_path):
+    """
+    scripts/train_500k.py in an interpreter in which pyarrow cannot be
+    imported: the script is loaded, and without --samples its main() goes
+    through every check to the training, here with a model that only keeps
+    what it is given. The script needs torch, so only pyarrow is blocked, and
+    this test is skipped where torch is not installed.
+    """
+    pytest.importorskip("torch")
+    code = (
+        "import sys\n"
+        "sys.modules['pyarrow'] = None\n"
+        "import importlib.util\n"
+        "import os\n"
+        "import cv2\n"
+        "import numpy as np\n"
+        "root = sys.argv[1]\n"
+        "os.mkdir(os.path.join(root, 'images'))\n"
+        "for subject in range(1, 5):\n"
+        "    for impression in (1, 2):\n"
+        "        path = os.path.join(root, 'images', f'{subject}_{impression}.png')\n"
+        "        cv2.imwrite(path, np.zeros((8, 8), dtype=np.uint8))\n"
+        "spec = importlib.util.spec_from_file_location('train_500k', 'scripts/train_500k.py')\n"
+        "train_500k = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(train_500k)\n"
+        "class Model:\n"
+        "    def fit(self, fingerprints, validation_fingerprints, **kwargs):\n"
+        "        print('fit', len(fingerprints), len(validation_fingerprints))\n"
+        "train_500k.get_DeepPrint_LocTex = lambda *args, **kwargs: Model()\n"
+        "sys.argv = ['train_500k.py', '--dataset_dir', os.path.join(root, 'images'),\n"
+        "            '--output_dir', os.path.join(root, 'model'), '--num_subjects', '4',\n"
+        "            '--num_impressions', '2', '--assume_ppi', '500',\n"
+        "            '--validation_split', '0.5']\n"
+        "train_500k.main()\n"
+        "print(sys.modules['pyarrow'], 'flx.data.sample_table_loader' in sys.modules)\n"
+        "print(os.path.exists(os.path.join(root, 'model', 'training_settings.json')))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        cwd=REPOSITORY,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    # The training was reached, with four training and four validation images
+    assert "fit 4 4" in lines
+    # pyarrow was blocked to the end, also while the module of the loaders of
+    # a table was imported, which the script imports for its table mode
+    assert lines[-2] == "None True"
+    assert lines[-1] == "True"
+
+
+def test_the_training_script_with_a_table_says_how_to_install_pyarrow(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    With --samples and without pyarrow the script stops like every start that
+    is refused: with the exit status 2, the reason and what to do, and
+    nothing in --output_dir. This test needs torch as the script does.
+    """
+    pytest.importorskip("torch")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "train_500k", join(REPOSITORY, "scripts", "train_500k.py")
+    )
+    train_500k = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(train_500k)
+    (tmp_path / "images").mkdir()
+    (tmp_path / "table").mkdir()
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train_500k.py", "--dataset_dir", str(tmp_path / "images")]
+        + ["--samples", str(tmp_path / "table"), "--output_dir", str(tmp_path / "model")],
+    )
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as stop:
+        train_500k.main()
+    assert stop.value.code == 2
+    message = " ".join(capsys.readouterr().err.split())
+    assert message.startswith(
+        "ERROR: A sample table is read and written as Parquet files, which needs the package "
+        "pyarrow, and it cannot be imported"
+    )
+    assert 'pip install -e ".[table]"' in message
+    assert f'pip install "{sample_table.PYARROW_REQUIREMENT}"' in message
+    assert not (tmp_path / "model").exists()
