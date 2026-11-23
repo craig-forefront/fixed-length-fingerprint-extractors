@@ -247,6 +247,10 @@ def range_test_from_samples(
         ids = IdentifierSet(table.identifiers_of(subjects))
 
         has_minutiae = train_500k.table_has_minutiae(table, rows)
+        # The rows of the whole table that hold minutiae. Where the rows of
+        # the test hold none, these are rows of other subjects, and with them
+        # a training of the table can have the minutia branch
+        rows_with_minutiae = table.num_rows - len(table.rows_without_minutiae())
         variant = args.variant
         if variant == "auto":
             # The variant that train_500k.py trains by default: with the
@@ -258,13 +262,23 @@ def range_test_from_samples(
             )
         with_minutiae = VARIANTS[variant][1]
         if with_minutiae and not has_minutiae:
+            if rows_with_minutiae:
+                remedy = (
+                    f"It holds minutiae for {rows_with_minutiae:,} of its {table.num_rows:,} "
+                    "images, which belong to other subjects: let the test use more subjects "
+                    "(--max_subjects, 0 for all) or other ones (another --seed)."
+                )
+            else:
+                remedy = (
+                    "Build the table with the .mnt files of the images (--minutiae_dir of "
+                    "scripts/build_sample_table.py), or test a variant without minutiae: "
+                    "--variant auto chooses the one that train_500k.py trains by default from "
+                    "these rows."
+                )
             parser.error(
                 f"--variant {variant} needs minutiae, and the sample table {args.samples} "
                 f"holds none (null) for the {len(rows):,} images of the {len(subjects):,} "
-                "subjects that the test uses. Build the table with the .mnt files of the "
-                "images (--minutiae_dir of scripts/build_sample_table.py), or test a variant "
-                "without minutiae: --variant auto chooses the one that train_500k.py trains "
-                "by default from these rows."
+                f"subjects that the test uses. {remedy}"
             )
 
         print(f"Sample table {args.samples}: {table.num_rows:,} rows of "
@@ -311,6 +325,19 @@ def range_test_from_samples(
                 "table again (scripts/build_sample_table.py); --ignore_minutiae with "
                 "--variant auto tests the texture-only variant instead."
             )
+    elif rows_with_minutiae and args.variant == "auto" and not args.ignore_minutiae:
+        # auto is a variant without minutiae because of the subjects that
+        # were chosen, not because of the table: the training looks at all
+        # its training images, and can have the minutia branch
+        print(
+            f"Note: --variant auto is DeepPrint_{variant} here, a variant without the minutia "
+            f"branch: the sample table holds no minutiae (null) for the {len(rows):,} images "
+            f"of the test. It holds minutiae for {rows_with_minutiae:,} of its "
+            f"{table.num_rows:,} images, which belong to other subjects. A training of the "
+            "table has the minutia branch if one of them is among its training images, unless "
+            "it is given --ignore_minutiae. To test that variant, let the test use more "
+            "subjects (--max_subjects, 0 for all) or other ones (another --seed)."
+        )
     if args.num_workers > 0:
         # The images are loaded in worker processes, as in the training
         train_500k.warn_if_workers_are_not_forked("the range test")

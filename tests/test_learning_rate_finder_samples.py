@@ -60,12 +60,14 @@ from flx.models.deep_print_loss import LossWeights  # noqa: E402
 from flx.models.learning_rate_finder import (  # noqa: E402
     CSV_COLUMNS,
     RangeTestResult,
+    smooth_losses,
     suggest_learning_rate,
 )
 from flx.models.model_training import TrainingLog, TrainingLogEntry  # noqa: E402
 from flx.preparation.sample_table import (  # noqa: E402
     PPI_ORIGINS,
     RIDGES_ORIGINS,
+    SampleRow,
     SampleTableError,
     samples_from_rows,
     write_part,
@@ -197,13 +199,23 @@ class Recorded:
 # What stands in for the result of a range test that is not run: two steps,
 # too few for a suggestion
 TWO_STEPS = ([1e-4, 1e-3], [1.5, 1.25], [0.5, 0.25], "all steps done")
+# Steps with a suggestion: the loss falls, and rises at the end
+FALL_AND_RISE = (
+    [10.0 ** (-6 + step / 4) for step in range(24)],
+    [3.0] * 6 + [3.0 - 0.15 * step for step in range(1, 13)] + [1.3, 1.5, 2.0, 3.0, 5.0, 9.0],
+    [0.5] * 24,
+    "loss exploded",
+)
 
 
-def run(find_learning_rate, *arguments, real: bool = False, recorded: Optional[Recorded] = None):
+def run(
+    find_learning_rate, *arguments, real: bool = False, recorded: Optional[Recorded] = None,
+    steps: tuple = TWO_STEPS,
+):
     """
     Runs main() with the arguments and a tiny model in the place of DeepPrint.
     Unless real is set, the range test is not run: a function in its place
-    keeps what it is given and returns TWO_STEPS. Returns what was recorded.
+    keeps what it is given and returns the steps. Returns what was recorded.
     """
     recorded = Recorded() if recorded is None else recorded
     run_range_test = find_learning_rate.run_range_test
@@ -216,7 +228,7 @@ def run(find_learning_rate, *arguments, real: bool = False, recorded: Optional[R
     def range_test(model, loss, train_set, **options):
         recorded.tests.append(dict(options, model=model, loss=loss, train_set=train_set))
         if not real:
-            return RangeTestResult(*(list(v) if isinstance(v, list) else v for v in TWO_STEPS))
+            return RangeTestResult(*(list(v) if isinstance(v, list) else v for v in steps))
         recorded.results.append(run_range_test(model, loss, train_set, **options))
         return recorded.results[-1]
 
@@ -1023,6 +1035,19 @@ def test_the_options_reach_a_test_from_a_table_as_they_reach_one_from_the_direct
     assert not torch.equal(both_modes("--seed", 9)[2], initial)
 
 
+def test_what_the_model_is_built_from_reaches_the_constructor_of_its_variant(
+    find_learning_rate, monkeypatch
+):
+    """build_extractor, which the other tests replace: both modes build their model with it."""
+
+    def constructor(num_training_subjects, num_dims, loss_weights=None):
+        return num_training_subjects, num_dims, loss_weights
+
+    monkeypatch.setitem(find_learning_rate.VARIANTS, "Tex", (constructor, False))
+    weights = LossWeights(cross_entropy=2.0, center=0.5)
+    assert find_learning_rate.build_extractor("Tex", 5, 96, weights) == (5, 96, weights)
+
+
 # ---------------------------------------------------------------------------
 # What only a table can describe
 # ---------------------------------------------------------------------------
@@ -1184,6 +1209,23 @@ def test_max_subjects_limits_the_subjects_of_a_table_and_not_its_rows(
     assert subjects_and_classes() == (UNEVEN_SUBJECTS, 6)
 
 
+def test_the_identifiers_of_the_test_are_the_objects_of_the_table(
+    find_learning_rate, uneven_set, tmp_path
+):
+    """
+    The set of the test is made of the Identifier objects that the table
+    holds for its rows, as the sets of a training are: a second object per
+    row would be a second copy of the identifiers of every row of the test.
+    """
+    for options in ([], ["--max_subjects", 4, "--seed", 1]):
+        recorded = run_table(find_learning_rate, uneven_set, *options, output=tmp_path / "out")
+        train_set = recorded.tests[0]["train_set"]
+        table = loaders(train_set)[0]._images.table
+        assert len(train_set) >= 4
+        for identifier in train_set.ids:
+            assert identifier is table.identifiers[table.row(identifier)]
+
+
 # ---------------------------------------------------------------------------
 # What a test from a table prints
 # ---------------------------------------------------------------------------
@@ -1245,6 +1287,97 @@ def test_a_test_from_a_table_prints_the_table_and_then_what_a_test_prints(
     assert output.out.splitlines()[6].startswith("Ended after 2 steps")
 
 
+def test_the_default_tests_2000_subjects_and_numbers_from_1000_on_are_printed_with_separators(
+    find_learning_rate, tmp_path, capsys
+):
+    """
+    A table of 2,250 rows of 2,100 subjects. The default of --max_subjects
+    takes 2,000 of the subjects, and every number of rows, images and
+    subjects that a test from a table prints about itself has the separator
+    of thousands. The image files of 1,000 subjects are there: a test of the
+    default is refused for the other files, after it said what it would be,
+    and a test of these 1,000 subjects starts.
+    """
+    subjects, images, table = range(2100), tmp_path / "images", tmp_path / "table"
+    # The 1,000 subjects of the smaller test have no minutiae in the table
+    # (null), the 1,100 others have an empty list
+    of_the_smaller_test = set(chosen_by_the_rule(subjects, 1000, 0))
+    small_print = save(tmp_path / "print.png", ridge_image(64, 48), 500)
+    rows = [
+        SampleRow(
+            subject=subject, impression=impression, image_path=f"{subject}_{impression}.png",
+            file_size=os.path.getsize(small_print), ppi=500.0, ppi_origin="metadata",
+            ridges="dark", ridges_origin="argument", source_width=48, source_height=64,
+            width=48, height=64,
+            minutiae=None if subject in of_the_smaller_test else np.zeros((0, 3), np.float32),
+        )
+        # The first 150 subjects have two rows, the others one
+        for subject in subjects
+        for impression in range(2 if subject < 150 else 1)
+    ]
+    assert len(rows) == 2250
+    write_part(str(table), 0, 1, samples_from_rows(rows), {"id": "large"})
+    # The images of the smaller test are there, as copies of one small print
+    images.mkdir()
+    for row in rows:
+        if row.subject in of_the_smaller_test:
+            shutil.copyfile(small_print, images / row.image_path)
+
+    chosen = chosen_by_the_rule(subjects, 2000, 0)
+    used = len(chosen) + sum(subject < 150 for subject in chosen)
+    missing = sum(row.subject in chosen and row.subject not in of_the_smaller_test for row in rows)
+    assert len(chosen) == 2000 and 2000 < used < 2250 and 1000 < missing < used
+    lines, message = refusal(run_table, find_learning_rate, capsys, tmp_path)
+    assert lines == [
+        f"Reading the sample table {table}...",
+        "Created IdentifierSet with 2100 subjects and a total of 2250 samples.",
+        f"Created IdentifierSet with 2000 subjects and a total of {used} samples.",
+        f"Sample table {table}: 2,250 rows of 2,100 subjects; the test uses {used:,} rows of "
+        "2,000 subjects",
+        f"Range test for DeepPrint_LocTexMinu: 2,000 subjects, {used:,} images, batch size 64, "
+        "300 steps from 1e-07 to 1",
+        f"Note: the test needs 19,200 images and sees each of the {used:,} images more than "
+        "once.",
+    ]
+    assert message.startswith(
+        f"ERROR: {missing:,} of the {used:,} image files that are needed of the sample table "
+        "are missing below "
+    )
+
+    # The smaller test: what it says about the minutiae that the table holds
+    # for the other subjects only, as a variant with minutiae and as auto. It
+    # needs 800 images, which is not more than it has.
+    used = 1000 + sum(subject < 150 for subject in of_the_smaller_test)
+    assert 1000 < used < 1150
+    smaller = ["--max_subjects", 1000, "--batch_size", 8, "--num_steps", 100]
+    elsewhere = (
+        f"It holds minutiae for {2250 - used:,} of its 2,250 images, which belong to other "
+        "subjects"
+    )
+    message = refused(
+        run_table, find_learning_rate, capsys, tmp_path, *smaller, "--variant", "TexMinu"
+    )
+    assert message.endswith(
+        f"error: --variant TexMinu needs minutiae, and the sample table {table} holds none "
+        f"(null) for the {used:,} images of the 1,000 subjects that the test uses. {elsewhere}: "
+        "let the test use more subjects (--max_subjects, 0 for all) or other ones (another "
+        "--seed)."
+    )
+    capsys.readouterr()
+    assert len(run_table(find_learning_rate, tmp_path, *smaller).tests) == 1
+    assert printed(capsys)[3:6] == [
+        f"Sample table {table}: 2,250 rows of 2,100 subjects; the test uses {used:,} rows of "
+        "1,000 subjects",
+        f"Range test for DeepPrint_LocTex: 1,000 subjects, {used:,} images, batch size 8, 100 "
+        "steps from 1e-07 to 1",
+        "Note: --variant auto is DeepPrint_LocTex here, a variant without the minutia branch: "
+        f"the sample table holds no minutiae (null) for the {used:,} images of the test. "
+        f"{elsewhere}. A training of the table has the minutia branch if one of them is among "
+        "its training images, unless it is given --ignore_minutiae. To test that variant, let "
+        "the test use more subjects (--max_subjects, 0 for all) or other ones (another --seed).",
+    ]
+
+
 def test_worker_processes_that_are_not_forked_get_the_warning_of_the_training(
     find_learning_rate, grid_set, tmp_path, monkeypatch, capsys
 ):
@@ -1301,6 +1434,28 @@ def test_worker_processes_that_are_not_forked_get_the_warning_of_the_training(
     # Without a table there is no table to copy
     asked, lines = start("spawn", "spawn", *grid_options(grid_set), runner=run_directory)
     assert asked == [] and warnings(lines) == []
+    # A single worker process gets its copy of the table as each of four does
+    asked, lines = start("spawn", "fork", "--num_workers", 1)
+    assert asked == [True] and len(warnings(lines)) == 1
+
+
+def test_a_test_that_is_refused_does_not_warn_about_its_workers(
+    find_learning_rate, builder, tmp_path, monkeypatch, capsys
+):
+    """The warning about workers belongs to a test that starts: it comes after the checks."""
+    multiprocessing = find_learning_rate.train_500k.multiprocessing
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=False: "spawn")
+    write_grid(tmp_path, 3, 2)
+    assert build(builder, tmp_path) == 0
+    # Control: the test of this table warns when it starts
+    capsys.readouterr()
+    assert len(run_table(find_learning_rate, tmp_path).tests) == 1
+    assert sum(line.startswith("WARNING: worker processes") for line in printed(capsys)) == 1
+    (tmp_path / "images" / "2_1.png").unlink()
+    lines, message = refusal(run_table, find_learning_rate, capsys, tmp_path)
+    assert message.startswith("ERROR: 1 of the 6 image files that are needed of the sample table")
+    assert not any("WARNING" in line for line in lines)
+    assert lines[-1].startswith("Note: the test needs ")
 
 
 def test_a_worker_that_is_not_forked_gets_the_training_set_with_one_copy_of_the_table(
@@ -1448,12 +1603,14 @@ def test_a_variant_with_minutiae_needs_minutiae_for_the_images_of_the_test(
         lines, message = refusal(
             run_table, find_learning_rate, capsys, tmp_path, "--variant", variant, *without
         )
+        # The table holds minutiae, for the two images of the subject that is
+        # not one of the test: the message says so, and what to do about it
         assert message.endswith(
             f"find_learning_rate.py: error: --variant {variant} needs minutiae, and the sample "
             f"table {table} holds none (null) for the 6 images of the 3 subjects that the test "
-            "uses. Build the table with the .mnt files of the images (--minutiae_dir of "
-            "scripts/build_sample_table.py), or test a variant without minutiae: --variant "
-            "auto chooses the one that train_500k.py trains by default from these rows."
+            "uses. It holds minutiae for 2 of its 10 images, which belong to other subjects: let "
+            "the test use more subjects (--max_subjects, 0 for all) or other ones (another "
+            "--seed)."
         )
         # Nothing was said about a test that cannot be made
         assert not any(line.startswith(("Sample table ", "Range test ")) for line in lines)
@@ -1465,16 +1622,18 @@ def test_a_variant_with_minutiae_needs_minutiae_for_the_images_of_the_test(
     )
     assert "error: --variant TexMinu needs minutiae" in message
 
-    # As the message says: auto is the texture-only variant for these rows,
-    # and a variant without minutiae that is given by name never needs any
+    # auto is the texture-only variant for these rows, and a variant without
+    # minutiae that is given by name never needs any
     for variant, tested in (("auto", "LocTex"), ("LocTex", "LocTex"), ("Tex", "Tex")):
         recorded = run_table(find_learning_rate, tmp_path, "--variant", variant, *without)
         assert recorded.built == [(tested, 3, 256, LossWeights())]
         _, (minutia_map, weight), _ = recorded.tests[0]["train_set"].get(Identifier(0, 0))
         assert minutia_map.numel() == 0 and weight == 0.0
 
-    # With the subject that has minutiae among those of the test, a variant
-    # with minutiae is what auto is, and the rows without stop it
+    # As the message says: with other subjects, or with all of them, the
+    # subject that has minutiae is among those of the test. A variant with
+    # minutiae is what auto is then, and the rows without minutiae stop it,
+    # with the message that names the option for them
     for variant in ("auto", "LocTexMinu"):
         message = refused(
             run_table, find_learning_rate, capsys, tmp_path, "--variant", variant, *with_it
@@ -1482,9 +1641,108 @@ def test_a_variant_with_minutiae_needs_minutiae_for_the_images_of_the_test(
         assert message.startswith(
             "ERROR: The sample table holds no minutiae (null) for 4 of the 6 training images. "
         )
+        message = refused(
+            run_table, find_learning_rate, capsys, tmp_path, "--variant", variant,
+            "--max_subjects", 0,
+        )
+        assert message.startswith(
+            "ERROR: The sample table holds no minutiae (null) for 8 of the 10 training images. "
+        )
+        assert "or pass --tolerate_missing_minutiae: " in message
+        recorded = run_table(
+            find_learning_rate, tmp_path, "--variant", variant, "--max_subjects", 0,
+            "--tolerate_missing_minutiae",
+        )
+        assert recorded.built == [("LocTexMinu", 5, 256, LossWeights())]
     for variant in ("LocTex", "Tex"):
         recorded = run_table(find_learning_rate, tmp_path, "--variant", variant, *with_it)
         assert [built[0] for built in recorded.built] == [variant]
+
+    # A table that was built without the .mnt files holds minutiae for no
+    # subject: there are no other subjects to test, and the message says how
+    # the table gets minutiae
+    assert build(builder, tmp_path, table="without") == 0
+    for choice in (without, []):
+        used = "6 images of the 3 subjects" if choice else "10 images of the 5 subjects"
+        message = refused(
+            run_table, find_learning_rate, capsys, tmp_path, "--variant", "TexMinu", *choice,
+            table="without",
+        )
+        assert message.endswith(
+            "find_learning_rate.py: error: --variant TexMinu needs minutiae, and the sample "
+            f"table {tmp_path / 'without'} holds none (null) for the {used} that the test uses. "
+            "Build the table with the .mnt files of the images (--minutiae_dir of "
+            "scripts/build_sample_table.py), or test a variant without minutiae: --variant "
+            "auto chooses the one that train_500k.py trains by default from these rows."
+        )
+        # As the message says, and the training of this table trains that variant
+        recorded = run_table(find_learning_rate, tmp_path, *choice, table="without")
+        assert [built[0] for built in recorded.built] == ["LocTex"]
+    assert train(find_learning_rate, tmp_path, table="without") == ["LocTex"]
+
+
+def test_auto_without_minutiae_says_if_the_table_holds_minutiae_for_other_subjects(
+    find_learning_rate, builder, tmp_path, capsys
+):
+    """
+    The training looks at all its training images, the range test at the
+    images of the subjects that it chose. Where a table holds minutiae for
+    some subjects only, a choice can hold none of them: --variant auto is a
+    variant without minutiae then, while the training of the table has the
+    minutia branch. Such a test runs, and it says what it is not a test of.
+    """
+    write_minutiae_of_one_subject(builder, tmp_path)
+    tolerated = ["--tolerate_missing_minutiae"]
+    # Three subjects without the one that has minutiae
+    without = ["--max_subjects", 3, "--seed", seed_that_chooses(range(5), [0, 2, 3])]
+
+    def variant_and_notes(*options, table="table") -> tuple:
+        """The variant of a run, which must start, and what it notes about the minutiae."""
+        capsys.readouterr()
+        recorded = run_table(find_learning_rate, tmp_path, *options, table=table)
+        lines = printed(capsys)
+        notes = [
+            line for line in lines
+            if "WARNING" in line or (line.startswith("Note: ") and "the test needs" not in line)
+        ]
+        # They stand between what is said about the test and its result
+        assert lines[5].startswith("Note: the test needs ") and lines[6 : 6 + len(notes)] == notes
+        assert lines[6 + len(notes)] == "" and lines[7 + len(notes)].startswith("Ended after 2")
+        return recorded.built[0][0], notes
+
+    # The training of the table has the minutia branch, with the options
+    # that it needs for the eight images without minutiae
+    assert train(find_learning_rate, tmp_path, *tolerated) == ["LocTexMinu"]
+    note = (
+        "Note: --variant auto is DeepPrint_LocTex here, a variant without the minutia branch: "
+        "the sample table holds no minutiae (null) for the 6 images of the test. It holds "
+        "minutiae for 2 of its 10 images, which belong to other subjects. A training of the "
+        "table has the minutia branch if one of them is among its training images, unless it is "
+        "given --ignore_minutiae. To test that variant, let the test use more subjects "
+        "(--max_subjects, 0 for all) or other ones (another --seed)."
+    )
+    assert variant_and_notes(*without, *tolerated) == ("LocTex", [note])
+    assert variant_and_notes(*without) == ("LocTex", [note])
+    # As it says: with all subjects the test is one of the variant of the training
+    variant, notes = variant_and_notes("--max_subjects", 0, *tolerated)
+    assert variant == "LocTexMinu" and len(notes) == 1
+    assert notes[0].startswith("Note: the sample table holds no minutiae (null) for 8 of the 10 ")
+
+    # Nothing is said where a variant without minutiae was asked for: the
+    # training is to ignore the minutiae, or the variant is given by name
+    assert variant_and_notes(*without, "--ignore_minutiae") == ("LocTex", [])
+    assert train(find_learning_rate, tmp_path, "--ignore_minutiae", output="ignored") == ["LocTex"]
+    for variant in ("LocTex", "Tex"):
+        assert variant_and_notes(*without, "--variant", variant) == (variant, [])
+    # ... and where the table holds minutiae for no other subject either
+    assert build(builder, tmp_path, table="without") == 0
+    assert variant_and_notes(*without, table="without") == ("LocTex", [])
+
+    # A test that is refused has not said it: the note belongs to a test that starts
+    (tmp_path / "images" / "1_1.png").unlink()
+    lines, message = refusal(run_table, find_learning_rate, capsys, tmp_path, *without)
+    assert message.startswith("ERROR: 1 of the 6 image files that are needed of the sample table")
+    assert lines[-1].startswith("Note: the test needs ")
 
 
 def test_a_variant_with_minutiae_cannot_be_asked_for_together_with_ignore_minutiae(
@@ -1692,6 +1950,72 @@ def test_a_test_in_which_no_image_has_a_minutia_says_what_it_does_not_measure(
     assert "holds an empty list for 3 of them and null for 2. " in warning
 
 
+def test_what_a_test_says_about_its_minutiae_stands_before_the_warning_about_workers(
+    find_learning_rate, builder, tmp_path, monkeypatch, capsys
+):
+    """
+    The order of what a test from a table says between the lines about the
+    test and its result, where worker processes are not forked: first what
+    it says about the minutiae of its images (the note about rows without
+    minutiae before the warning that no image has a minutia), and then the
+    warning about its workers. A warning stands behind an empty line, a note
+    does not. A test that is refused has said none of this, also where it is
+    the last check that refuses it. The words of these lines have tests of
+    their own.
+    """
+    write_minutiae_of_one_subject(builder, tmp_path)
+    # A second table of the same images, built after the two .mnt files were
+    # written again without minutiae: an empty list in the rows of that
+    # subject and null in the eight others, so that no image has a minutia
+    for name in ("5_1.mnt", "5_2.mnt"):
+        (tmp_path / "minutiae" / name).write_text("0\n48 64\n")
+    assert build(builder, tmp_path, "--minutiae_dir", tmp_path / "minutiae", table="empty") == 1
+    multiprocessing = find_learning_rate.train_500k.multiprocessing
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=False: "spawn")
+    # Three subjects without the one that has .mnt files; and all five, with
+    # the rows without minutiae tolerated
+    without = ["--max_subjects", 3, "--seed", seed_that_chooses(range(5), [0, 2, 3])]
+    tolerated = ["--max_subjects", 0, "--tolerate_missing_minutiae"]
+
+    def said(*options, table="table") -> list:
+        """
+        The lines of a run, which must start, between 'Note: the test needs
+        ...' and the empty line before 'Ended after ...': each of them up to
+        its first comma or full stop.
+        """
+        capsys.readouterr()
+        assert len(run_table(find_learning_rate, tmp_path, *options, table=table).tests) == 1
+        lines = printed(capsys)
+        assert lines[5].startswith("Note: the test needs ")
+        assert lines[-4] == "" and lines[-3].startswith("Ended after 2 steps")
+        return [re.split("[,.]", line)[0] for line in lines[6:-4]]
+
+    auto = "Note: --variant auto is DeepPrint_LocTex here"
+    null_rows = "Note: the sample table holds no minutiae (null) for 8 of the 10 images of the test"
+    no_minutia = "WARNING: DeepPrint_LocTexMinu has the minutia branch"
+    workers = "WARNING: worker processes are started with 'spawn' here"
+    # auto as a variant without minutiae, on a table with minutiae for another subject
+    assert said(*without) == [auto, "", workers]
+    # Rows without minutiae that are tolerated ...
+    assert said(*tolerated) == [null_rows, "", workers]
+    # ... in a test in which no image has a minutia
+    assert said(*tolerated, table="empty") == [null_rows, "", no_minutia, "", workers]
+    # Control: a test that loads its images in its own process says nothing about workers
+    assert said(*without, "--num_workers", 0) == [auto]
+
+    # A test that is refused has said none of this, also where the last of
+    # its checks refuses it: an image that changed after the tables were built
+    changed = save(tmp_path / "images" / "1_1.png", ridge_image(80, 60), 500)
+    for options, table in ((without, "table"), (tolerated, "empty")):
+        lines, message = refusal(
+            run_table, find_learning_rate, capsys, tmp_path, *options, table=table
+        )
+        assert message.startswith(
+            f"ERROR: {changed} is not the file that its row of the sample table describes: "
+        )
+        assert lines[-1].startswith("Note: the test needs ")
+
+
 # ---------------------------------------------------------------------------
 # Tests that are refused: the options
 # ---------------------------------------------------------------------------
@@ -1819,6 +2143,25 @@ def test_an_empty_text_in_the_place_of_the_table_is_an_error_of_the_options(
             "that). Give the directory of the table, or leave --samples out to find the images "
             "by the names of their files."
         )
+
+
+@pytest.mark.parametrize("with_a_table", [True, False])
+def test_the_directory_of_the_images_is_required_in_both_modes(
+    find_learning_rate, grid_set, tmp_path, capsys, with_a_table
+):
+    """A table names its images below --dataset_dir: it does not replace that option."""
+
+    def without_the_image_directory(find_learning_rate, root, *options, output, **kwargs):
+        mode = ["--samples", root / "table"] if with_a_table else grid_options(root)
+        return run(find_learning_rate, *mode, "--output_dir", output, *options, **kwargs)
+
+    lines, message = refusal(
+        without_the_image_directory, find_learning_rate, capsys, grid_set, output=tmp_path / "out"
+    )
+    assert message.endswith(
+        "find_learning_rate.py: error: the following arguments are required: --dataset_dir"
+    )
+    assert lines == []
 
 
 @pytest.mark.parametrize(
@@ -2022,6 +2365,79 @@ def test_a_file_that_changed_after_the_table_was_built_stops_the_test_if_it_is_o
     assert len(run_table(find_learning_rate, tmp_path, *with_it).tests) == 1
 
 
+def test_the_rows_of_the_test_are_checked_in_the_order_of_the_training(
+    find_learning_rate, builder, tmp_path, capsys
+):
+    """
+    The start of a training from a table looks for the files, then at the
+    sizes of the prepared images, then at the rows without minutiae, and then
+    it loads images. The range test makes these checks in this order: a test
+    whose rows have faults of several kinds is refused with the message that
+    the training of such rows gives first.
+    """
+    images, minutiae = tmp_path / "images", tmp_path / "minutiae"
+    write_grid(tmp_path, 4, 2, minutiae=True)
+    # Subject 1: an image without a .mnt file
+    (minutiae / "2_1.mnt").unlink()
+    # A table of the files as they are now, in which no image is too small
+    assert build(builder, tmp_path, "--minutiae_dir", minutiae, table="earlier") == 1
+    # Subject 0: an image that is too small when it is prepared (and whose
+    # .mnt file does not fit it any more: it has no minutiae in the table)
+    write_small_prints(images, ["1_2.png"], ppi=600)
+    assert build(builder, tmp_path, "--minutiae_dir", minutiae) == 1
+    # Subject 3: a file that changed after the tables were built
+    changed = save(images / "4_2.png", ridge_image(80, 60), 500)
+
+    def of_the_training(*options, table="table") -> str:
+        """What the training of a table, with all its subjects, is refused with."""
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as stop:
+            train(find_learning_rate, tmp_path, *options, table=table)
+        assert stop.value.code == 2 and not exists(tmp_path / "model")
+        return " ".join(capsys.readouterr().err.split())
+
+    # The training stops for a row without minutiae before it loads a file
+    # that changed (control: with such rows tolerated, it stops for one), ...
+    assert of_the_training(table="earlier").startswith(
+        "ERROR: The sample table holds no minutiae (null) for 1 of the 8 training images. "
+    )
+    assert "is not the file that its row of the sample table describes: " in of_the_training(
+        "--tolerate_missing_minutiae", table="earlier"
+    )
+    # ... for an image that is too small before both, ...
+    assert of_the_training().startswith(
+        "ERROR: 1 of the 8 images of the sample table are too small for the "
+    )
+    # (subject 2: a file that is gone)
+    (images / "3_1.png").unlink()
+    # ... and for a missing file before everything else
+    assert of_the_training().startswith(
+        "ERROR: 1 of the 8 image files that the sample table names are missing below "
+    )
+
+    def message(*subjects) -> str:
+        """What a test of these subjects is refused with."""
+        choice = []
+        if len(subjects) < 4:
+            seed = seed_that_chooses(range(4), subjects)
+            choice = ["--max_subjects", len(subjects), "--seed", seed]
+        return refused(run_table, find_learning_rate, capsys, tmp_path, *choice)
+
+    # The range test, with subjects that have fewer and fewer kinds of faults
+    assert message(0, 1, 2, 3).startswith(
+        "ERROR: 1 of the 8 image files that are needed of the sample table are missing below "
+    )
+    assert message(0, 1, 3).startswith(
+        "ERROR: 1 of the 6 images that are needed of the sample table are too small for the "
+    )
+    assert message(1, 3).startswith(
+        "ERROR: The sample table holds no minutiae (null) for 1 of the 4 training images. "
+    )
+    assert message(3).startswith(
+        f"ERROR: {changed} is not the file that its row of the sample table describes: "
+    )
+
+
 def test_a_table_that_cannot_be_read_stops_the_test_with_the_reason(
     find_learning_rate, builder, tmp_path, monkeypatch, capsys
 ):
@@ -2101,6 +2517,70 @@ def test_a_range_test_from_a_table_runs_and_writes_its_files(
     output = capsys.readouterr().out
     assert "Suggested: --learning_rate" in output
     assert f"Plot:          {out / 'lr_range_test.png'}" in output.splitlines()
+
+
+@pytest.mark.parametrize("with_a_table", [True, False])
+def test_the_report_of_a_test_names_the_variant_that_was_tested_and_smooths_as_asked(
+    find_learning_rate, grid_set, tmp_path, monkeypatch, capsys, with_a_table
+):
+    """
+    What follows the range test is the same code with and without a table:
+    the file of the losses, the suggestion and the plot. It is handed the
+    variant that was tested, which --variant auto does not name, and it
+    smooths the losses with --smoothing. The range test is not run here:
+    steps that fall and rise stand for its result.
+    """
+    plots = []
+    save_plot = find_learning_rate.save_range_test_plot
+    monkeypatch.setattr(
+        find_learning_rate,
+        "save_range_test_plot",
+        lambda *args, **kwargs: plots.append((args, kwargs)) or save_plot(*args, **kwargs),
+    )
+    out = tmp_path / "out"
+    options = ["--smoothing", 0.5, "--batch_size", 8]
+    capsys.readouterr()
+    if with_a_table:
+        recorded = run_table(
+            find_learning_rate, grid_set, *options, output=out, steps=FALL_AND_RISE
+        )
+    else:
+        recorded = run_directory(
+            find_learning_rate, grid_set, *grid_options(grid_set), *options, output=out,
+            steps=FALL_AND_RISE,
+        )
+    lines = capsys.readouterr().out.splitlines()
+    assert [built[0] for built in recorded.built] == ["LocTexMinu"]
+
+    rates, losses, _, _ = FALL_AND_RISE
+    suggestion = suggest_learning_rate(rates, losses, 0.5)
+    # Control: with the smoothing of the default, another rate would be suggested
+    assert f"{suggestion.suggested_learning_rate:.2g}" == "0.0032"
+    assert f"{suggest_learning_rate(rates, losses).suggested_learning_rate:.2g}" == "0.0056"
+    assert len(suggestion.explanation.splitlines()) == 2
+    assert lines[-9:] == [
+        "",
+        "Ended after 24 steps at learning rate 0.562: loss exploded",
+        f"Loss per step: {out / 'lr_range_test.csv'}",
+        f"Plot:          {out / 'lr_range_test.png'}",
+        *suggestion.explanation.splitlines(),
+        "",
+        "Suggested: --learning_rate 0.0032",
+        "This value holds for this data, this model variant and this batch size only. Repeat "
+        "the test when one of them changes.",
+    ]
+    # The plot is drawn of these steps and this suggestion, and its title
+    # names the model that was tested
+    ((arguments, keywords),) = plots
+    assert arguments[0] == str(out / "lr_range_test.png") and arguments[1].losses == losses
+    assert arguments[2:] == (suggestion, 0.5)
+    assert keywords == {"title": "Learning rate range test, DeepPrint_LocTexMinu, batch size 8"}
+    assert np.array(Image.open(out / "lr_range_test.png")).ndim == 3
+    # The file of the losses holds them smoothed as asked
+    with open(out / "lr_range_test.csv", newline="") as file:
+        rows = [line.rstrip("\r\n").split(",") for line in file]
+    assert [float(row[2]) for row in rows[1:]] == losses
+    assert [float(row[3]) for row in rows[1:]] == smooth_losses(losses, 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -2187,9 +2667,11 @@ def test_a_test_without_a_table_prints_what_it_printed_before_there_were_tables(
         "the test when one of them changes.",
     ]
     assert len(suggestion.explanation.splitlines()) == 2
-    # Standard error holds the progress of the range test and nothing else
+    # Standard error holds the progress of the range test and nothing else:
+    # nothing at all where the environment switches the progress bar off
+    # (TQDM_DISABLE, which tqdm reads when it is imported)
     progress = [part for part in re.split(r"[\r\n]+", output.err) if part.strip()]
-    assert progress and all(re.match(r" *\d+%\|", part) for part in progress)
+    assert all(re.match(r" *\d+%\|", part) for part in progress)
 
     # Without --minutiae_dir, and with defaults for what the command above
     # gave: the variant without minutiae
@@ -2255,6 +2737,21 @@ def test_a_refusal_without_a_table_prints_what_it_printed_before_there_were_tabl
     # Without a table the directory of the output is made before the files
     # are looked for, as it always was
     assert os.listdir(out) == []
+
+
+def test_without_a_table_a_variant_with_minutiae_needs_the_directory_of_the_minutiae(
+    find_learning_rate, grid_set, tmp_path, capsys
+):
+    """The refusal that a table has other words for is the one it was, in its words."""
+    for variant in ("LocTexMinu", "TexMinu"):
+        lines, message = refusal(
+            run_directory, find_learning_rate, capsys, grid_set, "--variant", variant,
+            "--num_subjects", 7, "--num_impressions", 3, output=tmp_path / "out",
+        )
+        assert message.endswith(
+            f"find_learning_rate.py: error: --variant {variant} needs --minutiae_dir"
+        )
+        assert lines == []
 
 
 @pytest.mark.parametrize(
