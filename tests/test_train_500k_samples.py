@@ -2742,25 +2742,33 @@ def test_the_images_of_the_start_are_loaded_by_opencv_in_the_calling_thread(corp
         cv2.setNumThreads(earlier)
 
 
-def threads_of_opencv() -> int:
+def threads_started_by(action) -> int:
     """
-    How many threads OpenCV's pool has in this process. They end when OpenCV
-    is told to use one thread, so the threads of the process are counted
-    before and after that. The pool is gone afterwards; OpenCV keeps the
-    number of threads that it had and makes the pool again when it needs it.
+    How many threads an action starts in this process, where OpenCV has no
+    thread of its pool when the action begins: the names in /proc/self/task
+    after the action that were not there before it. The pool is ended between
+    the first look and the action: told to use one thread, OpenCV ends the
+    threads of its pool at once, and given the number of before again, it
+    makes the pool anew when it needs it.
+
+    What starts is counted, not what ends: a thread is listed from the moment
+    it is created, but one that has ended can be listed for a moment longer.
+    The threads that end here were listed at the first look, so none of them
+    is taken for a new one. And the first look comes before they end, not
+    after: a listing that is read while threads end can lack one that lives.
     """
     number = cv2.getNumThreads()
-    before = len(os.listdir("/proc/self/task"))
+    before = set(os.listdir("/proc/self/task"))
     cv2.setNumThreads(1)
-    ended = before - len(os.listdir("/proc/self/task"))
     cv2.setNumThreads(number)
-    return ended
+    action()
+    return len(set(os.listdir("/proc/self/task")) - before)
 
 
 def test_the_images_of_the_start_leave_no_thread_of_opencv_in_the_process(corpus, train_500k):
     """
-    What the test above is for, seen in the process itself: after the loads
-    of the start it has no thread of OpenCV's pool that a fork could meet
+    What the test above is for, seen in the process itself: the loads of the
+    start bring no thread of OpenCV's pool into it that a fork could meet
     with its lock held. The control loads the same images outside of the
     check, as a process loads them that is told nothing, and finds the
     threads that the check does not start.
@@ -2769,23 +2777,76 @@ def test_the_images_of_the_start_leave_no_thread_of_opencv_in_the_process(corpus
         pytest.skip("The threads of the process are counted in /proc")
     table = corpus.table
     loader = SampleTableImageLoader(table)
+
+    def load() -> None:
+        for identifier in table.ids:
+            loader.get(identifier)
+
+    def check() -> None:
+        assert train_500k.check_table_images(loader) == table.num_rows
+
     earlier = cv2.getNumThreads()
     # A number that is given: with the one thread that is the default of a
     # machine with one core, OpenCV has no pool at all
     cv2.setNumThreads(3)
     try:
-        threads_of_opencv()  # those of earlier tests end here
+        # Whatever else a first load starts in the process is started here,
+        # where nothing is counted: torch has threads of its own, and they stay
+        load()
         # Control: OpenCV hands one of these images at least to its pool
-        for identifier in table.ids:
-            loader.get(identifier)
-        if threads_of_opencv() == 0:
+        if threads_started_by(load) == 0:
             pytest.skip("This OpenCV starts no threads that can be counted for these images")
 
-        assert train_500k.check_table_images(loader) == table.num_rows
-        assert threads_of_opencv() == 0
+        assert threads_started_by(check) == 0
         assert cv2.getNumThreads() == 3
     finally:
         cv2.setNumThreads(earlier)
+
+
+def test_the_images_of_the_start_set_the_threads_of_opencv_only_where_it_has_more_than_one(
+    train_500k, monkeypatch
+):
+    """
+    The calls of cv2.setNumThreads that the loads of the start make, by the
+    number of threads that OpenCV has. Above one it has a pool, with two as
+    well: it is told 0 before the loads and the number of before after them.
+    0 and not 1, because at 0 OpenCV leaves its pool alone, and at 1 it ends
+    the threads of the pool, which can wait without end in a forked process,
+    where their records are and the threads are not. At one thread no call
+    is made. One is also what OpenCV states where it was told 0, and there
+    the threads of its pool are left: a 1 that is "set back" would end them.
+    """
+
+    class Loader:
+        """Loads nothing."""
+
+        table = table_of([(0, 0), (1, 0)])
+
+        def get(self, identifier):
+            pass
+
+    set_threads = cv2.setNumThreads
+    calls = []
+
+    def keeping(number: int) -> None:
+        calls.append(number)
+        set_threads(number)
+
+    earlier = cv2.getNumThreads()
+    monkeypatch.setattr(cv2, "setNumThreads", keeping)
+    try:
+        # The number that OpenCV is given, the one that it states then, the calls of the check
+        for given, stated, expected in ((3, 3, [0, 3]), (2, 2, [0, 2]), (1, 1, []), (0, 1, [])):
+            set_threads(given)
+            if given > 1 and cv2.getNumThreads() == 1:
+                pytest.skip("This OpenCV has one thread whatever number it is given")
+            assert cv2.getNumThreads() == stated
+            calls.clear()
+            assert train_500k.check_table_images(Loader()) == 2
+            assert calls == expected, given
+            assert cv2.getNumThreads() == stated
+    finally:
+        set_threads(earlier)
 
 
 def test_a_table_that_cannot_be_read_stops_the_run_with_the_reason(

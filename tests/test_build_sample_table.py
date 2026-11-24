@@ -78,24 +78,6 @@ def builder_without_pyarrow(monkeypatch):
     return load_script()
 
 
-@pytest.fixture(autouse=True)
-def no_threads_of_opencv():
-    """
-    Tests of this file build tables with worker processes, which the script
-    forks from the process of pytest, and which load images. A thread of
-    OpenCV's pool that holds its lock at the moment of a fork leaves the
-    forked process waiting for that lock without end, when it loads an image
-    that OpenCV hands to its pool. So during every test OpenCV has one
-    thread: that ends the threads of its pool, and it loads in the calling
-    thread. After the test it has the number of threads that it had, for the
-    tests of other files.
-    """
-    threads = cv2.getNumThreads()
-    cv2.setNumThreads(1)
-    yield
-    cv2.setNumThreads(threads)
-
-
 def run(script, monkeypatch, *arguments) -> int:
     """Runs main() with the arguments and returns the exit status."""
     monkeypatch.setattr(sys, "argv", ["build_sample_table.py"] + [str(a) for a in arguments])
@@ -828,6 +810,68 @@ def test_worker_processes_give_the_same_table_as_one_process(
         assert text and (tmp_path / "table_3" / name).read_text() == text
     # ... and neither does what is printed, apart from the directory
     assert [line.replace("table_3", "table_1") for line in workers] == one_process
+
+
+def test_a_worker_process_tells_opencv_to_run_in_its_own_thread(builder, monkeypatch, tmp_path):
+    """
+    A worker is forked, and it has the locks of the process that forked it as
+    they were at that moment. If a thread of OpenCV's pool held its lock
+    then, a load that OpenCV hands to its pool would wait for that lock in
+    the worker without end. So a worker tells OpenCV before its first load to
+    run in the calling thread, whatever number of threads the process has
+    that forked it. It tells it 0, at which OpenCV leaves the pool alone, and
+    not 1, at which it ends the threads of the pool: that can wait without
+    end as well in a forked process. A build with one process loads in the
+    process that called it, and tells OpenCV nothing.
+    """
+    for subject in (1, 2, 3):
+        for impression in (1, 2):
+            save(tmp_path / "images" / f"{subject}_{impression}.png")
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    load_sample, set_threads = builder.load_sample, cv2.setNumThreads
+
+    def note(text: str) -> None:
+        with open(notes / str(os.getpid()), "a") as file:
+            file.write(text + "\n")
+
+    def noting_load(*arguments):
+        note(f"loads with {cv2.getNumThreads()}")
+        return load_sample(*arguments)
+
+    def noting_number(number: int) -> None:
+        note(f"tells {number}")
+        set_threads(number)
+
+    def noted() -> dict:
+        """{process: what it wrote down, in the order of the events}"""
+        return {int(name): (notes / name).read_text().splitlines() for name in os.listdir(notes)}
+
+    earlier = cv2.getNumThreads()
+    # A number that is given: the default of a machine with one core is one
+    # thread, which a worker would have there without telling OpenCV anything
+    cv2.setNumThreads(3)
+    try:
+        if cv2.getNumThreads() == 1:
+            pytest.skip("This OpenCV has one thread whatever number it is given")
+        # The workers are forked from this process, so they have the functions that are put in here
+        monkeypatch.setattr(builder, "load_sample", noting_load)
+        monkeypatch.setattr(cv2, "setNumThreads", noting_number)
+        assert build(builder, monkeypatch, tmp_path, "--workers", 2, table="table_2") == 0
+        workers = noted()
+        assert len(workers) == 2 and os.getpid() not in workers
+        for events in workers.values():
+            assert events[0] == "tells 0" and set(events[1:]) == {"loads with 1"}
+        assert sum(len(events) - 1 for events in workers.values()) == 6
+
+        # Control: one process loads with the threads that were given, and it stays at them
+        assert build(builder, monkeypatch, tmp_path, table="table_1") == 0
+        assert noted() == {**workers, os.getpid(): 6 * ["loads with 3"]}
+        assert cv2.getNumThreads() == 3
+    finally:
+        set_threads(earlier)
+    one, two = read_samples(tmp_path / "table_1"), read_samples(tmp_path / "table_2")
+    assert len(one) == 6 and samples_checksum(one) == samples_checksum(two)
 
 
 def test_the_files_are_cut_into_parts_in_the_order_of_their_numbers(builder, monkeypatch, tmp_path):

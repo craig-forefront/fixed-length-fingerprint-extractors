@@ -912,6 +912,21 @@ def _serve(connection, inherited: tuple, source: tuple) -> None:
     # that the main process is gone.
     for other in inherited:
         other.close()
+    # A forked worker has the memory of the process that forked it and none
+    # of its other threads. If a thread of OpenCV's pool held its lock there
+    # at the moment of the fork, the lock is locked here as well, and nothing
+    # unlocks it: a load that OpenCV hands to its pool would wait for it
+    # without end. So OpenCV is told to run in the calling thread before this
+    # worker loads anything; it then leaves the pool alone. (0 and not 1:
+    # told 1, OpenCV ends the threads of its pool, which can wait without end
+    # as well in a forked process: it has their records and not the threads.)
+    # The main process of a build with workers does not use OpenCV itself,
+    # but a process that calls main() may have used it before.
+    # (cv2 is imported here: at the top of the script it would be loaded
+    # before the libraries that the flx imports bring, torch among them.)
+    import cv2
+
+    cv2.setNumThreads(0)
     while True:
         try:
             job = connection.recv()

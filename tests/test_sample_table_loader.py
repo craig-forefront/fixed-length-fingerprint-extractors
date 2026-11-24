@@ -1567,6 +1567,10 @@ def test_the_loaders_serve_the_worker_processes_of_a_training(corpus, train_500k
     expected = [samples[index] for index in range(len(samples))]
     assert {weight for _, (_, weight), _, _ in expected} == {0.0, 1.0}
 
+    # The workers are forked next. The fixture no_threads_of_opencv told
+    # OpenCV to use one thread, which ended the threads of its pool, and it
+    # still states one: nothing has given it more since
+    assert cv2.getNumThreads() == 1
     batches = torch.utils.data.DataLoader(
         samples, batch_size=3, shuffle=False, num_workers=2, multiprocessing_context="fork"
     )
