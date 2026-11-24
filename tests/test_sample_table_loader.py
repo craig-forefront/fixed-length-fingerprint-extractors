@@ -33,6 +33,9 @@ import importlib.util
 import os
 import pickle
 import random
+import shutil
+import socket
+import tempfile
 import tracemalloc
 import weakref
 from os.path import abspath, dirname, join
@@ -91,6 +94,23 @@ def train_500k():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def no_threads_of_opencv():
+    """
+    A test of this file forks worker processes from the process of pytest,
+    and they load images. A thread of OpenCV's pool that holds its lock at
+    the moment of a fork leaves the forked process waiting for that lock
+    without end, when it loads an image that OpenCV hands to its pool. So
+    during every test OpenCV has one thread: that ends the threads of its
+    pool, and it loads in the calling thread. After the test it has the
+    number of threads that it had, for the tests of other files.
+    """
+    threads = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    yield
+    cv2.setNumThreads(threads)
 
 
 # ---------------------------------------------------------------------------
@@ -1462,6 +1482,62 @@ class _Process(DataLoader):
         return os.getpid()
 
 
+def why_workers_cannot_send_tensors() -> Optional[str]:
+    """
+    A worker process of a torch DataLoader hands its tensors over through a
+    socket that Python's multiprocessing makes below the temporary directory,
+    at <temporary directory>/pymp-<8 characters>/listener-<8 characters>. The
+    path of a socket has a largest length (107 bytes on Linux). Where the
+    socket cannot be made, the worker writes the error to its standard error
+    and hands nothing over, and the process that reads the DataLoader waits
+    for its batches without end.
+
+    Returns None if a socket can be made at such a path below the temporary
+    directory; if not, what to tell the user.
+    """
+    directory = tempfile.mkdtemp(prefix="pymp-")
+    path = join(directory, "listener-" + 8 * "x")
+    try:
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(path)
+    except OSError as error:
+        return (
+            "Worker processes cannot hand their tensors over here: Python's multiprocessing "
+            "makes a socket for that below the temporary directory, and none can be made at "
+            f"{path} ({error}). The process that reads them would wait without end. Give the "
+            "tests another temporary directory (TMPDIR): one with a shorter path, if this one "
+            "is too long."
+        )
+    finally:
+        shutil.rmtree(directory)
+    return None
+
+
+def test_a_temporary_directory_in_which_workers_cannot_send_tensors_is_noticed(
+    tmp_path, monkeypatch
+):
+    """
+    The test below does not start its worker processes where they could not
+    hand their batches over: it would wait for them without end. What tells
+    it so must tell it, here below a directory whose path alone is longer
+    than the path of a socket can be.
+    """
+    directory = tmp_path / (120 * "d")
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    reason = why_workers_cannot_send_tensors()
+    assert reason is not None and f"none can be made at {directory}" in reason
+    assert "TMPDIR" in reason
+    # The path that was tried is as long as the one that multiprocessing makes
+    # of these two names (get_temp_dir of its util.py, arbitrary_address of
+    # its connection.py)
+    as_made = tempfile.mktemp(prefix="listener-", dir=tempfile.mktemp(prefix="pymp-"))
+    tried = reason.split("none can be made at ")[1]
+    assert tried[len(as_made) :].startswith(" (")
+    # Nothing is left of the attempt
+    assert os.listdir(directory) == []
+
+
 def test_the_loaders_serve_the_worker_processes_of_a_training(corpus, train_500k, monkeypatch):
     """
     Images, minutia maps and labels as the training zips them, fetched by
@@ -1469,6 +1545,9 @@ def test_the_loaders_serve_the_worker_processes_of_a_training(corpus, train_500k
     that the loaders give in this process. Without augmentation, which is
     random, and without the binariser, which this comparison does not need.
     """
+    unable = why_workers_cannot_send_tensors()
+    if unable is not None:
+        pytest.skip(unable)
     monkeypatch.setattr(train_500k, "LazilyAllocatedBinarizer", lambda _: identity)
     table = corpus.table
     ids = table.ids

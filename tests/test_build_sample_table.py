@@ -22,6 +22,7 @@ import sys
 import time
 from os.path import dirname, join
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -75,6 +76,24 @@ def builder_without_pyarrow(monkeypatch):
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     return load_script()
+
+
+@pytest.fixture(autouse=True)
+def no_threads_of_opencv():
+    """
+    Tests of this file build tables with worker processes, which the script
+    forks from the process of pytest, and which load images. A thread of
+    OpenCV's pool that holds its lock at the moment of a fork leaves the
+    forked process waiting for that lock without end, when it loads an image
+    that OpenCV hands to its pool. So during every test OpenCV has one
+    thread: that ends the threads of its pool, and it loads in the calling
+    thread. After the test it has the number of threads that it had, for the
+    tests of other files.
+    """
+    threads = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    yield
+    cv2.setNumThreads(threads)
 
 
 def run(script, monkeypatch, *arguments) -> int:
@@ -528,8 +547,8 @@ def test_an_image_is_a_row_under_its_own_name_also_where_it_is_a_link(
     sizes = [os.path.getsize(images / "1_1.PNG"), os.path.getsize(scan)]
     assert samples.file_size.tolist() == sizes
     assert row_of(samples, 0, 1)["source_size"] == (144, 200)
-    # Control: the link itself has another size, that of the path it holds
-    assert os.lstat(images / "1_2.png").st_size == len(scan) != os.path.getsize(scan)
+    # Control: the link itself has another size, that of the path it holds in bytes
+    assert os.lstat(images / "1_2.png").st_size == len(os.fsencode(scan)) != os.path.getsize(scan)
 
 
 # ---------------------------------------------------------------------------
@@ -1090,6 +1109,14 @@ def test_a_mnt_file_that_is_refused_leaves_its_image_in_the_table_without_minuti
     elif case == "no text":
         os.makedirs(path.parent, exist_ok=True)
         path.write_bytes(b"\xff\xfe\x00\x01\n\x80\x81\n")
+        # No text where files are read as UTF-8 or as ASCII. An encoding with
+        # a character for every byte (ISO-8859-1) knows no file that is none
+        try:
+            path.read_text()
+        except UnicodeDecodeError:
+            pass
+        else:
+            pytest.skip("This process reads these bytes as text: its encoding has such characters")
     elif case == "a directory":
         os.makedirs(path)
     else:
@@ -1495,6 +1522,8 @@ def test_file_names_with_unusual_characters_are_rows_and_single_lines_of_the_log
     builder, monkeypatch, tmp_path
 ):
     names = ["zeile\num bruch.png", "tab\tulator.png", "größe ü/指紋 1.png", "a b/c'd\"e.png"]
+    if sys.getfilesystemencoding() != "utf-8":
+        pytest.skip("The file names of this process are not UTF-8: it cannot write these names")
     for name in names:
         save(tmp_path / "images" / name)
     extracted(tmp_path, names[2])
@@ -1568,6 +1597,10 @@ def test_file_names_that_a_table_cannot_take_refuse_the_build(
     for name in names:
         if isinstance(name, bytes):  # a name that is not UTF-8, as a file system can hold it
             name = os.fsdecode(name)
+            # Python keeps a byte that is no text in the encoding of file names
+            # as a character of its own (a surrogate), which is no UTF-8
+            if not any("\udc80" <= character <= "\udcff" for character in name):
+                pytest.skip("The file names of this process have these bytes as characters")
         save(tmp_path / "images" / name)
     before = snapshot(tmp_path / "images")
     forbid_loading(builder, monkeypatch)
@@ -2396,6 +2429,9 @@ def test_check_goes_with_no_other_option(builder, monkeypatch, tmp_path, capsys)
 
 
 def test_every_option_has_a_help_text_that_states_its_default(builder, monkeypatch, capsys):
+    # argparse wraps the help to the width of the terminal, which it takes
+    # from this variable first: the lines are those of 80 columns everywhere
+    monkeypatch.setenv("COLUMNS", "80")
     with pytest.raises(SystemExit) as leaving:
         run(builder, monkeypatch, "--help")
     assert leaving.value.code == 0

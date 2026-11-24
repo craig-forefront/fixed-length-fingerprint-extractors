@@ -587,7 +587,8 @@ def test_a_table_is_written_and_read_by_processes_that_import_nothing_of_pyarrow
     directory = str(tmp_path / "table")
     result = run_alone(start + write, directory)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [os.path.join(directory, part_name(0, 1))]
+    # The whole line: the path of a temporary directory can hold a space
+    assert result.stdout == os.path.join(directory, part_name(0, 1)) + "\n"
     # Another process: one that reads a table has usually not written one before
     result = run_alone(start + read, directory)
     assert result.returncode == 0, result.stderr

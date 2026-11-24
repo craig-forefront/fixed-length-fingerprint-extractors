@@ -1107,25 +1107,43 @@ def check_table_images(
     Returns the number of images loaded. Raises SampleTableError with the
     message of the loader for the first file that cannot be used.
     """
+    import cv2
+
     table = image_loader.table
     if max_images is None:
         max_images = IMAGES_LOADED_AT_THE_START
     available = table.num_rows if rows is None else len(rows)
     # From the first of the rows to the last, at equal distances
     spread = np.unique(np.linspace(0, available - 1, min(max_images, available)).astype(np.int64))
-    for row in (spread if rows is None else rows[spread]).tolist():
-        try:
-            image_loader.get(table.identifiers[row])
-        except (SampleTableError, FileNotFoundError) as error:
-            # The message of the loader names the file, its row and what to do
-            raise SampleTableError(str(error)) from error
-        except (OSError, ValueError) as error:
-            raise SampleTableError(
-                f"{error}. The file belongs to the row {table.describe_row(row)} of the "
-                f"sample table, for the image directory {table.image_dir}, and it cannot be "
-                "loaded. Put the file back as it was when the table was built, or build the "
-                "table again without it (scripts/build_sample_table.py)."
-            ) from error
+    # This process forks the workers that load the images later. OpenCV runs
+    # these loads, its only ones here before that, in the calling thread: a
+    # thread of its pool that holds its lock at the moment of a fork leaves
+    # the forked worker waiting for that lock without end. Where OpenCV has
+    # one thread already, nothing is changed. No other thread of the process
+    # may be in a call of OpenCV when its number of threads is set (none is,
+    # in both scripts): OpenCV does not guard that number, and a call that
+    # another thread had with the pool at that moment ended the process with
+    # a division by zero.
+    threads = cv2.getNumThreads()
+    if threads > 1:
+        cv2.setNumThreads(0)
+    try:
+        for row in (spread if rows is None else rows[spread]).tolist():
+            try:
+                image_loader.get(table.identifiers[row])
+            except (SampleTableError, FileNotFoundError) as error:
+                # The message of the loader names the file, its row and what to do
+                raise SampleTableError(str(error)) from error
+            except (OSError, ValueError) as error:
+                raise SampleTableError(
+                    f"{error}. The file belongs to the row {table.describe_row(row)} of the "
+                    f"sample table, for the image directory {table.image_dir}, and it cannot be "
+                    "loaded. Put the file back as it was when the table was built, or build the "
+                    "table again without it (scripts/build_sample_table.py)."
+                ) from error
+    finally:
+        if threads > 1:
+            cv2.setNumThreads(threads)
     return len(spread)
 
 

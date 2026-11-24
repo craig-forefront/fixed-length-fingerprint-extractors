@@ -25,6 +25,7 @@ uses. The .mnt files are written as text, and no test module is imported:
 the helpers are copies.
 """
 
+import functools
 import importlib.util
 import multiprocessing
 import os
@@ -39,6 +40,7 @@ from typing import NamedTuple, Optional
 import numpy as np
 import pytest
 import torch
+import tqdm
 from PIL import Image
 
 pytest.importorskip("pyarrow")
@@ -1485,6 +1487,9 @@ def test_the_help_states_the_defaults_of_the_new_options_and_of_the_old_ones(
     find_learning_rate, monkeypatch, capsys
 ):
     """The three defaults that are withheld while the options are parsed are still shown."""
+    # argparse wraps the help to the width of the terminal, which it takes
+    # from this variable first: the lines are those of 80 columns everywhere
+    monkeypatch.setenv("COLUMNS", "80")
     monkeypatch.setattr(sys, "argv", ["find_learning_rate.py", "--help"])
     with pytest.raises(SystemExit) as stop:
         find_learning_rate.main()
@@ -2621,7 +2626,7 @@ def test_the_range_test_stops_for_the_file_for_which_the_training_of_the_table_s
 
 
 def test_a_test_without_a_table_prints_what_it_printed_before_there_were_tables(
-    find_learning_rate, tmp_path, capsys
+    find_learning_rate, tmp_path, monkeypatch, capsys
 ):
     """
     Every line of a run without --samples, from its first line to its last,
@@ -2635,6 +2640,10 @@ def test_a_test_without_a_table_prints_what_it_printed_before_there_were_tables(
     assert len(names) == 12
     grid_of_the_files = ["--num_subjects", 6, "--num_impressions", 2, "--max_subjects", 4]
     set_of_all_files = "Created IdentifierSet with 6 subjects and a total of 12 samples."
+    # The range test draws a progress bar on standard error, in a form that
+    # settings of the environment change (TQDM_...). It is switched off here,
+    # so that everything else that a run writes there shows
+    monkeypatch.setattr(tqdm, "tqdm", functools.partial(tqdm.tqdm, disable=True))
     capsys.readouterr()
     recorded = run_directory(
         find_learning_rate, tmp_path, "--minutiae_dir", minutiae, *grid_of_the_files,
@@ -2667,11 +2676,8 @@ def test_a_test_without_a_table_prints_what_it_printed_before_there_were_tables(
         "the test when one of them changes.",
     ]
     assert len(suggestion.explanation.splitlines()) == 2
-    # Standard error holds the progress of the range test and nothing else:
-    # nothing at all where the environment switches the progress bar off
-    # (TQDM_DISABLE, which tqdm reads when it is imported)
-    progress = [part for part in re.split(r"[\r\n]+", output.err) if part.strip()]
-    assert all(re.match(r" *\d+%\|", part) for part in progress)
+    # Standard error holds nothing but the progress bar, which is off here
+    assert output.err == ""
 
     # Without --minutiae_dir, and with defaults for what the command above
     # gave: the variant without minutiae

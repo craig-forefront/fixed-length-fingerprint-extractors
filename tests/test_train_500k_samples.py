@@ -38,6 +38,7 @@ import sys
 from os.path import abspath, dirname, exists, join
 from typing import NamedTuple, Optional
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -1985,6 +1986,9 @@ def test_the_help_states_the_defaults_of_the_new_options_and_of_the_old_ones(
     train_500k, monkeypatch, capsys
 ):
     """The three defaults that are withheld while the options are parsed are still shown."""
+    # argparse wraps the help to the width of the terminal, which it takes
+    # from this variable first: the lines are those of 80 columns everywhere
+    monkeypatch.setenv("COLUMNS", "80")
     monkeypatch.setattr(sys, "argv", ["train_500k.py", "--help"])
     with pytest.raises(SystemExit) as stop:
         train_500k.main()
@@ -2445,7 +2449,8 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
         "in a directory": ["größe/1_1.png", "größe/1_2.png", "größe/2_1.png", "größe/2_2.png"],
         "in the image directory": ["指紋 a.png", "指紋 b.png", "c.png", "d.png"],
     }
-    assert sys.getfilesystemencoding() == "utf-8"  # this process can write these names
+    if sys.getfilesystemencoding() != "utf-8":
+        pytest.skip("The file names of this process are not UTF-8: it cannot write these names")
     for name, paths in sets.items():
         root = tmp_path / name
         write_small_prints(root / "images", paths)
@@ -2459,13 +2464,18 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     # The child process. It runs main() on both sets if its file names are
     # ASCII; if not, it has nothing to show and ends before it loads the
     # script. It cannot train: a start that is not refused gets an error in
-    # the place of a model.
+    # the place of a model. It names the table from inside the directory of
+    # the set: pyarrow takes the path of a part as UTF-8 text, and the path
+    # of a temporary directory with other characters than ASCII is none in
+    # this process.
     code = (
         "import importlib.util\n"
+        "import os\n"
         "import sys\n"
         "print(sys.getfilesystemencoding())\n"
         "if sys.getfilesystemencoding() != 'ascii':\n"
         "    sys.exit()\n"
+        "sys.path.insert(0, os.getcwd())\n"
         "spec = importlib.util.spec_from_file_location('train_500k', 'scripts/train_500k.py')\n"
         "train_500k = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(train_500k)\n"
@@ -2475,8 +2485,9 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
         "    if name.startswith('get_DeepPrint_'):\n"
         "        setattr(train_500k, name, no_model)\n"
         "for root in sys.argv[1:]:\n"
+        "    os.chdir(root)\n"
         "    sys.argv = ['train_500k.py', '--dataset_dir', root + '/images', '--samples',\n"
-        "                root + '/table', '--output_dir', root + '/refused',\n"
+        "                'table', '--output_dir', root + '/refused',\n"
         "                '--validation_split', '0']\n"
         "    try:\n"
         "        train_500k.main()\n"
@@ -2512,10 +2523,14 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     in_messages = ["'gr\\xf6\\xdfe/1_1.png'", "'\\u6307\\u7d0b a.png'"]
     messages = [" ".join(message.split()) for message in result.stderr.split("END OF A RUN")]
     for name, named, message in zip(sets, in_messages, messages):
+        # The directory as the process writes it: with escapes too, where the
+        # path of the temporary directory holds other characters than ASCII
+        images = os.fsencode(tmp_path / name / "images").decode("ascii", "surrogateescape")
+        images = images.encode("ascii", "backslashreplace").decode("ascii")
         # What comes before the message is not of the script (a warning of a package)
         assert message[message.index("ERROR: ") :].startswith(
             f"ERROR: The image file {named} (subject 0, impression 0) of the sample table "
-            f"cannot be looked for below {tmp_path / name / 'images'}: this process writes the "
+            f"cannot be looked for below {images}: this process writes the "
             "names of files in the encoding ascii, which cannot express the path ('ascii' codec "
         ), name
         assert message.endswith(
@@ -2628,6 +2643,26 @@ def test_an_empty_text_in_the_place_of_the_table_is_an_error_of_the_options(
     assert not exists(tmp_path / "model")
 
 
+@pytest.mark.parametrize("with_a_table", [True, False])
+def test_the_directory_of_the_images_is_required_in_both_modes(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys, with_a_table
+):
+    """A table names its images below --dataset_dir: it does not replace that option."""
+
+    def without_the_image_directory(train_500k, monkeypatch, root, *options, output, fake):
+        mode = ["--samples", root / "table"] if with_a_table else GRID_OPTIONS
+        return run(train_500k, monkeypatch, *mode, "--output_dir", output, *options, fake=fake)
+
+    message = refused(
+        without_the_image_directory, train_500k, monkeypatch, capsys, grid_set,
+        output=tmp_path / "model",
+    )
+    assert message.endswith(
+        "train_500k.py: error: the following arguments are required: --dataset_dir"
+    )
+    assert not exists(tmp_path / "model")
+
+
 def test_the_images_that_are_loaded_at_the_start_are_spread_over_the_table(train_500k):
     class Loader:
         """Keeps which rows it is asked for."""
@@ -2648,6 +2683,109 @@ def test_the_images_that_are_loaded_at_the_start_are_spread_over_the_table(train
         loader = Loader(rows)
         assert train_500k.check_table_images(loader, max_images) == len(expected)
         assert loader.asked == expected
+
+
+def test_the_images_of_the_start_are_loaded_by_opencv_in_the_calling_thread(corpus, train_500k):
+    """
+    The process that loads the images of the start forks the worker processes
+    of the training afterwards. A thread of OpenCV's pool that holds its lock
+    at the moment of a fork leaves the forked worker waiting for that lock
+    without end. So OpenCV is not to start its pool for these loads: it is
+    told to run them in the calling thread, and when they are over it has the
+    number of threads that it had, also when a load fails or is interrupted.
+    """
+    from flx.preparation.sample_table import SampleTableError
+
+    table = corpus.table
+    images = SampleTableImageLoader(table)
+
+    class Loader:
+        """Loads as the loader of the table, and keeps how many threads OpenCV has at each load."""
+
+        def __init__(self, error=None):
+            self.table = table
+            self.error = error
+            self.threads = []
+
+        def get(self, identifier):
+            self.threads.append(cv2.getNumThreads())
+            if self.error is not None:
+                raise self.error
+            return images.get(identifier)
+
+    earlier = cv2.getNumThreads()
+    # A number that is given: the default of a machine with one core is one
+    # thread, with which the loads of the start would not differ from others
+    cv2.setNumThreads(3)
+    try:
+        threads = cv2.getNumThreads()
+        if threads == 1:
+            pytest.skip("This OpenCV has one thread whatever number it is given")
+        loader = Loader()
+        assert train_500k.check_table_images(loader) == table.num_rows == len(loader.threads)
+        assert set(loader.threads) == {1}
+        assert cv2.getNumThreads() == threads
+        # Control: a load that the check does not make has the threads that were given
+        loader.get(table.identifiers[0])
+        assert loader.threads[-1] == threads
+
+        for error, raised in (
+            (FileNotFoundError("The image file is missing."), SampleTableError),
+            (KeyboardInterrupt(), KeyboardInterrupt),
+        ):
+            loader = Loader(error)
+            with pytest.raises(raised):
+                train_500k.check_table_images(loader)
+            assert loader.threads == [1]
+            assert cv2.getNumThreads() == threads
+    finally:
+        cv2.setNumThreads(earlier)
+
+
+def threads_of_opencv() -> int:
+    """
+    How many threads OpenCV's pool has in this process. They end when OpenCV
+    is told to use one thread, so the threads of the process are counted
+    before and after that. The pool is gone afterwards; OpenCV keeps the
+    number of threads that it had and makes the pool again when it needs it.
+    """
+    number = cv2.getNumThreads()
+    before = len(os.listdir("/proc/self/task"))
+    cv2.setNumThreads(1)
+    ended = before - len(os.listdir("/proc/self/task"))
+    cv2.setNumThreads(number)
+    return ended
+
+
+def test_the_images_of_the_start_leave_no_thread_of_opencv_in_the_process(corpus, train_500k):
+    """
+    What the test above is for, seen in the process itself: after the loads
+    of the start it has no thread of OpenCV's pool that a fork could meet
+    with its lock held. The control loads the same images outside of the
+    check, as a process loads them that is told nothing, and finds the
+    threads that the check does not start.
+    """
+    if not os.path.isdir("/proc/self/task"):
+        pytest.skip("The threads of the process are counted in /proc")
+    table = corpus.table
+    loader = SampleTableImageLoader(table)
+    earlier = cv2.getNumThreads()
+    # A number that is given: with the one thread that is the default of a
+    # machine with one core, OpenCV has no pool at all
+    cv2.setNumThreads(3)
+    try:
+        threads_of_opencv()  # those of earlier tests end here
+        # Control: OpenCV hands one of these images at least to its pool
+        for identifier in table.ids:
+            loader.get(identifier)
+        if threads_of_opencv() == 0:
+            pytest.skip("This OpenCV starts no threads that can be counted for these images")
+
+        assert train_500k.check_table_images(loader) == table.num_rows
+        assert threads_of_opencv() == 0
+        assert cv2.getNumThreads() == 3
+    finally:
+        cv2.setNumThreads(earlier)
 
 
 def test_a_table_that_cannot_be_read_stops_the_run_with_the_reason(
