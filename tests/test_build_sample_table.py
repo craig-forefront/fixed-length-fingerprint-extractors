@@ -2523,6 +2523,52 @@ def test_the_script_runs_as_a_program_from_any_directory(tmp_path):
     assert f"Checksum (samples_sha256): {samples_checksum(samples)}" in result.stdout
 
 
+def test_a_table_at_a_path_outside_ascii_is_built_and_checked_where_file_names_are_ascii(tmp_path):
+    """
+    The script as a program in a process whose file names are ASCII (the C
+    locale, where Python is told not to take UTF-8 in its place), and a
+    table in a directory whose name holds other characters. Such a path
+    comes from the command line as bytes, which Python keeps and hands back
+    to the file system. pyarrow took the text of the path as UTF-8, which it
+    is not in this process: the build was refused before an image was
+    loaded, with the installed pyarrow named as the cause, and the check
+    ended with a traceback.
+    """
+    pytest.importorskip("pyarrow")
+    write_pair(tmp_path)
+    # The name of the directory as UTF-8 on disk, whatever the file names of this process are
+    name = "größe 指紋".encode("utf-8")
+    table = os.fsdecode(join(os.fsencode(tmp_path), name, b"table"))
+    environment = dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+
+    def program(*arguments):
+        return subprocess.run(
+            [sys.executable, *arguments], cwd=tmp_path, env=environment, capture_output=True
+        )
+
+    encoding = program("-c", "import sys; print(sys.getfilesystemencoding())").stdout.decode()
+    if encoding.strip() != "ascii":
+        pytest.skip(f"The file names of the C locale are {encoding.strip()} here, not ASCII")
+    # The images by a relative path: the directory of the test can have a
+    # name outside ASCII itself, and no image is loaded by such a path in
+    # this process (OpenCV takes the text of a path as UTF-8 as well)
+    result = program(SCRIPT, "--dataset_dir", "images", "--samples", table)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    # The process prints the path as the bytes that it was given
+    assert b"Sample table: " + os.fsencode(table) + b"\n" in result.stdout
+    samples = read_samples(table)
+    assert paths(samples) == ["1_1.png", "1_2.png"] and samples.build["files"] == 2
+    # On disk the directory has its UTF-8 name, and nothing stands beside it
+    # under another spelling of that name or is left of the build
+    assert sorted(os.listdir(os.fsencode(tmp_path))) == sorted([b"images", b"minutiae", name])
+    assert os.listdir(join(os.fsencode(tmp_path), name)) == [b"table"]
+
+    result = program(SCRIPT, "--check", table)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert b"Sample table: " + os.fsencode(table) + b"\n" in result.stdout
+    assert f"Checksum (samples_sha256): {samples_checksum(samples)}".encode() in result.stdout
+
+
 def test_an_error_that_is_no_refusal_ends_the_program_with_the_status_2(
     builder, monkeypatch, tmp_path
 ):

@@ -151,6 +151,7 @@ files, so it does not change when the same table is written again.
 """
 
 import dataclasses
+import errno
 import hashlib
 import itertools
 import json
@@ -158,6 +159,7 @@ import operator
 import os
 import re
 import struct
+import sys
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Optional
 
@@ -1117,6 +1119,57 @@ def _import_pyarrow():
     return pyarrow, pyarrow.parquet
 
 
+def _open_file(pa, path: str, mode: str):
+    """
+    Opens the file at the path with pyarrow, to read it ("rb") or to write it
+    anew ("wb"), and returns the open file. pq.ParquetFile and pq.write_table
+    get it in the place of the path, and whoever opened it closes it: pyarrow
+    does not close a file that it was handed. A directory at the path raises
+    IsADirectoryError, as Python's open does.
+    """
+    # pyarrow takes the text of a path as UTF-8, whatever the encoding of the
+    # process for the names of files is, and as a URI where it can pass for
+    # one. Python turns the text back into the bytes that the name has on disk
+    # (os.fsencode); that is how os.listdir and open find a file. With these
+    # bytes pyarrow opens the same file. With the text it looks for another
+    # one, or raises an error, where the path holds characters outside ASCII
+    # in a process whose file names are not UTF-8, or bytes of a name that are
+    # no UTF-8 in any process.
+    if os.path.isdir(path):
+        # Python's words for a directory, with the path as text. pyarrow would
+        # refuse it before it opens anything, and show the bytes of the path.
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+    return pa.OSFile(os.fsencode(path), mode)
+
+
+def _no_file_name(directory: str, done: str, error: UnicodeEncodeError) -> SampleTableError:
+    """
+    The refusal for the directory of a table that the process cannot hand to
+    the file system: the encoding in which it writes the names of files has
+    no bytes for this text. `done` says what was to be done with the table.
+    """
+    encoding = sys.getfilesystemencoding()
+    # The path with Python's escapes where the encoding has no bytes for it.
+    # Standard output has the same encoding by default, and could not print
+    # the message with the path as it is.
+    shown = directory.encode(encoding, "backslashreplace").decode(encoding)
+    if encoding == "utf-8":
+        # UTF-8 has bytes for every character: what it cannot express is none
+        remedy = (
+            "The path holds half of a surrogate pair, which is no character and has no bytes "
+            "in the name of a file: correct the path where it is made."
+        )
+    else:
+        remedy = (
+            "Start the script in an environment whose file names are UTF-8, for example with "
+            "LC_ALL=C.UTF-8 or with PYTHONUTF8=1."
+        )
+    return SampleTableError(
+        f"The sample table {shown} cannot be {done}: this process writes the names of "
+        f"files in the encoding {encoding}, which cannot express the path ({error}). {remedy}"
+    )
+
+
 def part_name(index: int, count: int) -> str:
     """The file name of part `index` (from 0) of the `count` parts of a table."""
     return f"part-{index:05d}-of-{count:05d}.parquet"
@@ -1248,9 +1301,10 @@ def write_part(directory: str, index: int, count: int, samples: Samples, build: 
             the parts, "settings" must be equal in all parts, and any other
             key is taken from part 0.
 
-    Raises SampleTableError if pyarrow is not installed, or if the rows
-    cannot be written as one part. Arguments that make no sense raise
-    ValueError.
+    Raises SampleTableError if pyarrow is not installed, if the rows cannot
+    be written as one part, or if the encoding in which this process writes
+    the names of files cannot express the directory. Arguments that make no
+    sense raise ValueError.
     """
     pa, pq = _import_pyarrow()
     index, count = operator.index(index), operator.index(count)
@@ -1269,12 +1323,17 @@ def write_part(directory: str, index: int, count: int, samples: Samples, build: 
     table = _arrow_table(pa, samples, build_text)
 
     directory = os.fspath(directory)
-    os.makedirs(directory, exist_ok=True)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except UnicodeEncodeError as error:
+        raise _no_file_name(directory, "written", error) from None
     path = os.path.join(directory, part_name(index, count))
     temporary = f"{path}.tmp{os.getpid()}"
     try:
-        # With the checksum of every page, which _read_rows compares
-        pq.write_table(table, temporary, write_page_checksum=True)
+        # With the checksum of every page, which _read_rows compares. pyarrow
+        # gets the open file and not its path: see _open_file.
+        with _open_file(pa, temporary, "wb") as sink:
+            pq.write_table(table, sink, write_page_checksum=True)
         os.replace(temporary, path)
     except BaseException:
         # Nothing may be left of a part that was not written completely
@@ -1333,7 +1392,8 @@ def _read_footer(pa, pq, path: str) -> _Part:
     """Reads the metadata and the schema of a part and applies the rules for a single part."""
     rebuild = f"Build the table again ({_BUILDER})."
     try:
-        with pq.ParquetFile(path) as file:
+        # pyarrow gets the open file and not its path: see _open_file
+        with _open_file(pa, path, "rb") as source, pq.ParquetFile(source) as file:
             metadata = dict(file.metadata.metadata or {})
             rows = file.metadata.num_rows
             schema = file.schema_arrow
@@ -1703,8 +1763,12 @@ def _read_rows(pa, pq, part: _Part, columns: _Columns) -> None:
         # Without threads and without reading ahead: the batches are wanted one
         # after the other, and each is copied before the next is asked for.
         # The checksums of the pages are compared: a page that does not have
-        # the bytes it was written with makes pyarrow raise an error.
-        with pq.ParquetFile(part.path, pre_buffer=False, page_checksum_verification=True) as file:
+        # the bytes it was written with makes pyarrow raise an error. pyarrow
+        # gets the open file and not its path: see _open_file.
+        with (
+            _open_file(pa, part.path, "rb") as source,
+            pq.ParquetFile(source, pre_buffer=False, page_checksum_verification=True) as file,
+        ):
             batches = file.iter_batches(
                 batch_size=_BATCH_ROWS, columns=list(COLUMNS), use_threads=False
             )
@@ -1792,6 +1856,8 @@ def read_samples(directory: str) -> Samples:
             f"({_one_line(error)}). A sample table is a directory of files named like "
             f"{part_name(0, 3)}, written by {_BUILDER}; give the path of that directory."
         ) from None
+    except UnicodeEncodeError as error:
+        raise _no_file_name(directory, "read", error) from None
     part_names = [name for name in names if _PART_NAME.fullmatch(name)]
     if not part_names:
         raise SampleTableError(

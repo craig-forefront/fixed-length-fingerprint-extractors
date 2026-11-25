@@ -2443,7 +2443,9 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     place) cannot hand a path with other characters to the file system. The
     start is refused with the encoding and with what to do: no traceback for
     a directory with such a name, and a file with such a name is not called
-    missing.
+    missing. The table itself can lie at a path with such characters: that
+    path comes from the command line, and the process keeps the bytes that it
+    was given.
     """
     sets = {
         "in a directory": ["größe/1_1.png", "größe/1_2.png", "größe/2_1.png", "größe/2_2.png"],
@@ -2451,8 +2453,10 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     }
     if sys.getfilesystemencoding() != "utf-8":
         pytest.skip("The file names of this process are not UTF-8: it cannot write these names")
+    # The sets lie in a directory with such a name too, and their tables with them
+    sets_dir = tmp_path / "größe"
     for name, paths in sets.items():
-        root = tmp_path / name
+        root = sets_dir / name
         write_small_prints(root / "images", paths)
         lines = ["path,subject,impression"]
         lines += [f"{path},{index // 2},{index % 2}" for index, path in enumerate(paths)]
@@ -2464,18 +2468,17 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     # The child process. It runs main() on both sets if its file names are
     # ASCII; if not, it has nothing to show and ends before it loads the
     # script. It cannot train: a start that is not refused gets an error in
-    # the place of a model. It names the table from inside the directory of
-    # the set: pyarrow takes the path of a part as UTF-8 text, and the path
-    # of a temporary directory with other characters than ASCII is none in
-    # this process.
+    # the place of a model. It names the table by its whole path, which is no
+    # UTF-8 text in this process: the table module hands pyarrow the open
+    # files of the table and not their paths, which pyarrow takes as UTF-8.
+    # So the table is read, and what stops the run are the paths of the
+    # images, which come from the table as text.
     code = (
         "import importlib.util\n"
-        "import os\n"
         "import sys\n"
         "print(sys.getfilesystemencoding())\n"
         "if sys.getfilesystemencoding() != 'ascii':\n"
         "    sys.exit()\n"
-        "sys.path.insert(0, os.getcwd())\n"
         "spec = importlib.util.spec_from_file_location('train_500k', 'scripts/train_500k.py')\n"
         "train_500k = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(train_500k)\n"
@@ -2485,9 +2488,8 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
         "    if name.startswith('get_DeepPrint_'):\n"
         "        setattr(train_500k, name, no_model)\n"
         "for root in sys.argv[1:]:\n"
-        "    os.chdir(root)\n"
         "    sys.argv = ['train_500k.py', '--dataset_dir', root + '/images', '--samples',\n"
-        "                'table', '--output_dir', root + '/refused',\n"
+        "                root + '/table', '--output_dir', root + '/refused',\n"
         "                '--validation_split', '0']\n"
         "    try:\n"
         "        train_500k.main()\n"
@@ -2499,7 +2501,7 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     def child(**environment) -> subprocess.CompletedProcess:
         """The child process, with these variables added to the environment of this process."""
         return subprocess.run(
-            [sys.executable, "-c", code, *(str(tmp_path / name) for name in sets)],
+            [sys.executable, "-c", code, *(str(sets_dir / name) for name in sets)],
             cwd=dirname(SCRIPTS_DIR),
             env=dict(os.environ, **environment),
             capture_output=True,
@@ -2523,9 +2525,9 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
     in_messages = ["'gr\\xf6\\xdfe/1_1.png'", "'\\u6307\\u7d0b a.png'"]
     messages = [" ".join(message.split()) for message in result.stderr.split("END OF A RUN")]
     for name, named, message in zip(sets, in_messages, messages):
-        # The directory as the process writes it: with escapes too, where the
-        # path of the temporary directory holds other characters than ASCII
-        images = os.fsencode(tmp_path / name / "images").decode("ascii", "surrogateescape")
+        # The directory as the process writes it: with escapes too, where its
+        # path holds other characters than ASCII
+        images = os.fsencode(sets_dir / name / "images").decode("ascii", "surrogateescape")
         images = images.encode("ascii", "backslashreplace").decode("ascii")
         # What comes before the message is not of the script (a warning of a package)
         assert message[message.index("ERROR: ") :].startswith(
@@ -2537,7 +2539,7 @@ def test_a_path_that_an_ascii_process_cannot_express_stops_the_run_with_the_reas
             "Start the script in an environment whose file names are UTF-8, for example with "
             "LC_ALL=C.UTF-8 or with PYTHONUTF8=1."
         ), name
-        assert not exists(tmp_path / name / "refused")
+        assert not exists(sets_dir / name / "refused")
 
 
 def test_images_that_are_too_small_for_the_binariser_stop_the_run_with_their_rows_named(
