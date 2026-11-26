@@ -11,7 +11,7 @@ the other.
 
 | Environment | Used for | Needs | Where this document puts it |
 |-------------|----------|-------|------------------------------|
-| **Training environment** | `scripts/find_learning_rate.py`, `scripts/train_500k.py`, the embeddings, the tests, the notebooks | PyTorch and the `flx` package of this repository | `venv/` in this repository |
+| **Training environment** | `scripts/find_learning_rate.py`, `scripts/train_500k.py`, `scripts/build_sample_table.py`, the embeddings, the tests, the notebooks | PyTorch and the `flx` package of this repository; pyarrow for a sample table | `venv/` in this repository |
 | **Extraction environment** | `scripts/extract_minutiae.py` only | TensorFlow, the minutiae extractor (next section), Pillow, tqdm, and two model files | Part A: `.venv/` in the clone of the extractor. Part B: `venv-extractor/` next to this repository |
 
 The two are kept apart because the minutiae extractor pins its own versions of numpy and other packages. The
@@ -86,7 +86,13 @@ Optional, for the tests and the notebooks (pytest, jupyter, black, seaborn, tikz
 pip install -e ".[dev]"
 ```
 
-`pip install -r requirements.txt` does the same as the last two commands together; you do not need it after
+Optional, for a sample table ([sample-table.md](sample-table.md); the package pyarrow):
+
+```bash
+pip install -e ".[table]"
+```
+
+`pip install -r requirements.txt` does the same as the last three commands together; you do not need it after
 them.
 
 Check the installation:
@@ -97,8 +103,10 @@ python -c "import flx; print('flx imported')"
 python -m pytest -q          # only if you installed the optional tools
 ```
 
-"CUDA available: False" means that PyTorch found no usable GPU. The tests take a few minutes on a CPU. Here
-they ended with "357 passed, 1 skipped" in this environment; the skipped test needs the package
+"CUDA available: False" means that PyTorch found no usable GPU. The tests take a few minutes on a CPU. Here,
+in a new environment made with these commands, they ended with "983 passed, 1 skipped" with the extra `table`,
+and with "396 passed, 178 skipped" without it: the tests of the sample table skip themselves without pyarrow
+(three of their files count as one skipped test each). The one other skipped test needs the package
 `scikit-image`, which is not a dependency of this repository.
 
 ### A2. Extraction environment
@@ -190,6 +198,13 @@ Optional, for the tests and the notebooks:
 
 ```bash
 python3.11 -m pip download black jupyter pytest seaborn tikzplotlib --dest ./packages-dev
+```
+
+Optional, for a sample table ([sample-table.md](sample-table.md)): pyarrow, into the directory of the other
+packages. For Python 3.11 on Linux x86_64 this was one file of 55.0 MB, which requires no other package:
+
+```bash
+python3.11 -m pip download "pyarrow>=17.0" --dest ./packages
 ```
 
 **The minutiae extractor and its packages** (only for the model variants with minutiae). Use these commands,
@@ -292,6 +307,12 @@ pip install --no-index --find-links=../airgap-packages/packages --no-build-isola
 This step only makes `import flx` work. If `pip` reports a missing dependency here, a package of the steps
 before is missing from the bundle.
 
+Optional, for a sample table, if pyarrow is in the bundle:
+
+```bash
+pip install --no-index --find-links=../airgap-packages/packages --no-build-isolation -e ".[table]"
+```
+
 Check:
 
 ```bash
@@ -330,7 +351,9 @@ On one Linux x86_64 machine with 4 CPU cores, no GPU, Python 3.11:
 
 | Part | Run? |
 |------|------|
-| A1, in a copy of this repository instead of a new clone: `python3.11 -m venv`, the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the three check lines | **Run.** PyTorch 2.15.0+cpu was kept by the later steps; the environment was 1.9 GB; 357 tests passed, 1 skipped |
+| A1, in a copy of this repository instead of a new clone: `python3.11 -m venv`, the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the three check lines | **Run.** PyTorch 2.15.0+cpu was kept by the later steps; the environment was 1.9 GB; 357 tests passed, 1 skipped (the tests as they were before the sample table) |
+| A1 once more for the sample table, in a copy of the repository: `python -m venv` (Python 3.11.18), the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the tests, then `pip install -e ".[table]"` with network access and the tests again | **Run.** pyarrow 26.0.1 was installed; the tests ended with "396 passed, 178 skipped" before it and "983 passed, 1 skipped" after it, with one thread of PyTorch (run again for the tests of the review of the whole; before them "396 passed, 170 skipped" and "951 passed, 1 skipped") |
+| B1 and B2 for pyarrow: `pip download "pyarrow>=17.0"`; then, without network (`unshare -n`), `pip install --no-index --find-links=<directory> --no-build-isolation -e ".[table]"` in a copy of the repository whose environment had the other packages already, and `pip install --no-index --find-links=<directory> "pyarrow>=17.0"` in a new environment with numpy | **Run.** One file of 55.0 MB, pyarrow 26.0.1, installed both ways. With a directory that held only pyarrow, the install of the extra without `--no-build-isolation` failed (pip looked there for `setuptools>=61.0` and `wheel` to build the package), and worked when `setuptools`, `wheel` and `packaging` were added to the directory. The whole Part B for pyarrow, on two machines, was not run |
 | A1 without the CPU line (PyTorch with GPU libraries from PyPI), and `pip install -r requirements.txt` | Not run |
 | A2: `git clone`, `uv sync`, `uv pip install -e .`, `scripts/install_model.py` | Not run for this document; the four model files were already on the machine |
 | The extraction itself (Step 4 of the training guide) | **Run**, in an existing environment with TensorFlow 2.20, Pillow and tqdm, with `PYTHONPATH` set to `src` of the extractor's `main` (commit `420b6e5`) and with its `CoarseNet.h5` and `FineNet.h5`. This is the mechanism of Part B2 |
@@ -385,6 +408,11 @@ one.
 `FineNet.h5`; check the paths given to `--coarse_net` and `--fine_net`.
 
 **`CUDA out of memory` during training.** Lower `--batch_size` of `scripts/train_500k.py` (default 64).
+
+**`ERROR: A sample table is read and written as Parquet files, which needs the package pyarrow, and it cannot
+be imported`.** pyarrow is not installed in the training environment: `pip install -e ".[table]"` in the root
+directory of the repository, or the optional lines of Part B. See
+[Installing pyarrow](sample-table.md#installing-pyarrow) in sample-table.md.
 
 **The training on a CPU ends with the one word `Killed` and no Python error message.** The main memory ran
 out and the operating system stopped the process. Lower `--batch_size`; see entry 12 of the

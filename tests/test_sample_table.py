@@ -27,6 +27,7 @@ from flx.preparation.sample_table import (
     SampleRow,
     Samples,
     SampleTableError,
+    is_part_name,
     normalize_image_path,
     part_name,
     read_samples,
@@ -554,10 +555,17 @@ def test_find_gives_the_row_or_minus_one():
     assert samples.find(0, 1) == samples.find(largest, 1) == samples.find(smallest, 0) == -1
 
 
-def run_alone(code: str, *arguments: str) -> subprocess.CompletedProcess:
-    """Runs the code in a new interpreter, in the repository."""
+def run_alone(code: str, *arguments: str, **environment: str) -> subprocess.CompletedProcess:
+    """
+    Runs the code in a new interpreter, in the repository. The variables are
+    added to the environment of this process.
+    """
     return subprocess.run(
-        [sys.executable, "-c", code, *arguments], cwd=REPOSITORY, capture_output=True, text=True
+        [sys.executable, "-c", code, *arguments],
+        cwd=REPOSITORY,
+        env=dict(os.environ, **environment),
+        capture_output=True,
+        text=True,
     )
 
 
@@ -587,7 +595,8 @@ def test_a_table_is_written_and_read_by_processes_that_import_nothing_of_pyarrow
     directory = str(tmp_path / "table")
     result = run_alone(start + write, directory)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [os.path.join(directory, part_name(0, 1))]
+    # The whole line: the path of a temporary directory can hold a space
+    assert result.stdout == os.path.join(directory, part_name(0, 1)) + "\n"
     # Another process: one that reads a table has usually not written one before
     result = run_alone(start + read, directory)
     assert result.returncode == 0, result.stderr
@@ -752,6 +761,48 @@ def test_a_part_that_is_no_parquet_file_is_refused(tmp_path):
         file.write(content[: len(content) // 2])
     message = refusal(tmp_path / "half")
     assert paths[0] in message and "cannot be read as a Parquet file" in message
+
+
+def test_a_directory_in_the_place_of_a_part_is_refused(tmp_path, monkeypatch):
+    """
+    What cannot be opened as a file at all is refused like a file that is no
+    Parquet file, and like a part whose rows cannot be read where it becomes
+    a directory after the footers of the parts were read. The cause is given
+    in the words of Python's open, with the path as text: pyarrow would show
+    the bytes of the path.
+    """
+    # Below a directory whose name holds characters outside ASCII, as UTF-8 on disk
+    tables = os.path.join(os.fsencode(tmp_path), "größe 指紋".encode("utf-8"))
+    directory = os.fsdecode(os.path.join(tables, b"table"))
+    paths = write_table(directory, ROWS)
+    os.remove(paths[1])
+    os.mkdir(paths[1])
+    with pytest.raises(IsADirectoryError) as opened:  # what Python's open says to it
+        open(paths[1], "rb")
+    assert refusal(directory) == (
+        f"{paths[1]} cannot be read as a Parquet file (IsADirectoryError: "
+        f"{' '.join(str(opened.value).split())}). A part gets its name only when it is "
+        f"complete, so the file was damaged or replaced later. Build the table again ({BUILDER})."
+    )
+
+    directory = os.fsdecode(os.path.join(tables, b"rows"))
+    paths = write_table(directory, ROWS)
+    check_parts = sample_table._check_parts
+
+    def made_a_directory_then_check(directory, parts):
+        # The footers of all parts were read; their rows were not yet
+        os.remove(paths[1])
+        os.mkdir(paths[1])
+        check_parts(directory, parts)
+
+    monkeypatch.setattr(sample_table, "_check_parts", made_a_directory_then_check)
+    message = refusal_for_its_rows(directory, paths[1])
+    with pytest.raises(IsADirectoryError) as opened:
+        open(paths[1], "rb")
+    assert message.startswith(
+        f"{paths[1]} cannot be read to its end (IsADirectoryError: "
+        f"{' '.join(str(opened.value).split())}); 0 of its 7 rows were read before that. "
+    )
 
 
 def test_a_part_whose_footer_cannot_be_decoded_is_refused(tmp_path):
@@ -968,6 +1019,35 @@ def test_a_parquet_file_that_is_no_sample_table_is_refused(tmp_path):
         change_part(path, metadata={key: value})
         message = refusal(tmp_path / "table")
         assert path in message and key in message and BUILDER in message, (key, value)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        "[" * 100_000,
+        '{"id": "a", "part": 0, "parts": 1, "rows": 15, "files": '
+        + "[" * 100_000
+        + "]" * 100_000
+        + "}",
+    ],
+    ids=["brackets", "a nested value"],
+)
+def test_build_metadata_nested_deeper_than_python_decodes_is_refused_with_the_part(
+    tmp_path, build
+):
+    """
+    For brackets nested deeper than the recursion limit of Python, json
+    raises a RecursionError, which is neither a TypeError nor a ValueError.
+    Such metadata is no build of this module, and the part is refused as any
+    other part with metadata that it did not write, by its name.
+    """
+    with pytest.raises(RecursionError):  # control: what json makes of it
+        json.loads(build)
+    (path,) = write_table(tmp_path / "table", ROWS, parts=1)
+    change_part(path, metadata={"flx.build": build})
+    message = refusal(tmp_path / "table")
+    assert message.startswith(f"{path} has file metadata that this module did not write: ")
+    assert "(RecursionError: maximum recursion depth exceeded" in message and BUILDER in message
 
 
 def test_another_schema_version_is_refused_and_the_message_says_which_one_is_read(tmp_path):
@@ -1227,6 +1307,69 @@ def test_a_text_that_is_not_utf8_is_refused_like_any_other_text(tmp_path, column
     assert BUILDER in message
 
 
+@pytest.mark.parametrize(
+    "texts, said",
+    [
+        (
+            [f"origin{n}" for n in range(40)],
+            "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 35 more among the "
+            "rows 0 to 39 of the part, first in row 0 of the part",
+        ),
+        (
+            ["argument"] * 5 + [f"origin{n}" for n in range(35)],
+            "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 30 more among the "
+            "rows 0 to 39 of the part, first in row 5 of the part",
+        ),
+        # A value behind more texts than become Python values is no other text
+        (
+            [f"origin{n}" for n in range(20)] + ["argument", "assumed"] * 10,
+            "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 15 more among the "
+            "rows 0 to 39 of the part, first in row 0 of the part",
+        ),
+        (
+            ["argument"] * 30 + ["guessed", "known"] * 5,
+            "holds 'guessed', 'known', first in row 30 of the part",
+        ),
+    ],
+    ids=["40 others", "35 others behind a value", "values behind 20 others", "2 others"],
+)
+def test_the_texts_that_are_no_value_of_their_column_are_named_and_counted(tmp_path, texts, said):
+    """
+    Only the first texts become Python values, as many as a message names.
+    The number of the others is that of the texts that the rows hold, also
+    where there are more of them than that.
+    """
+    rows = [sample_row(subject, 0) for subject in range(40)]
+    (path,) = write_table(tmp_path / "table", rows, parts=1)
+    change_part(path, with_column("ppi_origin", pa.array(texts, type=pa.string())))
+    message = refusal(tmp_path / "table")
+    assert message.startswith(f"{path}: the column ppi_origin {said} (counted from 0), image_path ")
+
+
+def test_the_texts_that_are_no_value_are_counted_in_the_rows_of_their_batch(tmp_path, large_rows):
+    """
+    The rows are read a batch at a time, and a part is refused in the first
+    batch that holds another text: the count is that of the rows of this
+    batch, and the message says which rows these are.
+    """
+    rows = large_rows[:20_000]
+    assert sample_table._BATCH_ROWS == 16_384  # control: the second batch begins at row 16,384
+    (path,) = write_table(tmp_path / "table", rows, parts=1)
+
+    def with_other_texts(table):
+        texts = table.column("ppi_origin").to_pylist()
+        for number in range(12):
+            texts[17_000 + number] = f"origin{number}"
+        return pa.array(texts, type=pa.string())
+
+    change_part(path, with_column("ppi_origin", with_other_texts))
+    message = refusal(tmp_path / "table")
+    assert (
+        "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 7 more among the rows "
+        "16,384 to 19,999 of the part, first in row 17,000 of the part (counted from 0)" in message
+    )
+
+
 # ---------------------------------------------------------------------------
 # What a reader refuses: parts that are not one whole build
 # ---------------------------------------------------------------------------
@@ -1398,12 +1541,27 @@ def refusal_for_its_number_of_rows(directory, path, rows: int) -> str:
     return message
 
 
+def refusal_for_another_file(directory, path) -> str:
+    """
+    The message with which a table is refused because a part is another file
+    when its rows are read than when its footer was read.
+    """
+    message = refusal(directory)
+    assert message == (
+        f"{path} is not the file any more whose footer was read when the table was opened: the "
+        "file changed while the table was read (it was written again, or another file was put "
+        "in its place). Read the table again when nothing writes to its directory."
+    )
+    return message
+
+
 @pytest.mark.parametrize("rows_then", [3, 14])
 def test_a_part_that_changes_while_the_table_is_read_is_refused(tmp_path, monkeypatch, rows_then):
     """
     The arrays of a table are made for the rows that the parts state before a
     row is read. A part that is written again in between, with fewer or with
-    more rows, must not leave rows that were never filled.
+    more rows, must not leave rows that were never filled: it is another file
+    than the one whose footer was read, and refused before its rows are read.
     """
     paths = write_table(tmp_path / "table", ROWS)
     assert pq.read_metadata(paths[1]).num_rows == 7
@@ -1416,7 +1574,86 @@ def test_a_part_that_changes_while_the_table_is_read_is_refused(tmp_path, monkey
         check_parts(directory, parts)
 
     monkeypatch.setattr(sample_table, "_check_parts", write_a_part_again_then_check)
-    refusal_for_its_number_of_rows(tmp_path / "table", paths[1], 7)
+    refusal_for_another_file(tmp_path / "table", paths[1])
+
+
+def other_minutiae(rows) -> list:
+    """The rows with other minutiae, as another extraction of the same images gives them."""
+    return [
+        dataclasses.replace(row, minutiae=np.full((2, 3), row.subject + 0.5, dtype=np.float32))
+        for row in rows
+    ]
+
+
+def test_a_part_that_is_replaced_by_one_of_another_build_of_its_rows_is_refused(
+    tmp_path, monkeypatch
+):
+    """
+    A part that is put in the place of another one while the table is read,
+    and holds as many rows: the part of a build of the same list of files
+    with other minutiae, which has the same id. Its rows fit the footer of
+    the part that was read before, and the table would be read as the rows
+    of two builds that exist nowhere together.
+    """
+    paths = write_table(tmp_path / "table", ROWS, parts=3)
+    others = write_table(tmp_path / "other build", other_minutiae(ROWS), parts=3)
+    assert json.loads(pq.read_metadata(others[1]).metadata[b"flx.build"])["id"] == "build-1"
+    check_parts = sample_table._check_parts
+
+    def replace_a_part_then_check(directory, parts):
+        os.replace(others[1], paths[1])
+        check_parts(directory, parts)
+
+    monkeypatch.setattr(sample_table, "_check_parts", replace_a_part_then_check)
+    refusal_for_another_file(tmp_path / "table", paths[1])
+
+
+@pytest.mark.parametrize("when", ["behind the footers", "behind the rows of the first part"])
+def test_a_table_that_is_replaced_while_it_is_read_is_read_whole_as_it_was(
+    tmp_path, monkeypatch, when
+):
+    """
+    The builder publishes a table by renaming its directory, and so does
+    whoever replaces a table by a new one: the old directory is renamed away
+    and the new one into its place. A read that is under way then reads the
+    old table to its end, from the directory that it opened, and not the
+    parts of the new one under the footers of the old one, also where both
+    are builds of the same list of files and have the same id.
+    """
+    table, old, new = tmp_path / "table", tmp_path / "table.old", tmp_path / "new"
+    write_table(table, ROWS, parts=3)
+    write_table(new, other_minutiae(ROWS), parts=3)
+    replaced = []
+
+    def replace_the_table():
+        os.rename(table, old)
+        os.rename(new, table)
+        replaced.append(when)
+
+    if when == "behind the footers":
+        check_parts = sample_table._check_parts
+
+        def replace_then_check(directory, parts):
+            replace_the_table()
+            check_parts(directory, parts)
+
+        monkeypatch.setattr(sample_table, "_check_parts", replace_then_check)
+    else:
+        read_rows = sample_table._read_rows
+
+        def read_rows_then_replace(*arguments):
+            read_rows(*arguments)
+            if not replaced:
+                replace_the_table()
+
+        monkeypatch.setattr(sample_table, "_read_rows", read_rows_then_replace)
+    samples = read_samples(str(table))
+    assert replaced == [when]  # control: the table was replaced during the read
+    assert_same_rows(samples, samples_from_rows(ROWS))
+    assert samples_checksum(samples) == samples_checksum(samples_from_rows(ROWS))
+    monkeypatch.undo()
+    # The table that is there now is the new one
+    assert_same_rows(read_samples(str(table)), samples_from_rows(other_minutiae(ROWS)))
 
 
 @pytest.mark.parametrize("handed_out", [0, 3])
@@ -1452,13 +1689,15 @@ def test_a_part_that_gives_fewer_rows_than_it_states_without_an_error_is_refused
     assert seen == [(7, handed_out)]
 
 
-@pytest.mark.parametrize(
-    "then, error", [("removed", "FileNotFoundError"), ("no Parquet file", "ArrowInvalid")]
-)
+@pytest.mark.parametrize("then", ["removed", "no Parquet file"])
 def test_a_part_that_cannot_be_opened_when_its_rows_are_read_is_refused(
-    tmp_path, monkeypatch, then, error
+    tmp_path, monkeypatch, then
 ):
-    """A part that is removed or overwritten after the metadata of all parts were read."""
+    """
+    A part that is removed or overwritten after the metadata of all parts
+    were read. A file in its place is another file than the one whose footer
+    was read, also where it is no Parquet file.
+    """
     paths = write_table(tmp_path / "table", ROWS)
     check_parts = sample_table._check_parts
 
@@ -1470,8 +1709,12 @@ def test_a_part_that_cannot_be_opened_when_its_rows_are_read_is_refused(
         check_parts(directory, parts)
 
     monkeypatch.setattr(sample_table, "_check_parts", change_a_part_then_check)
+    if then == "no Parquet file":
+        refusal_for_another_file(tmp_path / "table", paths[1])
+        return
     message = refusal_for_its_rows(tmp_path / "table", paths[1])
-    assert f"({error}: " in message and "; 0 of its 7 rows were read before that. " in message
+    assert "(FileNotFoundError: " in message
+    assert "; 0 of its 7 rows were read before that. " in message
 
 
 def test_a_table_that_is_read_is_validated(tmp_path):
@@ -2260,6 +2503,39 @@ def test_part_names_have_five_digits_for_index_and_count():
     assert part_name(12, 345) == "part-00012-of-00345.parquet"
 
 
+def test_the_names_of_parts_are_told_from_other_names_as_the_reader_tells_them(tmp_path):
+    """
+    is_part_name is the rule by which read_samples takes the files of the
+    directory of a table, for whoever must tell the parts from the other
+    files there (the start of a training looks at the parts alone). A copy of
+    the part under every other name is passed over by the reader; under a
+    name of a part, the copy is read as a part.
+    """
+    (path,) = write_table(tmp_path / "table", ROWS, parts=1)
+    others = [
+        "build_failures.txt",
+        "build_warnings.txt",
+        f"{part_name(0, 1)}.tmp4711",
+        f".{part_name(0, 1)}.swp",
+        f"copy of {part_name(0, 1)}",
+        "part-0000-of-00001.parquet",
+        "part-00000-of-0001.parquet",
+        "part-00000-of-00001.Parquet",
+        "PART-00000-of-00001.parquet",
+        "part-0000x-of-00001.parquet",
+        "training_settings.json",
+    ]
+    for name in others:
+        assert not is_part_name(name), name
+        shutil.copyfile(path, tmp_path / "table" / name)
+    assert_same_rows(read_samples(str(tmp_path / "table")), samples_from_rows(ROWS))
+
+    for name in (part_name(0, 1), part_name(123_456, 123_457), "part-000000-of-000001.parquet"):
+        assert is_part_name(name), name
+    shutil.copyfile(path, tmp_path / "table" / "part-000000-of-000001.parquet")
+    assert "more than once" in refusal(tmp_path / "table")
+
+
 def test_part_names_grow_beyond_five_digits(tmp_path):
     path = write_part(str(tmp_path / "table"), 0, 1, samples_from_rows(ROWS), {"id": "a"})
     # As if it were one of very many parts: the name gets longer
@@ -2284,10 +2560,12 @@ def test_a_write_that_fails_leaves_no_file(tmp_path, monkeypatch, failing):
     path = write_part(str(directory), 0, 2, samples_from_rows(ROWS[:8]), {"id": "a"})
     with open(path, "rb") as file:
         complete = file.read()
+    half_written = []
 
     def disk_full(table, where, **options):
-        with open(where, "wb") as file:
-            file.write(b"half a part")
+        # What pyarrow is given to write to is the open file, not its path
+        where.write(b"half a part")
+        half_written.append(sorted(os.listdir(directory)))
         raise OSError(28, "No space left on device")
 
     def no_rename(source, target):
@@ -2307,6 +2585,9 @@ def test_a_write_that_fails_leaves_no_file(tmp_path, monkeypatch, failing):
     assert os.listdir(directory) == [os.path.basename(path)]
     with open(path, "rb") as file:
         assert file.read() == complete
+    if failing == "while the file is written":
+        # Control: each time the write failed, a file was there beside the first part
+        assert [len(names) for names in half_written] == [2, 2]
 
 
 def test_a_part_is_written_under_a_temporary_name_first(tmp_path, monkeypatch):
@@ -2314,16 +2595,38 @@ def test_a_part_is_written_under_a_temporary_name_first(tmp_path, monkeypatch):
     write_table = pq.write_table
 
     def record(table, where, **options):
-        seen.append((where, sorted(os.listdir(tmp_path))))
+        seen.append(sorted(os.listdir(tmp_path)))
         write_table(table, where, **options)
         seen.append(sorted(os.listdir(tmp_path)))
 
     monkeypatch.setattr(pq, "write_table", record)
     path = write_part(str(tmp_path), 0, 1, samples_from_rows(ROWS), {"id": "a"})
-    (temporary, before), during = seen
-    assert before == [] and os.path.dirname(temporary) == str(tmp_path)
-    assert temporary != path and during == [os.path.basename(temporary)]
+    before, during = seen
+    # The file that pyarrow is given to write to is open already, under the temporary name
+    (temporary,) = before
+    assert temporary != os.path.basename(path) and during == [temporary]
     assert os.listdir(tmp_path) == [os.path.basename(path)]
+    # And what was written under that name is the part
+    assert_same_rows(read_samples(str(tmp_path)), samples_from_rows(ROWS))
+
+
+def test_a_directory_in_the_place_of_the_temporary_file_stops_the_write(tmp_path):
+    """
+    write_part raises what Python's open raises for a directory, with the
+    path as text, and writes no part. The directory is left as it is: the
+    write did not make it.
+    """
+    # Below a directory whose name holds characters outside ASCII, as UTF-8 on disk
+    directory = os.fsdecode(os.path.join(os.fsencode(tmp_path), "größe 指紋".encode("utf-8")))
+    temporary = f"{os.path.join(directory, part_name(0, 1))}.tmp{os.getpid()}"
+    os.makedirs(temporary)
+    with pytest.raises(IsADirectoryError) as opened:  # what Python's open says to it
+        open(temporary, "wb")
+    with pytest.raises(IsADirectoryError) as written:
+        write_part(directory, 0, 1, samples_from_rows(ROWS), {"id": "a"})
+    assert str(written.value) == str(opened.value)
+    assert os.listdir(directory) == [os.path.basename(temporary)]
+    assert os.listdir(temporary) == []
 
 
 def test_arguments_of_write_part_that_make_no_sense_are_refused(tmp_path):
@@ -2356,6 +2659,327 @@ def test_rows_that_cannot_be_written_are_refused(tmp_path):
             str(tmp_path), 0, 1, dataclasses.replace(samples, ridges_origin=origin), {"id": "a"}
         )
     assert os.listdir(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# The path of a table, and the files that are open
+# ---------------------------------------------------------------------------
+
+
+def file_names_in(encoding: str, tmp_path) -> dict:
+    """
+    The variables with which a child process writes the names of files in
+    the encoding: the C locale, with Python told not to take UTF-8 in its
+    place, or a locale with an 8-bit encoding. That locale is made here,
+    below tmp_path, so that none has to be installed.
+    """
+    if encoding == "ascii":
+        return {"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+    localedef = shutil.which("localedef")
+    if localedef is None:
+        pytest.skip("There is no localedef here to make a locale with an 8-bit encoding")
+    locales = tmp_path / "locales"
+    locales.mkdir()
+    made = subprocess.run(
+        [localedef, "-i", "de_DE", "-f", "ISO-8859-1", str(locales / "de_DE.ISO-8859-1")],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if made.returncode != 0:
+        pytest.skip(f"localedef made no ISO-8859-1 locale: {' '.join(made.stderr.split())}")
+    return {"LOCPATH": str(locales), "LC_ALL": "de_DE.ISO-8859-1", "PYTHONUTF8": "0"}
+
+
+@pytest.mark.parametrize("encoding", ["ascii", "iso8859-1"])
+def test_a_table_at_a_path_outside_ascii_is_read_and_written_where_file_names_are_not_utf8(
+    tmp_path, encoding
+):
+    """
+    pyarrow takes the text of a path as UTF-8, and Python takes it in the
+    encoding that the process has for the names of files. For a path with
+    characters outside ASCII these are different bytes in a process whose
+    file names are not UTF-8, so pyarrow is handed the open file and never
+    the path. Here such a process reads a table that this process wrote,
+    writes a part and reads it back, and this process reads that part: where
+    the file names are ASCII (pyarrow raised an error for the path there),
+    and where they have an 8-bit encoding (it looked for a file of another
+    name there).
+    """
+    environment = file_names_in(encoding, tmp_path)
+    # The name of the directory as UTF-8 on disk, whatever the file names of this process are
+    name = "größe 指紋".encode("utf-8")
+    tables = os.path.join(os.fsencode(tmp_path), b"tables")
+    here, there = (os.fsdecode(os.path.join(tables, name, kind)) for kind in (b"here", b"there"))
+    write_table(here, ROWS)
+    expected = samples_from_rows(ROWS)
+
+    # The child process. It says which file names it has, and has nothing to
+    # show if they are not the ones that it was started for.
+    code = (
+        "import sys\n"
+        "print(sys.getfilesystemencoding())\n"
+        "if sys.getfilesystemencoding() != sys.argv[1]:\n"
+        "    sys.exit()\n"
+        "from flx.preparation.sample_table import read_samples, samples_checksum, write_part\n"
+        "samples = read_samples(sys.argv[2])\n"
+        "print(len(samples), samples_checksum(samples))\n"
+        "write_part(sys.argv[3], 0, 1, samples, {'id': 'written there'})\n"
+        "samples = read_samples(sys.argv[3])\n"
+        "print(len(samples), samples_checksum(samples))\n"
+    )
+    result = run_alone(code, encoding, here, there, **environment)
+    assert result.returncode == 0, result.stderr
+    output = result.stdout.splitlines()
+    if output[0] != encoding:
+        pytest.skip(f"The file names of the child process are {output[0]} here, not {encoding}")
+    # What the child read: the table of this process, and the part that it wrote itself
+    assert output[1:] == [f"{len(ROWS)} {samples_checksum(expected)}"] * 2
+    # And its part as this process reads it
+    samples = read_samples(there)
+    assert_same_rows(samples, expected)
+    assert samples_checksum(samples) == samples_checksum(expected)
+    assert samples.build == {"id": "written there", "parts": 1, "rows": len(ROWS)}
+    # On disk the directory has its UTF-8 name, and no second one stands
+    # beside it under another spelling of that name
+    assert os.listdir(tables) == [name]
+    assert sorted(os.listdir(os.path.join(tables, name))) == [b"here", b"there"]
+    assert os.listdir(os.fsencode(there)) == [part_name(0, 1).encode()]
+
+
+def test_a_table_below_a_directory_whose_name_is_not_utf8_is_written_and_read(tmp_path):
+    """
+    A file system can hold names that are no UTF-8, for example names that
+    were written in ISO-8859-1. Python keeps the bytes of such a name in the
+    text of a path, and that text is no UTF-8 either: pyarrow raised an
+    error for it, also in a process whose file names are UTF-8.
+    """
+    name = "größe".encode("iso8859-1")
+    with pytest.raises(UnicodeDecodeError):  # control: these bytes are no UTF-8
+        name.decode("utf-8")
+    directory = os.path.join(os.fsencode(tmp_path), name, b"table")
+    try:
+        os.makedirs(directory)
+    except OSError as error:
+        pytest.skip(f"This file system takes no file name that is not UTF-8 ({error})")
+    paths = write_table(os.fsdecode(directory), ROWS)
+    assert [os.fsencode(path) for path in paths] == [
+        os.path.join(directory, part_name(index, 2).encode()) for index in range(2)
+    ]
+    assert sorted(os.listdir(directory)) == [os.path.basename(os.fsencode(path)) for path in paths]
+    assert_same_rows(read_samples(os.fsdecode(directory)), samples_from_rows(ROWS))
+    # The directory with the name as it was, and no second one beside it
+    assert os.listdir(os.fsencode(tmp_path)) == [name]
+
+
+def test_a_path_that_is_no_file_name_in_the_process_is_refused_with_the_encoding(tmp_path):
+    """
+    Text with a character outside ASCII that came neither from the command
+    line nor from a listing has no file name in a process whose file names
+    are ASCII: Python cannot hand it to the file system. A table at such a
+    path is refused with the encoding and with what to do, when it is read
+    and when it is written, and nothing is made. The process prints the
+    refusal on its standard output, which has the encoding of its file names
+    and cannot take the path as it is: the refusal shows it with escapes.
+    """
+    code = (
+        "import os\n"
+        "import sys\n"
+        "print(sys.getfilesystemencoding())\n"
+        "if sys.getfilesystemencoding() != 'ascii':\n"
+        "    sys.exit()\n"
+        "from flx.preparation.sample_table import SampleTableError, read_samples\n"
+        "from flx.preparation.sample_table import samples_from_rows, write_part\n"
+        "directory = os.path.join(sys.argv[1], 'gr\\xf6\\xdfe', 'table')\n"
+        "for action in (\n"
+        "    lambda: read_samples(directory),\n"
+        "    lambda: write_part(directory, 0, 1, samples_from_rows([]), {'id': 'a'}),\n"
+        "):\n"
+        "    try:\n"
+        "        action()\n"
+        "    except SampleTableError as error:\n"
+        "        print(error)\n"
+    )
+    result = run_alone(code, str(tmp_path), **file_names_in("ascii", tmp_path))
+    assert result.returncode == 0, result.stderr
+    output = result.stdout.splitlines()
+    if output[0] != "ascii":
+        pytest.skip(f"The file names of the C locale are {output[0]} on this system, not ASCII")
+    # The path as the child has it, and what its encoding says to that text
+    directory = os.fsencode(tmp_path).decode("ascii", "surrogateescape") + "/größe/table"
+    with pytest.raises(UnicodeEncodeError) as cannot:
+        directory.encode("ascii", "surrogateescape")
+    shown = directory.encode("ascii", "backslashreplace").decode("ascii")
+    assert "gr\\xf6\\xdfe/table" in shown  # control: these are the escapes
+    assert result.stdout == "".join(
+        f"{line}\n"
+        for line in ["ascii"]
+        + [
+            f"The sample table {shown} cannot be {done}: this process writes the names of "
+            f"files in the encoding ascii, which cannot express the path ({cannot.value}). "
+            "Start the script in an environment whose file names are UTF-8, for example with "
+            "LC_ALL=C.UTF-8 or with PYTHONUTF8=1."
+            for done in ("read", "written")
+        ]
+    )
+    assert os.listdir(tmp_path) == []
+
+
+def test_a_path_that_is_no_text_is_refused_without_the_advice_of_another_environment(tmp_path):
+    """
+    Where the file names are UTF-8, the only text without a file name is one
+    that holds half of a surrogate pair. No other environment has a name for
+    it, so the refusal does not send the user to one. The child process takes
+    UTF-8 for its file names whatever the locale is (Python's UTF-8 mode),
+    and prints the refusal, which shows the half pair with an escape.
+    """
+    code = (
+        "import os\n"
+        "import sys\n"
+        "print(sys.getfilesystemencoding())\n"
+        "if sys.getfilesystemencoding() != 'utf-8':\n"
+        "    sys.exit()\n"
+        "from flx.preparation.sample_table import SampleTableError, read_samples\n"
+        "from flx.preparation.sample_table import samples_from_rows, write_part\n"
+        "directory = os.path.join(sys.argv[1], 'half \\ud83d of a pair')\n"
+        "for action in (\n"
+        "    lambda: read_samples(directory),\n"
+        "    lambda: write_part(directory, 0, 1, samples_from_rows([]), {'id': 'a'}),\n"
+        "):\n"
+        "    try:\n"
+        "        action()\n"
+        "    except SampleTableError as error:\n"
+        "        print(error)\n"
+    )
+    result = run_alone(code, str(tmp_path), PYTHONUTF8="1")
+    assert result.returncode == 0, result.stderr
+    output = result.stdout.splitlines()
+    if output[0] != "utf-8":
+        pytest.skip(f"The file names of Python's UTF-8 mode are {output[0]} here, not UTF-8")
+    # The path as the child has it, and what its encoding says to that text
+    directory = os.fsencode(tmp_path).decode("utf-8", "surrogateescape") + "/half \ud83d of a pair"
+    with pytest.raises(UnicodeEncodeError) as cannot:
+        directory.encode("utf-8", "surrogateescape")
+    shown = directory.encode("utf-8", "backslashreplace").decode("utf-8")
+    assert shown.endswith("/half \\ud83d of a pair")  # control: this is the escape
+    assert result.stdout == "".join(
+        f"{line}\n"
+        for line in ["utf-8"]
+        + [
+            f"The sample table {shown} cannot be {done}: this process writes the names of "
+            f"files in the encoding utf-8, which cannot express the path ({cannot.value}). The "
+            "path holds half of a surrogate pair, which is no character and has no bytes in the "
+            "name of a file: correct the path where it is made."
+            for done in ("read", "written")
+        ]
+    )
+    assert os.listdir(tmp_path) == []
+
+
+def test_a_relative_path_that_could_pass_for_a_uri_is_the_path_of_a_directory(
+    tmp_path, monkeypatch
+):
+    """
+    pyarrow takes the text of a path for a URI where it begins like one:
+    "run:1/table" would be something of the scheme "run". Handed the path,
+    it wrote and read no table in such a directory, given relative to the
+    working directory. The open file that it is handed is the file that
+    Python finds at the path, whatever the path looks like.
+    """
+    monkeypatch.chdir(tmp_path)
+    for directory in ("run:1/table", "s3:bucket", "file:table"):
+        paths = write_table(directory, ROWS)
+        assert paths == [os.path.join(directory, part_name(index, 2)) for index in range(2)]
+        assert sorted(os.listdir(tmp_path / directory)) == [part_name(0, 2), part_name(1, 2)]
+        assert_same_rows(read_samples(directory), samples_from_rows(ROWS))
+    assert sorted(os.listdir(tmp_path)) == ["file:table", "run:1", "s3:bucket"]
+
+
+def open_files_below(directory) -> list:
+    """The files below the directory that this process has open, by /proc/self/fd."""
+    found = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{name}")
+        except OSError:
+            continue  # the descriptor with which the directory was listed
+        # /proc names a file by its path without links
+        if target.startswith(os.path.realpath(directory) + os.sep):
+            found.append(target)
+    return sorted(found)
+
+
+def test_no_file_of_a_table_is_open_behind_a_read_a_refusal_or_a_write_that_fails(
+    tmp_path, monkeypatch
+):
+    """
+    pyarrow does not close a file that it was handed, so the files of a
+    table are closed where they were opened, on every way out: when the
+    table was read, when pyarrow refuses the footer or the rows of a part,
+    when a rule of the table refuses a part in the middle of its rows, when
+    a read or a write is interrupted, and when a write fails. Each time the
+    error is still held when the open files are looked at: a file that
+    pyarrow opened itself stayed open as long as the error for it existed.
+    """
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("The open files of a process are listed from /proc/self/fd")
+    paths = write_table(tmp_path / "whole", ROWS)
+    with open(paths[0], "rb"):  # control: a file that is open is found
+        assert open_files_below(tmp_path) == [os.path.realpath(paths[0])]
+    samples = read_samples(str(tmp_path / "whole"))
+    assert len(samples) == len(ROWS) and open_files_below(tmp_path) == []
+
+    def refused_with_nothing_open(directory, said: str) -> None:
+        with pytest.raises(SampleTableError, match=said) as error:
+            read_samples(str(directory))
+        assert open_files_below(tmp_path) == [], error.value
+
+    # pyarrow cannot read the footer: it raises when it is given the file
+    paths = write_table(tmp_path / "footer", ROWS)
+    with open(paths[1], "wb") as file:
+        file.write(b"not a Parquet file")
+    refused_with_nothing_open(tmp_path / "footer", "cannot be read as a Parquet file")
+    # pyarrow cannot read the rows
+    paths = write_table(tmp_path / "pages", ROWS)
+    with open(paths[1], "rb") as file:
+        content = file.read()
+    footer = footer_position(content)
+    with open(paths[1], "wb") as file:
+        file.write(content[:4] + b"\xff" * (footer - 4) + content[footer:])
+    refused_with_nothing_open(tmp_path / "pages", "cannot be read to its end")
+    # A rule of the table refuses the part while its rows are read
+    paths = write_table(tmp_path / "null", ROWS)
+    no_ppi = with_column("ppi", lambda table: pa.array([None] * table.num_rows, pa.float64()))
+    change_part(paths[0], no_ppi)
+    refused_with_nothing_open(tmp_path / "null", "Only minutiae can be null")
+
+    # A read that is interrupted behind the first rows of a part
+    iter_batches = pq.ParquetFile.iter_batches
+
+    def interrupted(self, *arguments, **options):
+        yield next(iter_batches(self, *arguments, **options))
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pq.ParquetFile, "iter_batches", interrupted)
+        with pytest.raises(KeyboardInterrupt) as error:
+            read_samples(str(tmp_path / "whole"))
+        assert open_files_below(tmp_path) == [], error.value
+
+    # A write that fails or is interrupted when pyarrow has written the part
+    write_table_of_pyarrow = pq.write_table
+    for raised in (OSError(28, "No space left on device"), KeyboardInterrupt()):
+
+        def failing(table, where, raised=raised, **options):
+            write_table_of_pyarrow(table, where, **options)
+            raise raised
+
+        with monkeypatch.context() as patch:
+            patch.setattr(pq, "write_table", failing)
+            with pytest.raises(type(raised)) as error:
+                write_part(str(tmp_path / "written"), 0, 1, samples_from_rows(ROWS), {"id": "a"})
+            assert open_files_below(tmp_path) == [], error.value
+        assert os.listdir(tmp_path / "written") == []
 
 
 # ---------------------------------------------------------------------------

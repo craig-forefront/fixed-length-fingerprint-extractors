@@ -398,6 +398,10 @@ python scripts/train_500k.py --localization on  ...
 python scripts/train_500k.py --localization off ...
 ```
 
+With a sample table (`--samples`) the table takes the place of `--minutiae_dir` in these comments: the variant
+has the minutia branch if the table holds minutiae for training images and `--ignore_minutiae` is not given
+([sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)).
+
 A parameter file must be loaded into the variant it was trained with: a model
 trained with `--localization on` and minutiae is loaded with
 `get_DeepPrint_LocTexMinu`, one trained with `--localization off` with
@@ -514,7 +518,9 @@ seen. This is called an A/B run. The recipe:
    ```
 
    The paths and numbers are examples. On several GPUs, put `torchrun --nproc_per_node=4` in place of
-   `python` in both commands ([large-datasets.md](large-datasets.md#several-gpus); not run here).
+   `python` in both commands ([large-datasets.md](large-datasets.md#several-gpus); not run here). With a
+   sample table, `--samples` with the table takes the place of `--minutiae_dir`, `--ppi_manifest`,
+   `--num_subjects` and `--num_impressions` in `COMMON` ([sample-table.md](sample-table.md)).
 
    The same `--validation_seed`, `--validation_split` and
    `--max_validation_subjects` give both runs the same held-out subjects and

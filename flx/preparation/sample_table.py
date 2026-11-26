@@ -27,7 +27,10 @@ A table on disk is a directory with the parts of one build:
 A part is written under a temporary name and renamed when it is complete, and
 a table is only read if every part of its build is there, so a table that can
 be read is whole. Neither the split of the rows into parts nor their order
-inside a part means anything.
+inside a part means anything. A reader opens the directory once and reads
+every part through it, so a table that is replaced while it is read (its
+directory renamed away and another one renamed into its place, as the builder
+publishes a table) is read whole, as it was when the read began.
 
 The pages of a part, which hold its rows, are written with their checksums
 (CRC-32, a field of the Parquet format), and the checksums are compared when
@@ -107,6 +110,9 @@ the part:
       that state different numbers of parts), a part whose file name says
       something else than its metadata, and a part that holds another
       number of rows than its metadata state;
+    - a part that changed while the table was read (it was written again,
+      or another file was put in its place, between the reading of its
+      footer and the reading of its rows);
     - parts whose target resolutions or whose "settings" of the build
       differ, and a target resolution other than TARGET_PPI of
       sensor_normalization.py;
@@ -145,19 +151,23 @@ bytes, with the rows in the order of (subject, impression):
        minutiae as float32: x, y and angle of the first minutia, x, y and
        angle of the second, and so on.
 All numbers are little-endian. Not included: ppi_origin, ridges_origin,
-unknown columns, the file metadata, and how the rows are split into parts or
-ordered in them. The checksum is computed from the values and not from the
-files, so it does not change when the same table is written again.
+unknown columns, the file metadata but for the target resolution (2.), and
+how the rows are split into parts or ordered in them. The checksum is
+computed from the values and not from the files, so it does not change when
+the same table is written again.
 """
 
 import dataclasses
+import errno
 import hashlib
 import itertools
 import json
 import operator
 import os
 import re
+import stat
 import struct
+import sys
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Optional
 
@@ -1117,9 +1127,106 @@ def _import_pyarrow():
     return pyarrow, pyarrow.parquet
 
 
+def _open_file(pa, path: str, mode: str):
+    """
+    Opens the file at the path with pyarrow, to read it ("rb") or to write it
+    anew ("wb"), and returns the open file. pq.ParquetFile and pq.write_table
+    get it in the place of the path, and whoever opened it closes it: pyarrow
+    does not close a file that it was handed. A directory at the path raises
+    IsADirectoryError, as Python's open does. (write_part writes a part with
+    it; read_samples reads the parts of a table through the directory of the
+    table, with _open_part.)
+    """
+    # pyarrow takes the text of a path as UTF-8, whatever the encoding of the
+    # process for the names of files is, and as a URI where it can pass for
+    # one. Python turns the text back into the bytes that the name has on disk
+    # (os.fsencode); that is how os.listdir and open find a file. With these
+    # bytes pyarrow opens the same file. With the text it looks for another
+    # one, or raises an error, where the path holds characters outside ASCII
+    # in a process whose file names are not UTF-8, or bytes of a name that are
+    # no UTF-8 in any process.
+    if os.path.isdir(path):
+        # Python's words for a directory, with the path as text. pyarrow would
+        # refuse it before it opens anything, and show the bytes of the path.
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+    return pa.OSFile(os.fsencode(path), mode)
+
+
+def _open_part(directory: int, path: str):
+    """
+    Opens a part of a table to read it, and returns (the open file, its
+    identity). The part is opened by its name in the directory of the table,
+    which `directory` (a descriptor) is open on: read_samples opens that
+    directory once, so a directory that is renamed while the table is read,
+    and another one that is renamed into its place, change nothing that is
+    read. The file is a Python file, which pq.ParquetFile gets in the place of
+    the path (pyarrow 17, the lowest version that a table needs, takes no
+    descriptor), and whoever opened it closes it. The identity (device, inode,
+    size and time of the last change, as os.fstat states them) tells the file
+    from another one that has its name later.
+
+    A directory in the place of the part raises IsADirectoryError, as Python's
+    open does, and a part that cannot be opened the error of os.open; both
+    with the path of the part as text.
+    """
+    try:
+        descriptor = os.open(os.path.basename(path), os.O_RDONLY, dir_fd=directory)
+    except OSError as error:
+        # Python's words, with the path of the part in the place of its name
+        raise OSError(error.errno, error.strerror, path) from None
+    try:
+        status = os.fstat(descriptor)
+        if stat.S_ISDIR(status.st_mode):
+            raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+        file = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return file, (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+
+
+def _no_file_name(directory: str, done: str, error: UnicodeEncodeError) -> SampleTableError:
+    """
+    The refusal for the directory of a table that the process cannot hand to
+    the file system: the encoding in which it writes the names of files has
+    no bytes for this text. `done` says what was to be done with the table.
+    """
+    encoding = sys.getfilesystemencoding()
+    # The path with Python's escapes where the encoding has no bytes for it.
+    # Standard output has the same encoding by default, and could not print
+    # the message with the path as it is.
+    shown = directory.encode(encoding, "backslashreplace").decode(encoding)
+    if encoding == "utf-8":
+        # UTF-8 has bytes for every character: what it cannot express is none
+        remedy = (
+            "The path holds half of a surrogate pair, which is no character and has no bytes "
+            "in the name of a file: correct the path where it is made."
+        )
+    else:
+        remedy = (
+            "Start the script in an environment whose file names are UTF-8, for example with "
+            "LC_ALL=C.UTF-8 or with PYTHONUTF8=1."
+        )
+    return SampleTableError(
+        f"The sample table {shown} cannot be {done}: this process writes the names of "
+        f"files in the encoding {encoding}, which cannot express the path ({error}). {remedy}"
+    )
+
+
 def part_name(index: int, count: int) -> str:
     """The file name of part `index` (from 0) of the `count` parts of a table."""
     return f"part-{index:05d}-of-{count:05d}.parquet"
+
+
+def is_part_name(name: str) -> bool:
+    """
+    Whether a file name is that of a part of a table, by the rule by which
+    read_samples takes the files of the directory of a table: the whole name
+    is part-<5 or more digits>-of-<5 or more digits>.parquet. The reader
+    passes over every other file there (the logs of the build, temporary
+    files, whatever else is put into the directory).
+    """
+    return _PART_NAME.fullmatch(name) is not None
 
 
 def _arrow_schema(pa, target_ppi: float, build_text: str):
@@ -1241,16 +1348,20 @@ def write_part(directory: str, index: int, count: int, samples: Samples, build: 
         samples: The rows of this part
         build: What to record about the build, as a dictionary of plain JSON
             values. "id" is needed: a text that is the same in all parts of
-            one build and different in every other build, by which a reader
-            tells the parts of two builds apart. "part", "parts" and "rows"
+            one build. A reader refuses parts of different ids as parts of
+            two builds; parts of two builds with the same id are read as one
+            table (scripts/build_sample_table.py gives two builds of the same
+            list of files under the same options the same id, also where the
+            files changed in between). "part", "parts" and "rows"
             are set here. Everything else is the builder's. When a table is
             read, "files" and "failed" (numbers, or lists) are added up over
             the parts, "settings" must be equal in all parts, and any other
             key is taken from part 0.
 
-    Raises SampleTableError if pyarrow is not installed, or if the rows
-    cannot be written as one part. Arguments that make no sense raise
-    ValueError.
+    Raises SampleTableError if pyarrow is not installed, if the rows cannot
+    be written as one part, or if the encoding in which this process writes
+    the names of files cannot express the directory. Arguments that make no
+    sense raise ValueError.
     """
     pa, pq = _import_pyarrow()
     index, count = operator.index(index), operator.index(count)
@@ -1269,12 +1380,17 @@ def write_part(directory: str, index: int, count: int, samples: Samples, build: 
     table = _arrow_table(pa, samples, build_text)
 
     directory = os.fspath(directory)
-    os.makedirs(directory, exist_ok=True)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except UnicodeEncodeError as error:
+        raise _no_file_name(directory, "written", error) from None
     path = os.path.join(directory, part_name(index, count))
     temporary = f"{path}.tmp{os.getpid()}"
     try:
-        # With the checksum of every page, which _read_rows compares
-        pq.write_table(table, temporary, write_page_checksum=True)
+        # With the checksum of every page, which _read_rows compares. pyarrow
+        # gets the open file and not its path: see _open_file.
+        with _open_file(pa, temporary, "wb") as sink:
+            pq.write_table(table, sink, write_page_checksum=True)
         os.replace(temporary, path)
     except BaseException:
         # Nothing may be left of a part that was not written completely
@@ -1295,6 +1411,11 @@ class _Part:
     target_ppi: float
     build: dict
     unknown_columns: tuple
+    # The descriptor of the directory of the table, through which the part is
+    # opened again for its rows, and the identity of the file whose footer was
+    # read (see _open_part)
+    directory: int
+    identity: tuple
 
 
 def _one_line(error: Exception) -> str:
@@ -1329,11 +1450,16 @@ def _is_minutiae_type(pa, found) -> bool:
     )
 
 
-def _read_footer(pa, pq, path: str) -> _Part:
-    """Reads the metadata and the schema of a part and applies the rules for a single part."""
+def _read_footer(pa, pq, path: str, directory: int) -> _Part:
+    """
+    Reads the metadata and the schema of a part and applies the rules for a
+    single part. `directory` is the descriptor of the directory of the table.
+    """
     rebuild = f"Build the table again ({_BUILDER})."
     try:
-        with pq.ParquetFile(path) as file:
+        # pyarrow gets the open file and not its path: see _open_part
+        source, identity = _open_part(directory, path)
+        with source, pq.ParquetFile(source) as file:
             metadata = dict(file.metadata.metadata or {})
             rows = file.metadata.num_rows
             schema = file.schema_arrow
@@ -1382,7 +1508,8 @@ def _read_footer(pa, pq, path: str) -> _Part:
                 raise ValueError(f'"{key}" is not a whole number')
         if not 0 <= build["part"] < build["parts"]:
             raise ValueError(f'part {build["part"]} of {build["parts"]} parts')
-    except (TypeError, ValueError) as error:
+    # RecursionError: what json raises for brackets nested deeper than Python's recursion limit
+    except (TypeError, ValueError, RecursionError) as error:
         raise SampleTableError(
             f"{path} has file metadata that this module did not write: {_KEY_TARGET_PPI} must "
             f"be a number and {_KEY_BUILD} a JSON object with the build of the part "
@@ -1429,6 +1556,8 @@ def _read_footer(pa, pq, path: str) -> _Part:
         target_ppi=target_ppi,
         build=build,
         unknown_columns=tuple(dict.fromkeys(name for name in names if name not in COLUMNS)),
+        directory=directory,
+        identity=identity,
     )
 
 
@@ -1571,11 +1700,11 @@ def _string_bytes(array) -> tuple[np.ndarray, np.ndarray]:
     return np.diff(offsets).astype(np.int64), text
 
 
-def _text_indices(array, values: tuple) -> tuple[np.ndarray, list]:
+def _text_indices(array, values: tuple) -> tuple[np.ndarray, list, int]:
     """
     (index into `values` of every text of an Arrow string array, and
     len(values) where the text is none of them; the first such texts, as a
-    message can show them).
+    message can show them; the number of different such texts).
     """
     encoded = array.dictionary_encode()
     # Only as many distinct texts become Python values as a message can name.
@@ -1588,10 +1717,17 @@ def _text_indices(array, values: tuple) -> tuple[np.ndarray, list]:
         if data in known:
             lookup[position] = known.index(data)
     indices = lookup[encoded.indices.to_numpy(zero_copy_only=True)]
+    # The distinct texts are the dictionary; the values among them are found
+    # by pyarrow, so the others are counted without becoming Python values
+    others = len(encoded.dictionary) - sum(
+        encoded.dictionary.index(value).as_py() >= 0 for value in values
+    )
     # For the message, bytes that are not UTF-8 are shown escaped
-    return indices, [
-        data.decode("utf-8", errors="backslashreplace") for data in first if data not in known
-    ]
+    return (
+        indices,
+        [data.decode("utf-8", errors="backslashreplace") for data in first if data not in known],
+        others,
+    )
 
 
 def _add_batch(columns: _Columns, batch, path: str, first_row: int) -> None:
@@ -1626,11 +1762,16 @@ def _add_batch(columns: _Columns, batch, path: str, first_row: int) -> None:
         return array
 
     def indices(name: str, values: tuple) -> np.ndarray:
-        found, unknown = _text_indices(without_null(name), values)
+        found, unknown, others = _text_indices(without_null(name), values)
         if unknown:
             first = int(np.argmax(found == len(values)))
+            named = _named([repr(text) for text in unknown], others)
+            if others > _MAX_NAMED:
+                # Counted in the rows of this batch: the refusal comes before
+                # the rows behind them are read
+                named += f" among the rows {first_row:,} to {first_row + count - 1:,} of the part"
             raise SampleTableError(
-                f"{path}: the column {name} holds {_named([repr(text) for text in unknown])}, "
+                f"{path}: the column {name} holds {named}, "
                 f"first in {where(first)}. It can hold "
                 f"{', '.join(repr(value) for value in values)} and nothing else. Build the "
                 f"table again ({_BUILDER})."
@@ -1700,11 +1841,28 @@ def _read_rows(pa, pq, part: _Part, columns: _Columns) -> None:
     )
     first_row = 0
     try:
+        # Opened again through the directory of the table: see _open_part.
+        # Another file under the name of the part (it was written again, or
+        # replaced) would hand out its own rows under the footer of the first
+        # one, also the rows of another table where it holds as many, so it is
+        # refused before a row is read.
+        source, identity = _open_part(part.directory, part.path)
+        if identity != part.identity:
+            source.close()
+            raise SampleTableError(
+                f"{part.path} is not the file any more whose footer was read when the table was "
+                "opened: the file changed while the table was read (it was written again, or "
+                "another file was put in its place). Read the table again when nothing writes "
+                "to its directory."
+            )
         # Without threads and without reading ahead: the batches are wanted one
         # after the other, and each is copied before the next is asked for.
         # The checksums of the pages are compared: a page that does not have
         # the bytes it was written with makes pyarrow raise an error.
-        with pq.ParquetFile(part.path, pre_buffer=False, page_checksum_verification=True) as file:
+        with (
+            source,
+            pq.ParquetFile(source, pre_buffer=False, page_checksum_verification=True) as file,
+        ):
             batches = file.iter_batches(
                 batch_size=_BATCH_ROWS, columns=list(COLUMNS), use_threads=False
             )
@@ -1777,6 +1935,12 @@ def read_samples(directory: str) -> Samples:
     each batch is copied into the numpy arrays before the next is read.
     Nothing refers to the Arrow memory of a part when the next part is read.
 
+    The directory is opened once, and every part is read through it. A table
+    whose directory is renamed away while it is read, and another one that
+    is renamed into its place, as the builder publishes a table, give the
+    rows of the first table, whole. A part that is written again or replaced
+    inside the directory while the table is read is refused.
+
     Samples.build is the build information of the parts as one dictionary:
     "id", "parts" and "settings" as in every part, "rows" (and "files" and
     "failed" where the builder recorded them) added up over the parts,
@@ -1785,27 +1949,43 @@ def read_samples(directory: str) -> Samples:
     pa, pq = _import_pyarrow()
     directory = os.fspath(directory)
     try:
-        names = sorted(os.listdir(directory))
+        # The directory is opened once, and its parts are listed and read
+        # through it, so that they are all those of one directory: one that is
+        # renamed away while the table is read is read to its end, and one that
+        # is renamed into its place is not read (see _open_part)
+        handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            names = sorted(os.listdir(handle))
+        except BaseException:
+            os.close(handle)
+            raise
     except OSError as error:
         raise SampleTableError(
             f"{directory} cannot be read as the directory of a sample table "
             f"({_one_line(error)}). A sample table is a directory of files named like "
             f"{part_name(0, 3)}, written by {_BUILDER}; give the path of that directory."
         ) from None
-    part_names = [name for name in names if _PART_NAME.fullmatch(name)]
-    if not part_names:
-        raise SampleTableError(
-            f"{directory} holds no part of a sample table (a file named like "
-            f"{part_name(0, 3)}); it holds {_named(names) if names else 'no files'}. Give the "
-            f"directory that {_BUILDER} wrote, or build the table."
-        )
-    parts = [_read_footer(pa, pq, os.path.join(directory, name)) for name in part_names]
-    _check_parts(directory, parts)
-    parts.sort(key=lambda part: part.build["part"])
+    except UnicodeEncodeError as error:
+        raise _no_file_name(directory, "read", error) from None
+    try:
+        part_names = [name for name in names if _PART_NAME.fullmatch(name)]
+        if not part_names:
+            raise SampleTableError(
+                f"{directory} holds no part of a sample table (a file named like "
+                f"{part_name(0, 3)}); it holds {_named(names) if names else 'no files'}. Give "
+                f"the directory that {_BUILDER} wrote, or build the table."
+            )
+        parts = [
+            _read_footer(pa, pq, os.path.join(directory, name), handle) for name in part_names
+        ]
+        _check_parts(directory, parts)
+        parts.sort(key=lambda part: part.build["part"])
 
-    columns = _Columns(sum(part.rows for part in parts))
-    for part in parts:
-        _read_rows(pa, pq, part, columns)
+        columns = _Columns(sum(part.rows for part in parts))
+        for part in parts:
+            _read_rows(pa, pq, part, columns)
+    finally:
+        os.close(handle)
     # Arrow keeps the memory of the batches to use it again. Nothing uses it
     # again once the table is read, so it is given back.
     pa.default_memory_pool().release_unused()

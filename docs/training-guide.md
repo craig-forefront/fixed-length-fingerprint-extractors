@@ -12,6 +12,10 @@ The route uses three scripts of this repository, in this order:
 3. `scripts/train_500k.py` trains the model. It runs in the *training environment*. (The name is historical;
    the number of images is an option.)
 
+For a set that does not fit the file layout of Step 1, a fourth script, `scripts/build_sample_table.py`,
+describes the files in a *sample table* after the extraction, and the range test and the training read the
+table ([sample-table.md](sample-table.md)).
+
 The two environments are two Python installations: the minutiae extraction needs TensorFlow and a second
 repository, everything else needs PyTorch. [installation.md](installation.md) sets up both.
 
@@ -35,7 +39,7 @@ collection read [large-datasets.md](large-datasets.md) before you plan anything.
 - [Step 9: Extract embeddings](#step-9-extract-embeddings)
 - [Step 10: Run a verification benchmark](#step-10-run-a-verification-benchmark)
 - [Several GPUs](#several-gpus)
-- [If your data does not fit the layout](#if-your-data-does-not-fit-the-layout)
+- [If your data does not fit the layout](#if-your-data-does-not-fit-the-layout) (a [sample table](sample-table.md))
 - [Troubleshooting](#troubleshooting)
 - [Quick reference](#quick-reference)
 - [Reference: the files that the scripts write](#reference-the-files-that-the-scripts-write)
@@ -53,6 +57,7 @@ collection read [large-datasets.md](large-datasets.md) before you plan anything.
 | Minutia (plural minutiae) | A point where a ridge ends or splits, with a position and a direction |
 | Minutiae extractor | The program that finds the minutiae of an image. Here: the Python package `fingerflow` of the separate repository [minutiae_extractor](https://github.com/craig-forefront/minutiae_extractor). It is **not** the package called `fingerflow` on PyPI (the public Python package index), which does not work with this repository |
 | `.mnt` file | A text file with the minutiae of one image, written by `scripts/extract_minutiae.py` |
+| Sample table | A directory of Parquet files with one row per image file: its finger and capture, its resolution and ridge polarity, its minutiae. For sets that do not fit the layout of Step 1 ([sample-table.md](sample-table.md)) |
 | Minutia map | A picture made from the minutiae of an image. During training the model learns to draw it; this is a helper task and is not used when embeddings are computed |
 | Embedding | The list of numbers that the model computes for one print |
 | Variant | One of the four models that `scripts/train_500k.py` can train: with or without minutia branch, with or without localization network (Step 3) |
@@ -88,7 +93,7 @@ enough to find such mistakes; they are not enough to judge the accuracy of the m
 
 ## Step 1: Lay out the files
 
-`scripts/train_500k.py` finds the finger and the capture of an image in its file name:
+Without a sample table, `scripts/train_500k.py` finds the finger and the capture of an image in its file name:
 
 ```
 data/fingerprints/my-dataset/
@@ -122,16 +127,19 @@ missing files if some are not there, and it prints how many image files it does 
 
 If your data does not fit this layout:
 
-- **Other names or another image format:** rename or link the files (a symbolic link per image is enough), or
+- **Other names or another image format:** describe the files in a sample table
+  ([sample-table.md](sample-table.md)); or rename or link the files (a symbolic link per image is enough), or
   change `_extension` and `_file_to_id_fun` of `CustomFingerprintLoader` in `scripts/train_500k.py`.
-- **A different number of images per finger:** the script cannot express that. Either choose `--num_impressions`
-  as the smallest number that every finger has and number the images of each finger from 1 (the others are not
-  used), or leave out fingers with fewer images and renumber the subjects without gaps.
+- **A different number of images per finger:** without a sample table the script cannot express that. Either
+  choose `--num_impressions` as the smallest number that every finger has and number the images of each finger
+  from 1 (the others are not used), or leave out fingers with fewer images and renumber the subjects without
+  gaps. A sample table takes any number of images per finger, and subject numbers with gaps.
 - **Fingers with a single image:** with `--num_impressions 1` the script only trains with
   `--validation_split 0` (no validation set, so `best_model.pyt` is the epoch with the lowest training loss
-  and there is no early stopping; see Step 8). A dataset in which some fingers have one image and others have
-  more cannot be used as it is: either every finger contributes one image, or the single-image fingers are
-  left out.
+  and there is no early stopping; see Step 8). Without a sample table, a dataset in which some fingers have one
+  image and others have more cannot be used as it is: either every finger contributes one image, or the
+  single-image fingers are left out. With a sample table it can, and a finger with one image always trains (it
+  is never held out for validation).
 - **Multi-finger images** (four-finger slaps) must be cut into single fingers first. This guide has no step
   for that. The package contains a `SlapSegmenter` (`flx/image_processing/slap_segmentation.py`); it is not
   used by the three scripts and was not run or checked for these documents.
@@ -161,7 +169,9 @@ load every image file through the same function (`SensorNormalizer.load` in
 `flx/preparation/sensor_normalization.py`). It resamples the image to 500 ppi and, if the file is declared to have
 light ridges, inverts it. A file that is at 500 ppi with dark ridges is used unchanged, bit for bit. Because the
 extraction and the training load the file in the same way, the minutiae in a `.mnt` file are in the pixels of the
-image that the training loads. **Give all three scripts the same options.**
+image that the training loads. **Give all three scripts the same options.** With a sample table they are given to
+`scripts/build_sample_table.py` instead of the range test and the training, which refuse them and take the
+resolution and the polarity of every file from the table ([sample-table.md](sample-table.md#building-a-table)).
 
 **Where the resolution of a file comes from**, in this order:
 
@@ -185,9 +195,9 @@ training alike, so nothing else notices (this was tried on one file, see
 - For a dataset of **one known resolution**, use `--ppi`. It wins over the metadata.
 - For mixed sensors, use the manifest. A manifest row also wins over the metadata.
 - Read the counts that the scripts print. The extraction ends with "Resolution of the files extracted in this
-  run", the training starts with "Resolution of ... training images" (up to 1,000 files spread over the set): one
-  line per source and value, and a note when files took their resolution from metadata although `--assume_ppi`
-  was given.
+  run", the training starts with "Resolution of ... training images" (up to 1,000 files spread over the set; with
+  a sample table every training image, as the table states it): one line per source and value, and a note when
+  files took their resolution from metadata although `--assume_ppi` was given.
 
 The manifest has a header line and the columns `path`, `ppi` and optionally `ridges`. Paths are relative to the image
 directory (`--input_dir` of the extraction, `--dataset_dir` of the training). A row for a directory applies to all
@@ -217,9 +227,9 @@ sometimes wrong ([measurements.md](measurements.md#images-from-different-sensors
 takes the image as dark-ridged.
 
 **Write the manifest now**, as `data/fingerprints/my-dataset-resolutions.csv` (next to the image directory, not
-inside it), and use it in every command of Steps 4, 5, 6 and 9. If all files have one resolution and dark
-ridges, you can use `--ppi 500` (or your value) in place of `--ppi_manifest ...` in all of these commands
-instead.
+inside it), and use it in every command of Steps 4, 5, 6 and 9 (with a sample table: in Step 4 and in the build
+of the table). If all files have one resolution and dark ridges, you can use `--ppi 500` (or your value) in
+place of `--ppi_manifest ...` in all of these commands instead.
 
 ---
 
@@ -233,6 +243,10 @@ instead.
 | `DeepPrint_TexMinu` | given | `off` | yes |
 | `DeepPrint_LocTex` | not given | `on` (the default) | no |
 | `DeepPrint_Tex` | not given | `off` | no |
+
+With a sample table (`--samples`) the table takes the place of `--minutiae_dir`: the minutia branch is trained
+if the table holds minutiae for training images, unless `--ignore_minutiae` is given
+([sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)).
 
 - `Tex` is the *texture branch*: the part of the model that computes an embedding from the ridge pattern as a
   whole. `Minu` is the *minutia branch*: a second part that computes a second embedding and, during training,
@@ -312,7 +326,8 @@ this run"). Read that block.
 - Feed the image files as the sensor delivered them: 8-bit grayscale, not resized or enhanced. The script
   resamples them to 500 ppi itself. The coordinates in a `.mnt` file are in the pixels of the 500 ppi image.
 - `--ppi_manifest` is the file of Step 2. `--ppi`, `--assume_ppi` and `--ridges` are the other options
-  described there. **Give the training (Steps 5, 6 and 9) exactly the same ones.**
+  described there. **Give the training (Steps 5, 6 and 9) exactly the same ones**, or, with a sample table, the
+  build of the table.
 - `--skip_existing` leaves out images that already have a `.mnt` file, so the same command continues a run
   that was interrupted.
 - `--workers W` starts W worker processes; each loads its own copy of the networks.
@@ -435,13 +450,16 @@ shards. Plan the extraction as a job that runs on many machines, is interrupted 
    end with "Successful: 0", "Failed: 0" and exit status 0. The training needs a `.mnt` file for every image that it
    trains on, and stops before the first epoch with the names of the first missing ones. Images that can not be
    extracted must be taken out of the dataset; because the subjects must be numbered without gaps (Step 1), that
-   means renumbering, or replacing the image. A print for which the extractor finds no
+   means renumbering, or replacing the image. (A sample table keeps such an image as a row without minutiae;
+   the training then needs `--tolerate_missing_minutiae`, see [sample-table.md](sample-table.md).) A print for
+   which the extractor finds no
    minutia gets a `.mnt` file with 0 minutiae; the training leaves it out of the minutia map loss and uses it for
    the rest (see [Loss weights](tuning.md#loss-weights)). The script prints how many there were.
 
 The image loader of `scripts/train_500k.py` reads one file extension (`.png` unless you change `_extension`,
 see [If your data does not fit the layout](#if-your-data-does-not-fit-the-layout)), while the extraction reads
-PNG, JPEG, BMP and TIFF files. Convert the files to one format, or adapt the loader.
+PNG, JPEG, BMP and TIFF files. Convert the files to one format, describe them in a sample table (the training
+then reads every format that the extraction reads; [sample-table.md](sample-table.md)), or adapt the loader.
 
 **When the extraction is done, leave the extraction environment** (`deactivate`, or open a new shell) and
 enter the training environment for all following steps:
@@ -458,7 +476,8 @@ The *learning rate* is the size of the change that every training step makes to 
 destroys a training within a few steps, too low a value wastes time, and the right value depends on the data,
 the variant and the batch size. `scripts/find_learning_rate.py` finds a starting value: it trains a fresh model
 on a part of your data for a few hundred steps while it raises the learning rate after every step, from far too
-low (0.0000001) to far too high (1). It reads the same directory layout as the training and saves no model.
+low (0.0000001) to far too high (1). It reads the same directory layout as the training, or the same sample
+table, and saves no model.
 
 ```bash
 python scripts/find_learning_rate.py \
@@ -473,6 +492,9 @@ python scripts/find_learning_rate.py \
 
 - `--minutiae_dir` is the output directory of Step 4. Leave it out if you train without minutiae.
 - `--num_subjects` and `--num_impressions` are what the directory holds (Step 1).
+- With a sample table, give `--samples` with the table that the training will read, and leave out
+  `--minutiae_dir`, `--num_subjects`, `--num_impressions` and the resolution options, which the table replaces
+  ([sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)).
 - `--ppi_manifest` (or `--ppi`, `--assume_ppi`, `--ridges`, `--canvas_size`) must be what the minutiae extraction
   and the planned training use (Step 2). Without any of them, a file that does not state its resolution stops
   the test.
@@ -540,6 +562,10 @@ python scripts/train_500k.py \
 - The loss weights have options too (`--loss_weight_...`); see [Loss weights](tuning.md#loss-weights). Leave
   them at their defaults unless you compare settings.
 - On several GPUs the same options follow `torchrun`; see [Several GPUs](#several-gpus).
+- With a sample table the command has `--samples` with the table in place of `--minutiae_dir`,
+  `--num_subjects`, `--num_impressions` and the resolution options;
+  [sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table) has the command and what the
+  start prints then.
 - `python scripts/train_500k.py --help` lists every option with its default; the docstring at the top of the
   script explains the main groups of options.
 
@@ -585,7 +611,7 @@ took a resolution "from metadata of the file" which you did not expect, go back 
 | `best_model.pyt` | A copy of `model.pyt` of the best epoch so far |
 | `log.json` | One entry per epoch, see [Step 8](#step-8-read-the-training-log) |
 | `training_settings.json` | The settings of the training, as of the last run that trained an epoch. Needed to continue it and to load the model later |
-| `data_preparation.json` | The image preparation settings alone (also part of `training_settings.json`) |
+| `data_preparation.json` | The image preparation settings alone (also part of `training_settings.json`); from a sample table, the checksum, the rows and the subjects of the table and the target resolution in place of the resolution settings |
 
 **Different image sizes: `--canvas_size`.** The sensors may deliver images of different sizes; every `.mnt` file
 carries the size of its own image. By default the training pads every 500 ppi image to a square of its own
@@ -611,13 +637,19 @@ Things to know before you choose N:
 The training writes its preparation settings to `training_settings.json` (and, alone, to `data_preparation.json`)
 in the output directory. When the trained model is used later, the images must be prepared in the same way;
 `load_trained_model` in `scripts/train_500k.py` builds the loader from that file (Step 9). A training that
-is continued with another preparation stops (Step 7).
+is continued with another preparation stops (Step 7). With a sample table (`--samples`) these files hold the
+checksum, the rows and the subjects of the table and the target resolution in place of the six resolution
+settings, and `load_trained_model` builds the loader from the table that it is given as `samples` (Step 9;
+[sample-table.md](sample-table.md#what-is-the-same-and-what-differs-from-a-training-without-a-table)).
 
 **A check against mixed-up data.** The training compares the image size in the header of each `.mnt` file with the
 size of the image that it loaded. If they do not fit (the image file was replaced, or extraction and training were
 given different options), it stops with a message that names the sample and both sizes. Without `--canvas_size`
 only a different shape (ratio of width to height) is an error, because image and minutiae are both scaled by the
 longer side, so the same picture at another resolution still fits. With `--canvas_size` the sizes must be equal.
+With a sample table the builder made this comparison when it built the table, and the training compares every
+image file with its row, by its size in bytes and in pixels
+([sample-table.md](sample-table.md#what-is-the-same-and-what-differs-from-a-training-without-a-table)).
 
 ---
 
@@ -639,7 +671,11 @@ that overwrites a training.
   the validation options, `--batch_size`, `--canvas_size`, or the image preparation (`--ppi`, the content of the
   manifest, `--assume_ppi`, `--ridges`). Train with such a change in a new `--output_dir`.
   `--allow_changed_settings` continues anyway; use it only if you know that the change is harmless (for example a
-  smaller `--batch_size` after the GPU ran out of memory).
+  smaller `--batch_size` after the GPU ran out of memory). With a sample table, the rows of the table stand where
+  the image preparation and the numbers of subjects and impressions stand: a training continues only with a
+  table of the same rows, a training without a table does not continue with one, nor the reverse, and
+  `--ignore_minutiae` changes the variant
+  ([sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)).
 - It **continues and lists the changes** if only these differ: the learning rate options, the loss weights,
   `--num_epochs`, `--patience`. They hold from the next epoch on. `--localization_lr_factor` is one of them: a
   continued training uses the factor of the new command.
@@ -762,8 +798,10 @@ print(f"Best: epoch {best.epoch}, selected on {log.selection_metric}")
 
 `load_trained_model` in `scripts/train_500k.py` reads `training_settings.json` of a training and returns the model
 and an image loader that prepares images exactly as the training did (resolution, ridge polarity, canvas, no
-augmentation). The images to embed must be in the layout of Step 1. Run this in the training environment, from the
-root directory of the repository.
+augmentation). The images to embed must be in the layout of Step 1, or be described by a sample table that is
+given as `samples=` (a model that was trained from a table is only loaded that way;
+[sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)). Run this in the training
+environment, from the root directory of the repository.
 
 ```python
 import sys
@@ -819,6 +857,14 @@ print(f"False non-match rate at a false match rate of 0.1 %: "
 ```
 
 - `num_impressions` is the number of impressions per subject of the test set.
+- For a test set described by a sample table (`samples=` in Step 9), take the pairs from
+  `benchmark = train_500k.create_table_validation_benchmark(image_loader.ids)` instead. It pairs the impressions
+  that each subject has, so they need not be numbered from 0 nor be as many for every subject, and draws 10
+  non-mated pairs per subject as above. `create_validation_benchmark` pairs the impressions 0 to
+  `num_impressions` - 1 of every subject: it serves only a complete grid of impressions numbered from 0. Where a subject lacks
+  one of these impressions, Step 10 stops with a `KeyError`; impressions from `num_impressions` on are left
+  out, and nothing in the output says so
+  ([sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)).
 - Use fingers that were neither in the training nor in the validation set. An error rate on the validation
   subjects is too optimistic, because the best epoch was chosen on them.
 - With 10 non-mated pairs per subject, a false match rate of 0.1 % rests on very few pairs unless the test set has
@@ -840,11 +886,15 @@ The command, what the code does with several GPUs and what that means for the le
 ## If your data does not fit the layout
 
 `scripts/train_500k.py` is the route that is documented and tested. If your data cannot be brought into its
-layout, the smallest change is inside that script:
+layout, describe it in a sample table ([sample-table.md](sample-table.md)): any file names, the image formats
+of the extraction, any number of images per finger, subject numbers with gaps. The range test and the training
+read the table with `--samples`, and nothing in the scripts changes. If you change the script instead, the
+smallest change is inside it:
 
 - `CustomFingerprintLoader._extension` returns the file extension, and `CustomFingerprintLoader._file_to_id_fun`
-  turns the subdirectory and the file name (without extension) into an `Identifier`. Subjects must still be
-  numbered from 0 without gaps, because the subject number is the class of the classifier.
+  turns the subdirectory and the file name (without extension) into an `Identifier`. As long as the identifiers
+  are built as a grid (next point), subjects must be numbered from 0 without gaps; the classifier itself
+  numbers the training subjects anew (`LabelIndex` in `flx/data/label_index.py`).
 - `create_training_and_validation_ids` builds the identifiers as a grid of subjects and impressions. For an
   uneven set, build the `IdentifierSet`s from the files that exist instead.
 - Keep `SensorNormalizer.load` in the loader. A loader that reads the files directly with OpenCV gets images in
@@ -886,7 +936,9 @@ variable `MODELS` is empty in a new shell.
 #### 4. "... files that are needed are missing"
 
 The files below `--dataset_dir` (or `--minutiae_dir`) are not what `--num_subjects` and `--num_impressions` ask
-for. The message names the first missing files and what was found. See Step 1.
+for. The message names the first missing files and what was found. See Step 1. Its last sentence names
+`--samples`: files with other names, gaps in their numbers or uneven numbers of impressions can be described in
+a sample table ([sample-table.md](sample-table.md)). With a table, a missing file gives the message of entry 13.
 
 #### 5. "... holds a training with other settings"
 
@@ -933,9 +985,19 @@ start, the polarity warnings of the extraction, and whether the training accurac
 The main memory of the machine ran out and the operating system stopped the process; Python prints nothing.
 The memory depends on `--batch_size`: the example of the README (80 training images, no minutiae, on a CPU)
 used up to 11.6 GB with the default of 64 images per step and up to 4.1 GB with `--batch_size 16`. Lower
-`--batch_size` and repeat the range test of Step 5 with the new value. No figure was measured for a variant with minutiae or for a GPU, and the stop
-itself was not provoked with this script (it was seen once with the training notebook, see
+`--batch_size` and repeat the range test of Step 5 with the new value. With minutiae, in the runs for
+[sample-table.md](sample-table.md#what-was-run-of-this-document-and-what-was-not): `DeepPrint_LocTexMinu` at the
+default batch size on a CPU, with one thread and one batch of 40 images in the range test and of 36 in the
+training, reached 11.4 and 10.3 GB (10^9 bytes) in the largest process of each, and the kernel ended the range
+test after its first step and the training in its second epoch, when the memory of those runs reached their
+limit of 14.3 GB. No figure was measured on a GPU. The stop was also seen once with the training notebook (see
 [measurements.md](measurements.md#what-was-run-for-these-documents)).
+
+#### 13. A message about a sample table
+
+The messages of `scripts/build_sample_table.py`, and those of the range test and the training with `--samples`
+(missing or changed image files, a table that cannot be read, rows without minutiae, options that the table
+replaces), are listed with their remedies in the [troubleshooting of sample-table.md](sample-table.md#troubleshooting).
 
 ---
 
@@ -957,6 +1019,12 @@ python scripts/find_learning_rate.py --dataset_dir data/fingerprints/my-dataset 
 
 # Train (the same command again continues the training)
 python scripts/train_500k.py --dataset_dir data/fingerprints/my-dataset --minutiae_dir data/poses/my-dataset --num_subjects 50000 --num_impressions 10 --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --learning_rate 0.0001 --lr_schedule cosine --num_epochs 10 --output_dir models/my-model-v1
+
+# With a sample table instead of the file layout (sample-table.md): build, check, range test, train
+python scripts/build_sample_table.py --dataset_dir data/fingerprints/my-dataset --minutiae_dir data/poses/my-dataset --ppi_manifest data/fingerprints/my-dataset-resolutions.csv --samples data/tables/my-dataset
+python scripts/build_sample_table.py --check data/tables/my-dataset
+python scripts/find_learning_rate.py --dataset_dir data/fingerprints/my-dataset --samples data/tables/my-dataset --output_dir models/lr_range_test
+python scripts/train_500k.py --dataset_dir data/fingerprints/my-dataset --samples data/tables/my-dataset --learning_rate 0.0001 --lr_schedule cosine --num_epochs 10 --output_dir models/my-model-v1
 
 # All options of a script
 python scripts/train_500k.py --help
@@ -1005,7 +1073,8 @@ One text file per image, written by `scripts/extract_minutiae.py`:
   write the score, so the minutiae cannot be filtered by score afterwards. The fifth column is not the score.
 - The last line starts with `#` and records how the image was prepared, for example
   `# source 826x1274 at 1000 ppi (manifest), ridges dark (argument), prepared 413x637`. The loaders do not read
-  it.
+  it; `scripts/build_sample_table.py` compares its source size and ridge polarity with those of the build
+  ([sample-table.md](sample-table.md#building-a-table)).
 - A file is written under a temporary name and renamed when it is complete, so a file with the ending `.mnt`
   is always a finished one.
 
@@ -1031,3 +1100,9 @@ See the table "What the script writes" in [Step 6](#step-6-run-the-training), an
 
 `lr_range_test.csv` (one row per step: `step`, `learning_rate`, `loss`, `smoothed_loss`, `gradient_norm`) and
 `lr_range_test.png`.
+
+### In the directory of a sample table
+
+The parts, for example `part-00000-of-00004.parquet` to `part-00003-of-00004.parquet` for one million files (one
+part per 250,000 listed files), and at most the two logs of the build, `build_failures.txt` and
+`build_warnings.txt`; see [The columns](sample-table.md#the-columns) in sample-table.md.
