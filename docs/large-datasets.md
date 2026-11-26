@@ -219,7 +219,9 @@ then tries anyway.
   set. If that matters to you, number the subjects so that you can hold out people yourself.
 - All impressions of the held-out subjects are prepared and embedded after every epoch, and the list of pairs is
   built in a time that grows with the square of the number of subjects: 0.8 seconds for 2,500 subjects, 1.8 for
-  5,000 and 4.3 for 10,000 (measured), so about 4 hours for 1 million (calculated).
+  5,000 and 4.3 for 10,000 (measured), so about 4 hours for 1 million (calculated). (From a sample table the
+  time grows with the number of pairs instead: 0.95 to 1.28 seconds for 40,000 subjects with two images each,
+  2.11 to 2.96 for 80,000, measured, nine runs each in three series.)
 - Therefore `--max_validation_subjects` defaults to **5,000**. With 10 impressions each that is 275,000 pairs,
   scored in under a second (measured), and about 50,000 images to prepare per validation, roughly 50 minutes on
   16 CPU cores for rolled prints (calculated). `--max_validation_subjects 0` removes the limit; the script warns

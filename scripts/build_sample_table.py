@@ -196,6 +196,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import sys
 import threading
 import traceback
@@ -297,6 +298,16 @@ _RIDGES_ORIGIN_TEXT = {
 }
 
 _NOT_GIVEN = object()
+
+# The options that name a file or a directory, with what they name, for the
+# refusal of an empty text
+_PATH_OPTIONS = {
+    "check": "the directory of a sample table",
+    "samples": "the directory of the table to write",
+    "dataset_dir": "the directory of the image files",
+    "minutiae_dir": "the directory of the .mnt files",
+    "sample_list": "the CSV file of the sample list",
+}
 
 
 class BuildRefused(Exception):
@@ -645,8 +656,11 @@ def build_id(files: _Files, order: np.ndarray, settings: dict, with_minutiae: bo
     The id of a build: the SHA-256 of what was asked for, that is of the
     resolution settings, of whether .mnt files are read, and of every listed
     file with its numbers. Two builds of the same list under the same options
-    have the same id, however many workers and parts they use. A reader tells
-    the parts of two builds apart by it.
+    have the same id, however many workers and parts they use, so that they
+    write the same parts byte for byte. A reader tells the parts of builds of
+    other lists or options apart by it, not those of two builds of the same
+    list: their rows can differ where image or .mnt files changed in between,
+    and a part of one is read together with the parts of the other.
     """
     digest = hashlib.sha256()
     digest.update(b"flx-samples-build-1\n")
@@ -1147,18 +1161,44 @@ class _Log:
             os.remove(self.path)
 
 
-def _count_lines(path: str) -> Optional[int]:
-    """The number of lines of a log, or None if it is not there."""
+def _count_lines(path: str) -> Optional[int | str]:
+    """
+    The number of lines of a log; None if it is not there; or, for a log
+    that is no regular file, the text that says so. Such a file is not read:
+    a link to a device can be read without end, and a named pipe blocks the
+    reader until something writes to it. (It is opened without waiting for
+    a writer, and looked at through what was opened; a directory is opened
+    as well, and closed again.)
+    """
     try:
-        with open(path, "rb") as file:
-            return sum(block.count(b"\n") for block in iter(lambda: file.read(1 << 20), b""))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return None
+    # The descriptor is read as it is: Python makes no file of a directory,
+    # and one that it refuses stays open
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return "not a regular file, not read"
+        return sum(block.count(b"\n") for block in iter(lambda: os.read(descriptor, 1 << 20), b""))
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 def _number(value) -> Optional[int]:
     """A count of the build information, or None where a table does not state it as a number."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _count_of_files(value) -> Optional[int]:
+    """
+    How many files "files" or "failed" of the build information stand for: the
+    number, or the length of a list, as the start of a training counts them
+    (the format allows lists of files, which read_samples joins over the
+    parts); None where a table states neither.
+    """
+    return len(value) if isinstance(value, list) else _number(value)
 
 
 def describe_table(directory: str, samples: Samples) -> list[str]:
@@ -1169,7 +1209,7 @@ def describe_table(directory: str, samples: Samples) -> list[str]:
     """
     build = samples.build
     rows = len(samples)
-    files, failed = _number(build.get("files")), _number(build.get("failed"))
+    files, failed = _count_of_files(build.get("files")), _count_of_files(build.get("failed"))
     with_minutiae = build.get("with_minutiae")
     filled = int(np.count_nonzero(np.diff(samples.minutiae_offsets)))
     known = int(np.count_nonzero(samples.minutiae_known))
@@ -1207,7 +1247,9 @@ def describe_table(directory: str, samples: Samples) -> list[str]:
     for label, name in (("Failures log", FAILURES_LOG), ("Warnings log", WARNINGS_LOG)):
         path = os.path.join(directory, name)
         count = _count_lines(path)
-        if count is not None:
+        if isinstance(count, str):
+            lines.append(line(label, f"{path} ({count})"))
+        elif count is not None:
             lines.append(line(label, f"{path} ({count:,} line(s))"))
         elif name == FAILURES_LOG and failed:
             lines.append(line(label, f"missing, although {failed:,} file(s) failed ({path})"))
@@ -1650,6 +1692,15 @@ def main() -> int:
     for name in defaults:
         if name not in given:
             setattr(args, name, defaults[name])
+    # An empty text names no file. Without this refusal --samples "" would be
+    # taken as the current directory, and the build refused because that
+    # exists, with the advice to remove it
+    for name, what in _PATH_OPTIONS.items():
+        if name in given and getattr(args, name) == "":
+            parser.error(
+                f"--{name} was given an empty text, where {what} belongs (a variable of the "
+                f"shell that is not set gives that). Give {what}."
+            )
 
     try:
         if "check" in given:

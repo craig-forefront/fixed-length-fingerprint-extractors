@@ -611,7 +611,7 @@ took a resolution "from metadata of the file" which you did not expect, go back 
 | `best_model.pyt` | A copy of `model.pyt` of the best epoch so far |
 | `log.json` | One entry per epoch, see [Step 8](#step-8-read-the-training-log) |
 | `training_settings.json` | The settings of the training, as of the last run that trained an epoch. Needed to continue it and to load the model later |
-| `data_preparation.json` | The image preparation settings alone (also part of `training_settings.json`) |
+| `data_preparation.json` | The image preparation settings alone (also part of `training_settings.json`); from a sample table, the checksum, the rows and the subjects of the table and the target resolution in place of the resolution settings |
 
 **Different image sizes: `--canvas_size`.** The sensors may deliver images of different sizes; every `.mnt` file
 carries the size of its own image. By default the training pads every 500 ppi image to a square of its own
@@ -637,7 +637,10 @@ Things to know before you choose N:
 The training writes its preparation settings to `training_settings.json` (and, alone, to `data_preparation.json`)
 in the output directory. When the trained model is used later, the images must be prepared in the same way;
 `load_trained_model` in `scripts/train_500k.py` builds the loader from that file (Step 9). A training that
-is continued with another preparation stops (Step 7).
+is continued with another preparation stops (Step 7). With a sample table (`--samples`) these files hold the
+checksum, the rows and the subjects of the table and the target resolution in place of the six resolution
+settings, and `load_trained_model` builds the loader from the table that it is given as `samples` (Step 9;
+[sample-table.md](sample-table.md#what-is-the-same-and-what-differs-from-a-training-without-a-table)).
 
 **A check against mixed-up data.** The training compares the image size in the header of each `.mnt` file with the
 size of the image that it loaded. If they do not fit (the image file was replaced, or extraction and training were
@@ -1100,5 +1103,6 @@ See the table "What the script writes" in [Step 6](#step-6-run-the-training), an
 
 ### In the directory of a sample table
 
-The parts `part-00000-of-00004.parquet` ... and at most the two logs of the build, `build_failures.txt` and
+The parts, for example `part-00000-of-00004.parquet` to `part-00003-of-00004.parquet` for one million files (one
+part per 250,000 listed files), and at most the two logs of the build, `build_failures.txt` and
 `build_warnings.txt`; see [The columns](sample-table.md#the-columns) in sample-table.md.

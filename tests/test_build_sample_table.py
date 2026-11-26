@@ -2286,6 +2286,83 @@ def test_check_prints_the_summary_of_the_build(builder, monkeypatch, tmp_path, c
     assert "Warnings log: none" in checked
 
 
+def test_check_names_a_log_that_is_no_regular_file_and_does_not_read_it(
+    builder, monkeypatch, tmp_path
+):
+    """
+    --check counts the lines of the two logs beside the parts. A table
+    directory that somebody else made can hold something else under their
+    names: a link to a device, which can be read without end, or a named
+    pipe, which keeps its reader waiting for a writer. --check names such a
+    log, reads the table without it, and ends. It runs in a child process
+    with a time limit here, so that a check that does not end fails this test
+    and does not stop the run of the tests.
+    """
+    if not hasattr(os, "mkfifo") or not os.path.exists("/dev/zero"):
+        pytest.skip("A named pipe and /dev/zero are what the logs are replaced with")
+    write_pair(tmp_path)
+    assert build(builder, monkeypatch, tmp_path) == 0
+    os.symlink("/dev/zero", tmp_path / "table" / FAILURES_LOG)
+    os.mkfifo(tmp_path / "table" / WARNINGS_LOG)
+    result = subprocess.run(
+        [sys.executable, SCRIPT, "--check", "table"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    checked = [" ".join(line.split()) for line in result.stdout.splitlines()]
+    for label, name in (("Failures log", FAILURES_LOG), ("Warnings log", WARNINGS_LOG)):
+        assert f"{label}: {join('table', name)} (not a regular file, not read)" in checked
+    assert "Rows: 2" in checked
+
+
+def open_files_below(directory) -> list:
+    """The files below the directory that this process has open, by /proc/self/fd."""
+    found = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{name}")
+        except OSError:
+            continue  # the descriptor with which the directory was listed
+        # /proc names a file by its path without links
+        if target.startswith(os.path.realpath(directory) + os.sep):
+            found.append(target)
+    return sorted(found)
+
+
+def test_check_names_a_directory_in_the_place_of_a_log_and_leaves_nothing_open(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """
+    A directory, or a link to one, under the name of a log is opened to be
+    looked at, as every log is, and it is no regular file either: --check
+    names it and closes it again. Python makes no file object of a
+    directory, and a descriptor that it refuses to make one of stays open.
+    """
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("The open files of a process are listed from /proc/self/fd")
+    write_pair(tmp_path)
+    assert build(builder, monkeypatch, tmp_path) == 0
+    os.mkdir(tmp_path / "elsewhere")
+    os.mkdir(tmp_path / "table" / FAILURES_LOG)
+    os.symlink(tmp_path / "elsewhere", tmp_path / "table" / WARNINGS_LOG)
+    descriptor = os.open(tmp_path / "table" / FAILURES_LOG, os.O_RDONLY)
+    try:  # control: a directory that is open is found
+        assert open_files_below(tmp_path) == [os.path.realpath(tmp_path / "table" / FAILURES_LOG)]
+    finally:
+        os.close(descriptor)
+    capsys.readouterr()
+
+    assert run(builder, monkeypatch, "--check", tmp_path / "table") == 0
+    checked = printed(capsys)
+    for label, name in (("Failures log", FAILURES_LOG), ("Warnings log", WARNINGS_LOG)):
+        assert f"{label}: {tmp_path / 'table' / name} (not a regular file, not read)" in checked
+    assert "Rows: 2" in checked
+    assert open_files_below(tmp_path) == []
+
+
 def test_check_refuses_what_is_no_table(builder, monkeypatch, tmp_path, capsys):
     write_many(tmp_path)
     monkeypatch.setattr(builder, "FILES_PER_PART", 5)
@@ -2363,6 +2440,52 @@ def test_check_reads_a_table_that_this_script_did_not_build(builder, monkeypatch
         "Failures log: none",
         "1 1000 ppi from manifest (resampled to 500 ppi)",
         "1 light ridges, from the manifest",
+    ]:
+        assert line in lines, line
+
+
+def test_check_counts_the_files_of_a_build_that_recorded_them_as_lists(
+    builder, monkeypatch, tmp_path, capsys
+):
+    """
+    The format lets a build record the listed and the failed files as lists
+    of names instead of numbers; read_samples joins the lists of the parts.
+    --check counts such a list by its length, as the start of a training
+    does, and the number of parts stays what the parts state.
+    """
+    rows = [
+        SampleRow(
+            subject=subject,
+            impression=0,
+            image_path=name,
+            file_size=100,
+            ppi=500.0,
+            ppi_origin="argument",
+            ridges="dark",
+            ridges_origin="argument",
+            source_width=48,
+            source_height=64,
+            width=48,
+            height=64,
+            minutiae=None,
+        )
+        for subject, name in ((0, "a.png"), (1, "b.png"))
+    ]
+    table = str(tmp_path / "table")
+    for index, (row, files, failed) in enumerate(
+        [(rows[0], ["a.png", "c.png"], ["c.png"]), (rows[1], ["b.png", "d.png"], [])]
+    ):
+        build = {"id": "another tool", "files": files, "failed": failed}
+        write_part(table, index, 2, samples_from_rows([row]), build)
+    assert read_samples(table).build["files"] == ["a.png", "c.png", "b.png", "d.png"]
+    assert run(builder, monkeypatch, "--check", table) == 0
+    lines = printed(capsys)
+    for line in [
+        "Files listed: 4",
+        "Rows: 2",
+        "Files that failed: 1",
+        "Parts: 2",
+        f"Failures log: missing, although 1 file(s) failed ({join(table, FAILURES_LOG)})",
     ]:
         assert line in lines, line
 
@@ -2454,6 +2577,39 @@ def test_options_that_do_not_fit_are_refused_before_anything_is_done(
     inside = ["--samples", minutiae / "new" / "table", "--minutiae_dir", minutiae]
     assert "lies in --minutiae_dir" in error("--dataset_dir", images, *inside)
     assert not (minutiae / "new").exists()
+
+
+@pytest.mark.parametrize(
+    "option, what",
+    [
+        ("--samples", "the directory of the table to write"),
+        ("--check", "the directory of a sample table"),
+        ("--dataset_dir", "the directory of the image files"),
+        ("--minutiae_dir", "the directory of the .mnt files"),
+        ("--sample_list", "the CSV file of the sample list"),
+    ],
+)
+def test_an_option_of_a_path_that_is_given_an_empty_text_is_refused(
+    builder, monkeypatch, tmp_path, capsys, option, what
+):
+    """
+    An empty text is what "$TABLE" gives where the variable is not set, and
+    it names no file. As --samples it would be taken as the current
+    directory, which exists, and the build would be refused with the advice
+    to remove that directory.
+    """
+    write_pair(tmp_path)
+    forbid_loading(builder, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    given = {} if option == "--check" else {"--dataset_dir": "images", "--samples": "table"}
+    given[option] = ""
+    arguments = [argument for pair in given.items() for argument in pair]
+    message = usage_error(builder, monkeypatch, capsys, *arguments)
+    assert (
+        f"build_sample_table.py: error: {option} was given an empty text, where {what} belongs "
+        f"(a variable of the shell that is not set gives that). Give {what}."
+    ) in message
+    assert tables(tmp_path) == []
 
 
 def test_check_goes_with_no_other_option(builder, monkeypatch, tmp_path, capsys):
@@ -2694,6 +2850,33 @@ def running(pids: list) -> list:
     return found
 
 
+def ignores(pid: int, number: int) -> bool:
+    """Whether the process ignores the signal of this number (SigIgn of /proc/<pid>/status)."""
+    try:
+        with open(f"/proc/{pid}/status") as file:
+            for line in file:
+                if line.startswith("SigIgn:"):
+                    return bool(int(line.split()[1], 16) >> (number - 1) & 1)
+    except OSError:
+        pass  # the process has ended
+    return False
+
+
+def bytes_read(pid: int) -> int:
+    """
+    The bytes that the process has read since it began (rchar of
+    /proc/<pid>/io); 0 if it ended.
+    """
+    try:
+        with open(f"/proc/{pid}/io") as file:
+            for line in file:
+                if line.startswith("rchar:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass  # the process has ended
+    return 0
+
+
 def wait_until(condition, seconds: float = 60) -> bool:
     """
     Asks the condition again and again until it is true or the time is
@@ -2720,6 +2903,8 @@ def stuck_program(tmp_path, signals_of_a_terminal):
     pytest.importorskip("pyarrow")
     if not os.path.isdir("/proc/self"):
         pytest.skip("the worker processes are found in /proc")
+    if not os.path.exists("/proc/self/io"):
+        pytest.skip("whether a worker process has loaded an image is found in /proc/<pid>/io")
     for subject in range(2, 9):
         save(tmp_path / "images" / f"{subject}_1.png")
     os.mkfifo(tmp_path / "images" / "1_1.png")
@@ -2736,7 +2921,24 @@ def stuck_program(tmp_path, signals_of_a_terminal):
         wait_until(lambda: len(children(process.pid)) == 2 or process.poll() is not None)
         workers = children(process.pid)
         assert len(workers) == 2, "the program did not get as far as its two workers"
-        time.sleep(0.5)  # the workers have taken their files, and one of them the pipe
+        # Until both workers leave SIGINT and SIGHUP to the main process (_serve
+        # ignores them first; before, a worker would end by them), and one of
+        # them has loaded an image: it has read at least the bytes of an image
+        # file, far more than a worker reads at its start and with a file name.
+        # The files are handed out in the order of the rows, and the first is
+        # the pipe 1_1.png, so the other worker has it then, and waits for it.
+        images = [path for path in (tmp_path / "images").iterdir() if not path.is_fifo()]
+        image_bytes = min(os.path.getsize(path) for path in images)
+
+        def settled() -> bool:
+            if process.poll() is not None:
+                return True
+            ignoring = all(
+                ignores(pid, signal.SIGINT) and ignores(pid, signal.SIGHUP) for pid in workers
+            )
+            return ignoring and max(bytes_read(pid) for pid in workers) >= image_bytes
+
+        assert wait_until(settled, 60) and process.poll() is None, "the workers took no files"
         assert tables(tmp_path) == [f"table.tmp{process.pid}"]
         yield process, workers
     finally:

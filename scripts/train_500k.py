@@ -97,6 +97,8 @@ Other file names, gaps and uneven sets (a sample table):
     small for the binarisation, and it loads 100 images spread over the
     table before it builds the model, so that another --dataset_dir, or
     files that changed after the table was built, stop the run at once.
+    A table that is replaced at its path while a process reads and checks it
+    stops that process as well: every process reads the table by itself.
     With several GPUs only the first process prints what the start prints.
 
     A model that was trained from a table is loaded with
@@ -212,7 +214,9 @@ Validation (on by default):
                                     Validation runs after every epoch on all
                                     impressions of the held-out subjects, and
                                     its pair list is built in a time that
-                                    grows with the square of their number.
+                                    grows with the square of their number;
+                                    from a sample table, in a time that
+                                    grows with the number of pairs.
                                     Every subject above the limit stays in
                                     the training set.
     --validation_seed 42            seed of the random choice of the held-out
@@ -300,7 +304,7 @@ from flx.setup.paths import get_best_model_file, get_newest_model_file
 from flx.models.deep_print_loss import LossWeights
 from flx.data.image_helpers import pad_and_resize_to_deepprint_input_size
 from flx.preparation import sensor_normalization
-from flx.preparation.sample_table import PPI_ORIGINS, RIDGES_ORIGINS, SampleTableError
+from flx.preparation.sample_table import PPI_ORIGINS, RIDGES_ORIGINS, SampleTableError, is_part_name
 from flx.preparation.sensor_normalization import SensorNormalizer
 
 
@@ -1151,6 +1155,74 @@ def check_table_images(
     return len(spread)
 
 
+def directory_identity(path: str) -> tuple | None:
+    """
+    What tells the table at the path from one that is put there later: the
+    device and inode of the directory, and the name, inode, size and time of
+    the last change of the inode (st_ctime) of every part of the table in it,
+    the files that the reader reads (is_part_name of
+    flx/preparation/sample_table.py). None where
+    there is no directory that can be listed. A directory that is renamed
+    into the place has another inode. One that is made anew there (the old
+    one removed and another one copied to the path) and its parts can get
+    the inode numbers of the old ones back, but its parts are new and have a
+    later time of the last change, which no copy takes over; a part that is
+    written again keeps its inode and gets a later time as well. Reading a
+    table changes none of them. A part whose permissions, times or links are
+    changed (chmod, touch, a hard link to it) gets a later time too, and is
+    not told from a part that is written again.
+
+    The other files of the directory are not taken: the reader does not read
+    them, so a log that a run writes there (its output redirected into the
+    directory of the table), the swap file of an editor, or the settings
+    files that the first process of a training writes where --output_dir is
+    the directory of the table change nothing that is read.
+    """
+    # The time of the last change of the directory itself is not taken: it
+    # changes when something is made in it, as the first process of a
+    # training makes a new --output_dir there while the others still check
+    try:
+        status = os.stat(path)
+        files = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.is_file() and is_part_name(entry.name):
+                    info = entry.stat()
+                    files.append((entry.name, info.st_ino, info.st_size, info.st_ctime_ns))
+    except (OSError, ValueError):
+        return None
+    return status.st_dev, status.st_ino, tuple(sorted(files))
+
+
+def check_table_was_not_replaced(samples_dir: str, before: tuple | None) -> None:
+    """
+    Raises SampleTableError if the directory at samples_dir, or the parts in
+    it, are not those of `before` (directory_identity before the table was
+    read), or there is no directory. Every process of a training reads the
+    table by itself, and nothing compares what they read: a table that is
+    replaced at its path while the processes start can give them two tables,
+    whether the old directory is renamed away and a new one renamed into its
+    place (as the builder publishes a table), or removed and another one
+    copied to the path, or its parts are written again. Each process calls
+    this when its checks are over. Files of the directory that are no part,
+    such as a log or the settings files of a first process whose --output_dir
+    is the directory of the table, do not count; a part whose permissions,
+    times or links were changed (chmod, touch, a hard link) counts as
+    replaced.
+    """
+    if before is None or directory_identity(samples_dir) == before:
+        return
+    raise SampleTableError(
+        f"The sample table {samples_dir} was replaced while the training started: the directory "
+        "at that path, or the parts of the table in it, are not those that were there before "
+        "the table was read (a part whose permissions, times or links were changed counts as "
+        "replaced), or there is no directory. Every process of a training reads the table by "
+        "itself, so they could have read different tables. Start the training again. To train "
+        "from a new table, build it into a new directory and give that one, instead of putting "
+        "it in the place of a table that a training reads."
+    )
+
+
 def sample_resolution_sources(
     normalizer: SensorNormalizer, paths: list[str], max_files: int = 1000
 ) -> tuple[dict, int]:
@@ -1229,7 +1301,8 @@ def describe_table_resolutions(table: SampleTable, rows: np.ndarray) -> list[str
     lines.extend(f"  {number:>12,}  {text}" for number, text in polarities)
     lines.append(
         "  These are the sources of the build of the table "
-        "(scripts/build_sample_table.py): to change one, build the table again."
+        "(scripts/build_sample_table.py): to change one, build the table again. The options "
+        "that these lines name are options of that build, not of this command."
     )
     return lines
 
@@ -1246,6 +1319,7 @@ def _files_that_failed_in_the_build(table: SampleTable) -> str | None:
     """
     failed, files = table.build.get("failed"), table.build.get("files")
     failed = len(failed) if isinstance(failed, list) else failed
+    files = len(files) if isinstance(files, list) else files
     if isinstance(failed, bool) or not isinstance(failed, int) or failed <= 0:
         return None
     text = f"{failed:,} file(s) failed when the table was built"
@@ -1613,13 +1687,19 @@ def create_table_validation_benchmark(
                 comparisons.append(BiometricComparison(own[i], own[j]))
 
     # Create non-mated comparisons (different subjects)
+    number_of_others = len(subjects) - 1
     for position, subject in enumerate(subjects):
-        # The subjects are sorted and each is there once: all but this one
-        other_subjects = subjects[:position] + subjects[position + 1:]
-        if len(other_subjects) >= comparisons_per_subject:
-            selected = rng.sample(other_subjects, comparisons_per_subject)
+        # The subjects are sorted and each is there once: all but this one,
+        # drawn by their places among them. rng.sample draws the same places
+        # from any sequence of the same length, so these are the subjects
+        # that a list of all others gives, without the list: it would cost
+        # every subject a copy of all others, a time that grows with the
+        # square of their number.
+        if number_of_others >= comparisons_per_subject:
+            drawn = rng.sample(range(number_of_others), comparisons_per_subject)
         else:
-            selected = other_subjects
+            drawn = range(number_of_others)
+        selected = [subjects[place if place < position else place + 1] for place in drawn]
 
         own = impressions[subject]
         for other in selected:
@@ -1816,7 +1896,7 @@ def load_trained_model(
     Raises ValueError if the model was trained from a sample table and
     samples is not given, or if the table of samples holds images at another
     resolution than those of the training, and SampleTableError if the table
-    cannot be read.
+    cannot be read or holds no row.
     """
     path = os.path.join(output_dir, SETTINGS_FILE)
     if not os.path.exists(path):
@@ -1835,6 +1915,11 @@ def load_trained_model(
                 "resolution of every image file itself: leave ppi_manifest out."
             )
         table = SampleTable.read(samples, dataset_dir)
+        if table.num_rows == 0:
+            raise SampleTableError(
+                f"The sample table {samples} holds no row, so there is nothing to embed. Build a "
+                "table of the image files to embed (scripts/build_sample_table.py)."
+            )
         trained_at = settings["preparation"]["target_ppi"]
         if table.target_ppi != trained_at:
             raise ValueError(
@@ -1930,8 +2015,7 @@ def check_options_of_the_mode(
             parser.error(
                 f"{' and '.join(given)} can only be given together with --samples, which "
                 "reads the training set and its minutiae from a sample table. Without a table "
-                "every training image needs its .mnt file in --minutiae_dir, and the "
-                "texture-only variant is trained when --minutiae_dir is left out. Give "
+                "the minutiae come from the .mnt files in --minutiae_dir. Give "
                 "--samples as well (see docs/sample-table.md), or leave "
                 f"{' and '.join(given)} out."
             )
@@ -1998,6 +2082,7 @@ def _start_from_samples(
     cannot be used.
     """
     localization = args.localization == "on"
+    directory = directory_identity(args.samples)
     table = read_sample_table(args.samples, args.dataset_dir)
 
     # Create identifiers for training and validation. Whole subjects are held
@@ -2227,6 +2312,7 @@ def _start_from_samples(
     # Every process loads them, as it makes every other check: each one stops
     # by itself, and none goes on to the training of a start that is refused
     loaded = check_table_images(files)
+    check_table_was_not_replaced(args.samples, directory)
     if first_process:
         print(
             f"Loaded {loaded:,} image files spread over the table: each has the size in "
@@ -2325,8 +2411,9 @@ def train_from_samples(
 
     In a multi-GPU training every process reads the table and makes every
     check, and each one stops by itself with the exit status 2 and the reason
-    if the table or its files cannot be used. What the start prints is
-    printed by the first process only.
+    if the table or its files cannot be used, or if the table was replaced at
+    its path during the start. What the start prints is printed by the first
+    process only.
     """
     # Options that were not given are None and take the value from the config
     try:

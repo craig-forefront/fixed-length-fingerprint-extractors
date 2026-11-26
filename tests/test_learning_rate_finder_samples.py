@@ -2115,8 +2115,7 @@ def test_the_options_of_a_table_are_refused_without_a_table(
     assert message.endswith(
         f"find_learning_rate.py: error: {given} can only be given together with --samples, "
         "which reads the training set and its minutiae from a sample table. Without a table "
-        "every training image needs its .mnt file in --minutiae_dir, and the texture-only "
-        "variant is trained when --minutiae_dir is left out. Give --samples as well (see "
+        "the minutiae come from the .mnt files in --minutiae_dir. Give --samples as well (see "
         f"docs/sample-table.md), or leave {given} out."
     )
     # Control: the same command without them

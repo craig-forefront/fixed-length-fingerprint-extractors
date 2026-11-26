@@ -27,6 +27,7 @@ from flx.preparation.sample_table import (
     SampleRow,
     Samples,
     SampleTableError,
+    is_part_name,
     normalize_image_path,
     part_name,
     read_samples,
@@ -1020,6 +1021,35 @@ def test_a_parquet_file_that_is_no_sample_table_is_refused(tmp_path):
         assert path in message and key in message and BUILDER in message, (key, value)
 
 
+@pytest.mark.parametrize(
+    "build",
+    [
+        "[" * 100_000,
+        '{"id": "a", "part": 0, "parts": 1, "rows": 15, "files": '
+        + "[" * 100_000
+        + "]" * 100_000
+        + "}",
+    ],
+    ids=["brackets", "a nested value"],
+)
+def test_build_metadata_nested_deeper_than_python_decodes_is_refused_with_the_part(
+    tmp_path, build
+):
+    """
+    For brackets nested deeper than the recursion limit of Python, json
+    raises a RecursionError, which is neither a TypeError nor a ValueError.
+    Such metadata is no build of this module, and the part is refused as any
+    other part with metadata that it did not write, by its name.
+    """
+    with pytest.raises(RecursionError):  # control: what json makes of it
+        json.loads(build)
+    (path,) = write_table(tmp_path / "table", ROWS, parts=1)
+    change_part(path, metadata={"flx.build": build})
+    message = refusal(tmp_path / "table")
+    assert message.startswith(f"{path} has file metadata that this module did not write: ")
+    assert "(RecursionError: maximum recursion depth exceeded" in message and BUILDER in message
+
+
 def test_another_schema_version_is_refused_and_the_message_says_which_one_is_read(tmp_path):
     paths = write_table(tmp_path / "table", ROWS)
     change_part(paths[1], metadata={"flx.schema_version": "2"})
@@ -1277,6 +1307,69 @@ def test_a_text_that_is_not_utf8_is_refused_like_any_other_text(tmp_path, column
     assert BUILDER in message
 
 
+@pytest.mark.parametrize(
+    "texts, said",
+    [
+        (
+            [f"origin{n}" for n in range(40)],
+            "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 35 more among the "
+            "rows 0 to 39 of the part, first in row 0 of the part",
+        ),
+        (
+            ["argument"] * 5 + [f"origin{n}" for n in range(35)],
+            "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 30 more among the "
+            "rows 0 to 39 of the part, first in row 5 of the part",
+        ),
+        # A value behind more texts than become Python values is no other text
+        (
+            [f"origin{n}" for n in range(20)] + ["argument", "assumed"] * 10,
+            "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 15 more among the "
+            "rows 0 to 39 of the part, first in row 0 of the part",
+        ),
+        (
+            ["argument"] * 30 + ["guessed", "known"] * 5,
+            "holds 'guessed', 'known', first in row 30 of the part",
+        ),
+    ],
+    ids=["40 others", "35 others behind a value", "values behind 20 others", "2 others"],
+)
+def test_the_texts_that_are_no_value_of_their_column_are_named_and_counted(tmp_path, texts, said):
+    """
+    Only the first texts become Python values, as many as a message names.
+    The number of the others is that of the texts that the rows hold, also
+    where there are more of them than that.
+    """
+    rows = [sample_row(subject, 0) for subject in range(40)]
+    (path,) = write_table(tmp_path / "table", rows, parts=1)
+    change_part(path, with_column("ppi_origin", pa.array(texts, type=pa.string())))
+    message = refusal(tmp_path / "table")
+    assert message.startswith(f"{path}: the column ppi_origin {said} (counted from 0), image_path ")
+
+
+def test_the_texts_that_are_no_value_are_counted_in_the_rows_of_their_batch(tmp_path, large_rows):
+    """
+    The rows are read a batch at a time, and a part is refused in the first
+    batch that holds another text: the count is that of the rows of this
+    batch, and the message says which rows these are.
+    """
+    rows = large_rows[:20_000]
+    assert sample_table._BATCH_ROWS == 16_384  # control: the second batch begins at row 16,384
+    (path,) = write_table(tmp_path / "table", rows, parts=1)
+
+    def with_other_texts(table):
+        texts = table.column("ppi_origin").to_pylist()
+        for number in range(12):
+            texts[17_000 + number] = f"origin{number}"
+        return pa.array(texts, type=pa.string())
+
+    change_part(path, with_column("ppi_origin", with_other_texts))
+    message = refusal(tmp_path / "table")
+    assert (
+        "holds 'origin0', 'origin1', 'origin2', 'origin3', 'origin4' and 7 more among the rows "
+        "16,384 to 19,999 of the part, first in row 17,000 of the part (counted from 0)" in message
+    )
+
+
 # ---------------------------------------------------------------------------
 # What a reader refuses: parts that are not one whole build
 # ---------------------------------------------------------------------------
@@ -1448,12 +1541,27 @@ def refusal_for_its_number_of_rows(directory, path, rows: int) -> str:
     return message
 
 
+def refusal_for_another_file(directory, path) -> str:
+    """
+    The message with which a table is refused because a part is another file
+    when its rows are read than when its footer was read.
+    """
+    message = refusal(directory)
+    assert message == (
+        f"{path} is not the file any more whose footer was read when the table was opened: the "
+        "file changed while the table was read (it was written again, or another file was put "
+        "in its place). Read the table again when nothing writes to its directory."
+    )
+    return message
+
+
 @pytest.mark.parametrize("rows_then", [3, 14])
 def test_a_part_that_changes_while_the_table_is_read_is_refused(tmp_path, monkeypatch, rows_then):
     """
     The arrays of a table are made for the rows that the parts state before a
     row is read. A part that is written again in between, with fewer or with
-    more rows, must not leave rows that were never filled.
+    more rows, must not leave rows that were never filled: it is another file
+    than the one whose footer was read, and refused before its rows are read.
     """
     paths = write_table(tmp_path / "table", ROWS)
     assert pq.read_metadata(paths[1]).num_rows == 7
@@ -1466,7 +1574,86 @@ def test_a_part_that_changes_while_the_table_is_read_is_refused(tmp_path, monkey
         check_parts(directory, parts)
 
     monkeypatch.setattr(sample_table, "_check_parts", write_a_part_again_then_check)
-    refusal_for_its_number_of_rows(tmp_path / "table", paths[1], 7)
+    refusal_for_another_file(tmp_path / "table", paths[1])
+
+
+def other_minutiae(rows) -> list:
+    """The rows with other minutiae, as another extraction of the same images gives them."""
+    return [
+        dataclasses.replace(row, minutiae=np.full((2, 3), row.subject + 0.5, dtype=np.float32))
+        for row in rows
+    ]
+
+
+def test_a_part_that_is_replaced_by_one_of_another_build_of_its_rows_is_refused(
+    tmp_path, monkeypatch
+):
+    """
+    A part that is put in the place of another one while the table is read,
+    and holds as many rows: the part of a build of the same list of files
+    with other minutiae, which has the same id. Its rows fit the footer of
+    the part that was read before, and the table would be read as the rows
+    of two builds that exist nowhere together.
+    """
+    paths = write_table(tmp_path / "table", ROWS, parts=3)
+    others = write_table(tmp_path / "other build", other_minutiae(ROWS), parts=3)
+    assert json.loads(pq.read_metadata(others[1]).metadata[b"flx.build"])["id"] == "build-1"
+    check_parts = sample_table._check_parts
+
+    def replace_a_part_then_check(directory, parts):
+        os.replace(others[1], paths[1])
+        check_parts(directory, parts)
+
+    monkeypatch.setattr(sample_table, "_check_parts", replace_a_part_then_check)
+    refusal_for_another_file(tmp_path / "table", paths[1])
+
+
+@pytest.mark.parametrize("when", ["behind the footers", "behind the rows of the first part"])
+def test_a_table_that_is_replaced_while_it_is_read_is_read_whole_as_it_was(
+    tmp_path, monkeypatch, when
+):
+    """
+    The builder publishes a table by renaming its directory, and so does
+    whoever replaces a table by a new one: the old directory is renamed away
+    and the new one into its place. A read that is under way then reads the
+    old table to its end, from the directory that it opened, and not the
+    parts of the new one under the footers of the old one, also where both
+    are builds of the same list of files and have the same id.
+    """
+    table, old, new = tmp_path / "table", tmp_path / "table.old", tmp_path / "new"
+    write_table(table, ROWS, parts=3)
+    write_table(new, other_minutiae(ROWS), parts=3)
+    replaced = []
+
+    def replace_the_table():
+        os.rename(table, old)
+        os.rename(new, table)
+        replaced.append(when)
+
+    if when == "behind the footers":
+        check_parts = sample_table._check_parts
+
+        def replace_then_check(directory, parts):
+            replace_the_table()
+            check_parts(directory, parts)
+
+        monkeypatch.setattr(sample_table, "_check_parts", replace_then_check)
+    else:
+        read_rows = sample_table._read_rows
+
+        def read_rows_then_replace(*arguments):
+            read_rows(*arguments)
+            if not replaced:
+                replace_the_table()
+
+        monkeypatch.setattr(sample_table, "_read_rows", read_rows_then_replace)
+    samples = read_samples(str(table))
+    assert replaced == [when]  # control: the table was replaced during the read
+    assert_same_rows(samples, samples_from_rows(ROWS))
+    assert samples_checksum(samples) == samples_checksum(samples_from_rows(ROWS))
+    monkeypatch.undo()
+    # The table that is there now is the new one
+    assert_same_rows(read_samples(str(table)), samples_from_rows(other_minutiae(ROWS)))
 
 
 @pytest.mark.parametrize("handed_out", [0, 3])
@@ -1502,13 +1689,15 @@ def test_a_part_that_gives_fewer_rows_than_it_states_without_an_error_is_refused
     assert seen == [(7, handed_out)]
 
 
-@pytest.mark.parametrize(
-    "then, error", [("removed", "FileNotFoundError"), ("no Parquet file", "ArrowInvalid")]
-)
+@pytest.mark.parametrize("then", ["removed", "no Parquet file"])
 def test_a_part_that_cannot_be_opened_when_its_rows_are_read_is_refused(
-    tmp_path, monkeypatch, then, error
+    tmp_path, monkeypatch, then
 ):
-    """A part that is removed or overwritten after the metadata of all parts were read."""
+    """
+    A part that is removed or overwritten after the metadata of all parts
+    were read. A file in its place is another file than the one whose footer
+    was read, also where it is no Parquet file.
+    """
     paths = write_table(tmp_path / "table", ROWS)
     check_parts = sample_table._check_parts
 
@@ -1520,8 +1709,12 @@ def test_a_part_that_cannot_be_opened_when_its_rows_are_read_is_refused(
         check_parts(directory, parts)
 
     monkeypatch.setattr(sample_table, "_check_parts", change_a_part_then_check)
+    if then == "no Parquet file":
+        refusal_for_another_file(tmp_path / "table", paths[1])
+        return
     message = refusal_for_its_rows(tmp_path / "table", paths[1])
-    assert f"({error}: " in message and "; 0 of its 7 rows were read before that. " in message
+    assert "(FileNotFoundError: " in message
+    assert "; 0 of its 7 rows were read before that. " in message
 
 
 def test_a_table_that_is_read_is_validated(tmp_path):
@@ -2308,6 +2501,39 @@ def test_the_checksum_leaves_out_the_origins_and_the_build(tmp_path):
 def test_part_names_have_five_digits_for_index_and_count():
     assert part_name(0, 3) == "part-00000-of-00003.parquet"
     assert part_name(12, 345) == "part-00012-of-00345.parquet"
+
+
+def test_the_names_of_parts_are_told_from_other_names_as_the_reader_tells_them(tmp_path):
+    """
+    is_part_name is the rule by which read_samples takes the files of the
+    directory of a table, for whoever must tell the parts from the other
+    files there (the start of a training looks at the parts alone). A copy of
+    the part under every other name is passed over by the reader; under a
+    name of a part, the copy is read as a part.
+    """
+    (path,) = write_table(tmp_path / "table", ROWS, parts=1)
+    others = [
+        "build_failures.txt",
+        "build_warnings.txt",
+        f"{part_name(0, 1)}.tmp4711",
+        f".{part_name(0, 1)}.swp",
+        f"copy of {part_name(0, 1)}",
+        "part-0000-of-00001.parquet",
+        "part-00000-of-0001.parquet",
+        "part-00000-of-00001.Parquet",
+        "PART-00000-of-00001.parquet",
+        "part-0000x-of-00001.parquet",
+        "training_settings.json",
+    ]
+    for name in others:
+        assert not is_part_name(name), name
+        shutil.copyfile(path, tmp_path / "table" / name)
+    assert_same_rows(read_samples(str(tmp_path / "table")), samples_from_rows(ROWS))
+
+    for name in (part_name(0, 1), part_name(123_456, 123_457), "part-000000-of-000001.parquet"):
+        assert is_part_name(name), name
+    shutil.copyfile(path, tmp_path / "table" / "part-000000-of-000001.parquet")
+    assert "more than once" in refusal(tmp_path / "table")
 
 
 def test_part_names_grow_beyond_five_digits(tmp_path):

@@ -593,7 +593,7 @@ sample-table.md lists every run and what was not run.
 | A table, and images, at a path with letters outside ASCII in processes whose file names are ASCII or ISO-8859-1 | the 12 and the 14 files | the table: exit status 0; the images: a segmentation fault of OpenCV (ASCII) or refusals with causes that are not the cause (ISO-8859-1); with `PYTHONUTF8=1`: exit status 0 |
 | A table with `.mnt` files (46 minutiae per image drawn at random, written as the extraction writes them): build, the variant with minutiae (training and range test), rows without minutiae with and without `--tolerate_missing_minutiae`, `--ignore_minutiae`, `load_trained_model(..., samples=...)` | 40 files of 20 fingers made from the example images | all as sample-table.md describes; with the default batch size of 64, the range test and the training were ended by the memory limit of the runs (14.3 GB) after their first step and their first epoch |
 | The start of the training at one million rows, reading the table, a forked worker, the builder on 800 and 8,000 files, `--check` | synthetic rows, see [Large datasets](#large-datasets) | the figures there |
-| `python -m pytest -q` | | 952 passed in the environment of these runs; 951 passed and 1 skipped (scikit-image) in a new environment of Part A1 with the extra `table`, 396 passed and 170 skipped without it |
+| `python -m pytest -q` | | 984 passed in the environment of these runs; 983 passed and 1 skipped (scikit-image) in a new environment of Part A1 with the extra `table`, 396 passed and 178 skipped without it |
 
 ### Earlier runs, on real prints
 

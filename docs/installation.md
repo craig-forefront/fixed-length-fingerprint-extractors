@@ -104,8 +104,8 @@ python -m pytest -q          # only if you installed the optional tools
 ```
 
 "CUDA available: False" means that PyTorch found no usable GPU. The tests take a few minutes on a CPU. Here,
-in a new environment made with these commands, they ended with "951 passed, 1 skipped" with the extra `table`,
-and with "396 passed, 170 skipped" without it: the tests of the sample table skip themselves without pyarrow
+in a new environment made with these commands, they ended with "983 passed, 1 skipped" with the extra `table`,
+and with "396 passed, 178 skipped" without it: the tests of the sample table skip themselves without pyarrow
 (three of their files count as one skipped test each). The one other skipped test needs the package
 `scikit-image`, which is not a dependency of this repository.
 
@@ -352,7 +352,7 @@ On one Linux x86_64 machine with 4 CPU cores, no GPU, Python 3.11:
 | Part | Run? |
 |------|------|
 | A1, in a copy of this repository instead of a new clone: `python3.11 -m venv`, the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the three check lines | **Run.** PyTorch 2.15.0+cpu was kept by the later steps; the environment was 1.9 GB; 357 tests passed, 1 skipped (the tests as they were before the sample table) |
-| A1 once more for the sample table, in a copy of the repository: `python -m venv` (Python 3.11.18), the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the tests, then `pip install -e ".[table]"` with network access and the tests again | **Run.** pyarrow 26.0.1 was installed; the tests ended with "396 passed, 170 skipped" before it and "951 passed, 1 skipped" after it, with one thread of PyTorch |
+| A1 once more for the sample table, in a copy of the repository: `python -m venv` (Python 3.11.18), the CPU build of PyTorch, `pip install -e .`, `pip install -e ".[dev]"`, the tests, then `pip install -e ".[table]"` with network access and the tests again | **Run.** pyarrow 26.0.1 was installed; the tests ended with "396 passed, 178 skipped" before it and "983 passed, 1 skipped" after it, with one thread of PyTorch (run again for the tests of the review of the whole; before them "396 passed, 170 skipped" and "951 passed, 1 skipped") |
 | B1 and B2 for pyarrow: `pip download "pyarrow>=17.0"`; then, without network (`unshare -n`), `pip install --no-index --find-links=<directory> --no-build-isolation -e ".[table]"` in a copy of the repository whose environment had the other packages already, and `pip install --no-index --find-links=<directory> "pyarrow>=17.0"` in a new environment with numpy | **Run.** One file of 55.0 MB, pyarrow 26.0.1, installed both ways. With a directory that held only pyarrow, the install of the extra without `--no-build-isolation` failed (pip looked there for `setuptools>=61.0` and `wheel` to build the package), and worked when `setuptools`, `wheel` and `packaging` were added to the directory. The whole Part B for pyarrow, on two machines, was not run |
 | A1 without the CPU line (PyTorch with GPU libraries from PyPI), and `pip install -r requirements.txt` | Not run |
 | A2: `git clone`, `uv sync`, `uv pip install -e .`, `scripts/install_model.py` | Not run for this document; the four model files were already on the machine |

@@ -26,6 +26,7 @@ written as text, and both scripts are imported from their files: no test
 module is imported.
 """
 
+import contextlib
 import dataclasses
 import importlib.util
 import json
@@ -35,6 +36,8 @@ import random
 import shutil
 import subprocess
 import sys
+import time
+import types
 from os.path import abspath, dirname, exists, join
 from typing import NamedTuple, Optional
 
@@ -1231,6 +1234,42 @@ def test_the_validation_pairs_of_uneven_subjects_are_made_of_the_impressions_tha
     assert train_500k.MANY_VALIDATION_PAIRS == 225_000 + 50_000
 
 
+def test_the_other_subject_of_a_non_mated_pair_is_drawn_by_its_place(train_500k, monkeypatch):
+    """
+    Every validation subject draws the subjects of its non-mated pairs among
+    all others. A list of all others for every subject would make the pairs
+    cost a time that grows with the square of the number of validation
+    subjects, so they are drawn by their places among the others, from a
+    range. rng.sample draws the same places from any sequence of the same
+    length, so the pairs are those of the rule, for few others and for many
+    (random.sample draws in another way above 85 of them, for 10 pairs).
+    """
+    drawn_from = []
+
+    class Recording(random.Random):
+        def sample(self, population, k, **options):
+            drawn_from.append(population)
+            return super().sample(population, k, **options)
+
+    for count in (12, 120):
+        subjects = list(range(0, 3 * count, 3))
+        impressions = {subject: list(range(1 + (subject // 3) % 3)) for subject in subjects}
+        # One to three impressions: subjects with mated pairs beside subjects without
+        assert {len(own) for own in impressions.values()} == {1, 2, 3}
+        validation = IdentifierSet(
+            [Identifier(subject, i) for subject in subjects for i in impressions[subject]]
+        )
+        expected = pairs_by_the_rule(impressions, 10, 5)
+        drawn_from.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(train_500k, "random", types.SimpleNamespace(Random=Recording))
+            found = pairs(train_500k.create_table_validation_benchmark(validation, 10, 5))
+        assert found == expected, count
+        # One draw per subject, from the places of the others, not from a list of them
+        assert len(drawn_from) == count
+        assert all(type(places) is range and len(places) == count - 1 for places in drawn_from)
+
+
 # ---------------------------------------------------------------------------
 # Small sets for the tests that do not fetch a sample
 # ---------------------------------------------------------------------------
@@ -1973,6 +2012,8 @@ def test_the_options_of_a_table_are_refused_without_a_table(
     for option in options:
         assert option in message
     assert "can only be given together with --samples" in message
+    # Words that hold for the range test as well, which shares the refusal
+    assert "Without a table the minutiae come from the .mnt files in --minutiae_dir." in message
     assert "Give --samples as well (see docs/sample-table.md), or leave" in message
     assert not exists(tmp_path / "model")
     # Control: the same command without them
@@ -2962,6 +3003,207 @@ def test_columns_that_the_code_does_not_know_are_named_and_not_used(
     assert "Training complete! 1 epoch(s) trained in this run, 3 in the log." in lines
 
 
+@pytest.mark.parametrize("rank", ["0", "1"])
+@pytest.mark.parametrize("how", ["renamed", "removed and copied", "its part written again"])
+def test_a_table_that_is_replaced_while_the_training_starts_stops_it(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys, rank, how
+):
+    """
+    Every process of a training reads the table by itself, and nothing
+    compares what they read. A table that is replaced at its path while the
+    processes start can give them two tables: the old directory renamed away
+    and a new one renamed into its place, as the builder publishes a table;
+    the old one removed and a new one copied to the path, where the new
+    directory and its files can get the inode numbers of the old ones back;
+    or the part of the table written again in its place, under its name. So
+    every process looks at the end of its start whether the directory at
+    --samples and the parts of the table in it are those that were there
+    before it read the table, and stops if not, before anything is written.
+    """
+    monkeypatch.setenv("RANK", rank)
+    os.symlink(grid_set / "images", tmp_path / "images")
+    # Two directories of the same rows, in files of the same names and sizes:
+    # what tells them apart is what the check looks at, and nothing else
+    for name in ("table", "new table"):
+        shutil.copytree(grid_set / "table", tmp_path / name)
+    (part,) = os.listdir(tmp_path / "table")
+    check_table_files = train_500k.check_table_files
+
+    def replace_the_table_then_check(table, rows=None):
+        made_later_than(tmp_path, os.stat(tmp_path / "table" / part).st_ctime_ns)
+        if how == "renamed":
+            os.rename(tmp_path / "table", tmp_path / "old table")
+            os.rename(tmp_path / "new table", tmp_path / "table")
+        elif how == "removed and copied":
+            shutil.rmtree(tmp_path / "table")
+            shutil.copytree(tmp_path / "new table", tmp_path / "table")
+        else:
+            shutil.copyfile(tmp_path / "new table" / part, tmp_path / "table" / part)
+        check_table_files(table, rows)
+
+    split = ["--validation_split", 0]
+    with monkeypatch.context() as patch:
+        patch.setattr(train_500k, "check_table_files", replace_the_table_then_check)
+        found = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *split)
+    assert found == replaced_table(tmp_path / "table")
+    # Control: the same start without the replacement trains
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split)
+    assert len(fake.fits) == 1
+
+
+def replaced_table(table) -> str:
+    """The refusal of a start during which the table was replaced, on one line."""
+    return (
+        f"ERROR: The sample table {table} was replaced while the training started: the directory "
+        "at that path, or the parts of the table in it, are not those that were there before "
+        "the table was read (a part whose permissions, times or links were changed counts as "
+        "replaced), or there is no directory. Every process of a training reads the table by "
+        "itself, so they could have read different tables. Start the training again. To train "
+        "from a new table, build it into a new directory and give that one, instead of putting "
+        "it in the place of a table that a training reads."
+    )
+
+
+def made_later_than(directory, change_time: int) -> None:
+    """
+    Waits until a file that is made in the directory gets a later time of
+    the last change of its inode (st_ctime) than change_time. How fine these
+    times are differs between file systems: on some, files that are made
+    within the same second have the same time.
+    """
+    probe = join(directory, "probe")
+    while True:
+        with open(probe, "wb"):
+            pass
+        later = os.stat(probe).st_ctime_ns > change_time
+        os.remove(probe)
+        if later:
+            return
+        time.sleep(0.01)
+
+
+def test_a_directory_that_the_first_process_makes_in_the_table_does_not_stop_the_others(
+    train_500k, grid_set, tmp_path, monkeypatch
+):
+    """
+    Every process of a training makes --output_dir as soon as its own start
+    is over. Where --output_dir lies in the directory of the table, the first
+    process makes it there while the others may still check: that is no
+    other table, and their start goes on. (It changes the time of the last
+    change of the directory, which is why that time is not what tells two
+    tables apart.)
+    """
+    monkeypatch.setenv("RANK", "1")
+    os.symlink(grid_set / "images", tmp_path / "images")
+    shutil.copytree(grid_set / "table", tmp_path / "table")
+    check_table_files = train_500k.check_table_files
+
+    def make_the_output_dir_then_check(table, rows=None):
+        os.mkdir(tmp_path / "table" / "model")
+        check_table_files(table, rows)
+
+    monkeypatch.setattr(train_500k, "check_table_files", make_the_output_dir_then_check)
+    split = ["--validation_split", 0]
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split, output=join("table", "model"))
+    assert len(fake.fits) == 1
+
+
+def test_a_table_that_is_replaced_while_it_is_read_stops_the_start(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys
+):
+    """
+    The reader reads the table that was at the path when it began, through
+    the directory that it opened, and reads it whole also if the table is
+    replaced meanwhile. So the start takes the directory at --samples and its
+    parts before it reads the table, and a table that is replaced while it is
+    read stops the start, as one that is replaced later. (Taken after the
+    read, they would be those of the new table, and the process would train
+    the old one while the new one is at the path.)
+    """
+    os.symlink(grid_set / "images", tmp_path / "images")
+    for name in ("table", "new table"):
+        shutil.copytree(grid_set / "table", tmp_path / name)
+    read_sample_table = train_500k.read_sample_table
+
+    def read_then_replace(samples_dir, dataset_dir):
+        table = read_sample_table(samples_dir, dataset_dir)
+        # The table is read, and the function has not returned yet
+        os.rename(tmp_path / "table", tmp_path / "old table")
+        os.rename(tmp_path / "new table", tmp_path / "table")
+        return table
+
+    split = ["--validation_split", 0]
+    with monkeypatch.context() as patch:
+        patch.setattr(train_500k, "read_sample_table", read_then_replace)
+        found = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, *split)
+    assert found == replaced_table(tmp_path / "table")
+    # Control: the same start without the replacement trains
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split)
+    assert len(fake.fits) == 1
+
+
+@pytest.mark.parametrize(
+    "rank, written",
+    [
+        ("0", "the output of the run, redirected into a file there"),
+        ("1", "the settings files of the first process, whose --output_dir is the table"),
+        ("1", "the swap file of an editor"),
+    ],
+)
+def test_a_file_that_is_no_part_of_the_table_does_not_stop_the_start(
+    train_500k, grid_set, tmp_path, monkeypatch, rank, written
+):
+    """
+    The start looks at the directory of the table and at its parts, the files
+    that the reader reads, and at nothing else that the directory holds:
+    other files there change nothing that is read. A run whose output is
+    redirected into a file in the directory of the table writes that file
+    while it starts. Where --output_dir is the directory of the table, the
+    first process of a training writes its two settings files there as soon
+    as its own start is over, while the others may still check. An editor
+    that opens a log of the build makes a swap file beside it.
+    """
+    monkeypatch.setenv("RANK", rank)
+    os.symlink(grid_set / "images", tmp_path / "images")
+    shutil.copytree(grid_set / "table", tmp_path / "table")
+    table_dir = tmp_path / "table"
+    split = ["--validation_split", 0]
+    output = "model"
+    if written.startswith("the output"):
+        # The file is there before the run begins, as the shell makes it, and
+        # every line that the start prints is written to it at once
+        with open(table_dir / "train.log", "w", buffering=1) as log:
+            with contextlib.redirect_stdout(log):
+                fake = run_table(train_500k, monkeypatch, tmp_path, *split)
+        with open(table_dir / "train.log") as log:
+            assert log.readline() == f"Reading the sample table {table_dir}...\n"
+        assert len(fake.fits) == 1
+        return
+    if written.startswith("the settings"):
+        # What the first process stores, from a start of its own
+        monkeypatch.setenv("RANK", "0")
+        run_table(train_500k, monkeypatch, tmp_path, *split, output="first")
+        monkeypatch.setenv("RANK", rank)
+        settings = stored_settings(tmp_path, "first")
+        output = "table"
+    check_table_files = train_500k.check_table_files
+
+    def write_then_check(table, rows=None):
+        if written.startswith("the settings"):
+            with monkeypatch.context() as patch:
+                patch.setenv("RANK", "0")
+                train_500k.store_training_settings(str(table_dir), settings)
+        else:
+            (table_dir / ".build_warnings.txt.swp").write_bytes(b"\0" * 4096)
+        check_table_files(table, rows)
+
+    monkeypatch.setattr(train_500k, "check_table_files", write_then_check)
+    fake = run_table(train_500k, monkeypatch, tmp_path, *split, output=output)
+    assert len(fake.fits) == 1
+    if written.startswith("the settings"):
+        assert {"training_settings.json", "data_preparation.json"} <= set(os.listdir(table_dir))
+
+
 # ---------------------------------------------------------------------------
 # Minutiae: which variant is trained, and rows without minutiae
 # ---------------------------------------------------------------------------
@@ -3103,6 +3345,12 @@ def test_the_start_says_how_many_files_failed_when_the_table_was_built(
     table = table_of([(0, 0), (0, 1)])
     for build_info, expected in (
         ({"failed": ["a.png", "b.png", "c.png"]}, "3 file(s) failed when the table was built;"),
+        # Lists are counted by their length, as --check of the builder counts them
+        (
+            {"failed": ["c.png"], "files": ["a.png", "b.png", "c.png"]},
+            "1 file(s) failed when the table was built: 1 without a row (they are not in the "
+            "table), 0 with a row without minutiae;",
+        ),
         ({"failed": 2, "files": 3}, "2 file(s) failed when the table was built: 1 without"),
         ({"failed": 2, "files": 9}, "2 file(s) failed when the table was built;"),
         ({"failed": 0, "files": 2}, None),
@@ -3375,7 +3623,8 @@ def test_the_resolution_of_the_training_images_is_counted_from_the_table(
         "6 dark ridges, from --ridges",
         "2 light ridges, from the manifest",
         "These are the sources of the build of the table (scripts/build_sample_table.py): to "
-        "change one, build the table again.",
+        "change one, build the table again. The options that these lines name are options of "
+        "that build, not of this command.",
     ]
     # The block comes after the files were checked and before the model is built
     assert lines[first - 1].startswith("Loaded 12 image files spread over the table")
@@ -4171,3 +4420,38 @@ def test_a_model_that_was_trained_from_a_table_is_not_loaded_without_one(
     assert len(built) == 1
     with pytest.raises(FileNotFoundError, match="training_settings.json"):
         train_500k.load_trained_model(str(tmp_path / "nothing"), images, samples=table_dir)
+
+
+def test_a_table_without_rows_is_refused_by_load_trained_model_as_by_the_training(
+    train_500k, grid_set, tmp_path, monkeypatch, capsys
+):
+    """
+    The format allows a table without rows, and the builder writes none. The
+    training and the range test refuse such a table in words, and so does
+    load_trained_model: there would be nothing to embed, and the lines that
+    combine the embeddings of its loader end in an assertion of their own.
+    """
+    from flx.preparation.sample_table import SampleTableError
+
+    # The training whose model is loaded is stored by the first process
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    images, output = str(grid_set / "images"), str(tmp_path / "model")
+    run_table(train_500k, monkeypatch, grid_set, "--validation_split", 0, output=output)
+    empty = str(tmp_path / "no rows")
+    write_part(empty, 0, 1, samples_from_rows([]), {"id": "no rows"})
+    built = []
+    monkeypatch.setattr(
+        train_500k, "create_extractor", lambda *a, **k: built.append(k) or _FakeExtractor()
+    )
+    monkeypatch.setattr(train_500k.torch_helpers, "load_model_parameters", lambda *a: None)
+    with pytest.raises(SampleTableError) as error:
+        train_500k.load_trained_model(output, images, samples=empty)
+    assert str(error.value) == (
+        f"The sample table {empty} holds no row, so there is nothing to embed. Build a table of "
+        "the image files to embed (scripts/build_sample_table.py)."
+    )
+    assert built == []  # refused before a model is built
+    # The training refuses the same table for the same reason
+    found = refused(run_table, train_500k, monkeypatch, capsys, tmp_path, table="no rows")
+    assert found.startswith(f"ERROR: The sample table {empty} holds no row, so there is nothing")

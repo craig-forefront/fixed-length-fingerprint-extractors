@@ -17,8 +17,10 @@ Read this before you rely on any number in them.
 - Everything was run on **one machine with 4 CPU cores and no GPU**.
 - The largest training set was **440 real fingerprint images**. The synthetic SFinGe images in this
   repository are example data to try the code on, nothing more.
-- **No accuracy, no GPU speed and no behaviour at large scale was measured.** Where a document gives a number,
-  it says what it was measured on; where something was only calculated or read from the code, it says so.
+- **No accuracy, no GPU speed and no behaviour at large scale was measured**, except the start of a training
+  and the reading of a sample table at one million synthetic rows
+  ([docs/sample-table.md](docs/sample-table.md#size-time-and-memory)). Where a document gives a number, it says
+  what it was measured on; where something was only calculated or read from the code, it says so.
 - [docs/measurements.md](docs/measurements.md) lists every run and what was not run.
 
 ## The route, and the two repositories
@@ -172,7 +174,7 @@ extractor comparison tools; no document, test or module uses them.
 python -m pytest -q
 ```
 
-952 tests, CPU only. Without the package pyarrow (`pip install -e ".[table]"`) the tests of the sample table
+984 tests, CPU only. Without the package pyarrow (`pip install -e ".[table]"`) the tests of the sample table
 skip themselves, and one test is skipped if the package `scikit-image` is not installed. `pytest` is one of the
 optional tools ([docs/installation.md](docs/installation.md)).
 
