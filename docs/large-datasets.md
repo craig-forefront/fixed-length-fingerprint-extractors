@@ -69,7 +69,8 @@ in the code (`setup_distributed` and `wrap_model_ddp` in `flx/models/torch_helpe
 - Only the first process validates and writes `model.pyt`, `best_model.pyt` and the log.
 - The centers of the center loss are kept per process and are not synchronised; the copy of the first process is
   saved.
-- Every process scans the dataset directory and builds the identifier lists itself, see
+- Every process scans the dataset directory and builds the identifier lists itself (with a sample table it reads
+  the table and lists the image directories), see
   [Above about one million subjects](#above-about-one-million-subjects).
 - The same command again continues the training; a new `--output_dir` starts a new one
   ([Step 7](training-guide.md#step-7-continue-a-training-or-start-again)).
@@ -141,7 +142,10 @@ While `model.pyt` or `best_model.pyt` is written, a third file of the same size 
 
 Images and minutiae are one file each, so a dataset needs two inodes (file entries of the file system) per
 image; check `df -i` on the file system before you copy tens of millions of files. At 200 kB per rolled print,
-1 million images are about 200 GB and 100 million about 20 TB (calculated).
+1 million images are about 200 GB and 100 million about 20 TB (calculated). A sample table holds the minutiae
+of all images in a few files: 565.5 bytes per image with 46 minutiae each (measured on synthetic minutiae,
+[sample-table.md](sample-table.md#size-time-and-memory)); a training from a table reads no `.mnt` file, but the
+images stay one file each.
 
 ---
 
@@ -179,6 +183,8 @@ then tries anyway.
 |------|------|--------|
 | Start of `scripts/train_500k.py` (directory scans, identifier lists, datasets) | 22 seconds and 1.6 GB peak for 1 million images and 1 million `.mnt` files on a warm local disk | measured (one run, empty files, an earlier version that scanned the image directory twice) |
 | The same at 100 million images | about 37 minutes and 110 GB, in every GPU process | calculated (linear) |
+| Start of `scripts/train_500k.py` of this version to the call of `fit` (every check passed, the model not built), variant with minutiae | 21 to 30 seconds and a peak of 1.20 GB without a sample table (1 million images and 1 million `.mnt` files, `--ppi` given); 7.7 to 10.5 seconds and 1.33 to 1.34 GB with a sample table of the same images | measured, the machine otherwise idle (synthetic rows, empty image files in the page cache; GB here = 10^9 bytes); conditions in [sample-table.md](sample-table.md#size-time-and-memory) |
+| A sample table in every GPU process | 635 MB of arrays for 1 million images with 46 minutiae each, and an identifier object per image | measured |
 | The identifier lists alone | 1.0 GB and 5.8 seconds for 3.95 million identifiers | measured |
 | A data-loader worker process that has touched every identifier | 95 MB per million images | measured |
 | Resolution manifest with one row per file | 186 bytes per row in every process | measured (1 million rows) |
@@ -188,19 +194,24 @@ then tries anyway.
 
 **What the code cannot do today** (read from the code)
 
-- **Sets that are not a complete grid.** Every subject needs the same number of impressions, numbered without gaps
-  ([Step 1](training-guide.md#step-1-lay-out-the-files)). Fingers with different numbers of images cannot be
-  expressed. A set in which every finger has one image can be trained, but only without validation
-  (`--num_impressions 1 --validation_split 0`).
+- **Sets that are not a complete grid, without a sample table.** Without a table every subject needs the same
+  number of impressions, numbered without gaps ([Step 1](training-guide.md#step-1-lay-out-the-files)), and
+  fingers with different numbers of images cannot be expressed. A sample table describes such sets
+  ([sample-table.md](sample-table.md)); nothing balances them (see "Balanced sampling" below). A set in which
+  every finger has one image can be trained, but only without validation (`--num_impressions 1
+  --validation_split 0`, or `--validation_split 0` with a table).
 - **Lists that do not fit in memory.** Identifiers are Python objects, held in every GPU process and compared as
   sets when the datasets are built. Every process walks the image directory once and the minutiae directory
-  twice. There is no manifest of the dataset on disk and no shard format; every sample is two small files.
+  twice; with a sample table it reads the whole table instead, lists the image directories, and holds the
+  minutiae of all images in memory. A sample table describes the dataset on disk, but there is no shard format
+  for the pixels: every image is a file of its own.
 - **Checkpoints inside an epoch.** `model.pyt` is written once per epoch (under a temporary name and then
   renamed, so a crash during the write keeps the file of the epoch before). A crash loses up to one epoch, which
   is days at this size. The step inside the epoch and the state of mixed precision are not saved.
 - **A classifier or centers that are shared between GPUs.** See above; the centers are per process.
 - **Balanced sampling.** Images are drawn uniformly, so fingers with many images would dominate if the grid
-  did not force equal numbers.
+  did not force equal numbers. A sample table allows uneven sets, and nothing balances them: there, fingers
+  with many images dominate, in training and in validation.
 
 **Validation**
 
@@ -212,14 +223,16 @@ then tries anyway.
 - Therefore `--max_validation_subjects` defaults to **5,000**. With 10 impressions each that is 275,000 pairs,
   scored in under a second (measured), and about 50,000 images to prepare per validation, roughly 50 minutes on
   16 CPU cores for rolled prints (calculated). `--max_validation_subjects 0` removes the limit; the script warns
-  above 5,000.
+  above 5,000 (with a sample table, above 50,000 validation images or 275,000 pairs instead:
+  [sample-table.md](sample-table.md#the-range-test-and-the-training-from-a-table)).
 - Each subject gets 10 non-mated pairs. That is enough to choose the best epoch, not to measure the low false
   match rates that matter in a gallery of millions.
 
 **What to do with a dataset of this size, with the code as it is**
 
 1. Train on a subset first: up to about one million subjects, chosen at random across all sensors, with a
-   complete grid of impressions. Everything in the training guide applies to it.
+   complete grid of impressions or described in a sample table ([sample-table.md](sample-table.md)). Everything
+   in the training guide applies to it.
 2. On the first GPU run, measure what this section could only calculate: the memory per GPU, the time of one
    step, and how many CPU cores one GPU needs to stay busy. Time 200 steps before you start an epoch.
 3. Ask whether the collection already has minutiae from its capture or matching system. That would replace the
@@ -227,7 +240,7 @@ then tries anyway.
    files is not written.)
 4. Training on all subjects of a collection with more than a few million fingers needs changes to the model and
    the data pipeline that are not in this repository: a classifier that scores a sample of the subjects in each
-   step and is split over the GPUs (with a loss that needs no centers), a manifest of the dataset on disk with
-   shards instead of two files per sample, binarising the images once instead of in every epoch, and
-   checkpoints inside an epoch. None of them has been built or measured here, and what they do to accuracy is
-   not known.
+   step and is split over the GPUs (with a loss that needs no centers), shards of the pixels instead of one file
+   per image (a sample table describes the dataset on disk, but holds no pixels), binarising the images once
+   instead of in every epoch, and checkpoints inside an epoch. None of them has been built or measured here, and
+   what they do to accuracy is not known.

@@ -37,7 +37,10 @@ Resolution (ppi = pixels per inch):
 
     The minutiae are written in the pixels of the 500 ppi image, and the header
     of the .mnt file holds its size. scripts/train_500k.py loads the images in
-    the same way (same options), so the minutiae fit the training images.
+    the same way (same options), so the minutiae fit the training images. With
+    a sample table (docs/sample-table.md) the options are given to
+    scripts/build_sample_table.py instead, which records for every file how it
+    was prepared; the range test and the training then take that from the table.
 
 Ridge polarity:
     The extractor expects dark ridges on a light background.

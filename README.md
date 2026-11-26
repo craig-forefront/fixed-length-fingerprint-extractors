@@ -5,7 +5,8 @@ that turns one fingerprint image into a list of numbers of fixed length (an *emb
 compared by comparing their embeddings.
 
 The repository holds the package, three scripts that take you from a directory of your own fingerprint
-images to a trained model, and the documents below. It began as the code of a BIOSIG 2023 paper
+images to a trained model, a fourth that describes a training set whose files do not fit the expected layout in
+a *sample table*, and the documents below. It began as the code of a BIOSIG 2023 paper
 ([docs/paper.md](docs/paper.md)). For the model variants that use minutiae it works together with a second
 repository, the [minutiae extractor](https://github.com/craig-forefront/minutiae_extractor).
 
@@ -27,6 +28,7 @@ Read this before you rely on any number in them.
 | 1. Lay out the images and say which resolution each file has | you | | [training guide](docs/training-guide.md), Steps 1 and 2 |
 | 2. Bring every image to 500 ppi (pixels per inch) with dark ridges | this repository, inside the scripts (`SensorNormalizer`) | both | Step 2 |
 | 3. Find the minutiae (only for the model variants with minutiae) | this repository's `scripts/extract_minutiae.py`, which calls the package `fingerflow` of the **minutiae extractor** repository and needs its two model files | extraction (TensorFlow) | Step 4 |
+| 3a. Only for a set that does not fit the layout of step 1 (other file names, uneven numbers of images per finger): describe the files in a sample table | `scripts/build_sample_table.py` | training (PyTorch, pyarrow) | [docs/sample-table.md](docs/sample-table.md) |
 | 4. Find a learning rate, train | `scripts/find_learning_rate.py`, `scripts/train_500k.py` | training (PyTorch) | Steps 5 to 8 |
 | 5. Compute embeddings, compare prints | `load_trained_model` in `scripts/train_500k.py`, `flx.benchmarks` | training (PyTorch) | Steps 9 and 10 |
 
@@ -52,8 +54,9 @@ pip install -e .
 ```
 
 Python 3.11 or higher is required. [docs/installation.md](docs/installation.md) has the full instructions: the
-CPU-only build of PyTorch, the optional tools for tests and notebooks, the second environment for the minutiae
-extraction, and the installation on a machine without network access (air-gapped).
+CPU-only build of PyTorch, the optional tools for tests and notebooks, the optional package pyarrow for a sample
+table, the second environment for the minutiae extraction, and the installation on a machine without network
+access (air-gapped).
 
 ## Shortest working example
 
@@ -87,6 +90,7 @@ from the start.
 |----------|----------------|--------------|
 | [docs/installation.md](docs/installation.md) | The two environments, with network access or air-gapped; how to get and check the minutiae extractor | First |
 | [docs/training-guide.md](docs/training-guide.md) | The route step by step: file layout, resolution of the files, minutiae extraction, learning rate, training, continuing, embeddings, benchmark; troubleshooting; file formats | Second; follow it on a small part of your data |
+| [docs/sample-table.md](docs/sample-table.md) | The sample table: a training set described in Parquet files, for file names, image formats and numbers of images per finger that the layout of the training guide does not take; building and checking a table, training from it, its size and speed at one million images | When your files do not fit Step 1 of the training guide |
 | [docs/tuning.md](docs/tuning.md) | Learning rate, loss weights and learned alignment: what each setting is, what to watch, how to decide on your data | Before the first long training |
 | [docs/large-datasets.md](docs/large-datasets.md) | Several GPUs, what limits the speed, storage, and what the code cannot do above about one million fingers | Before you plan more than a few hundred thousand images |
 | [docs/measurements.md](docs/measurements.md) | The evidence: every measured table, what was run, what was not, and what changed against earlier versions of the code | When you want to know what a statement rests on, or have files from an earlier version |
@@ -102,6 +106,7 @@ from the start.
 | `scripts/extract_minutiae.py` | **the route** | Writes one minutiae file (`.mnt`) per image; can continue an interrupted run and work in parts on many machines |
 | `scripts/find_learning_rate.py` | **the route** | Short test that suggests a learning rate before a training |
 | `scripts/train_500k.py` | **the route** | Trains a DeepPrint variant; also holds `load_trained_model` for using the model |
+| `scripts/build_sample_table.py` | **the route**, for sets that do not fit the file layout | Builds a sample table of the image files and their `.mnt` files, which the range test and the training read with `--samples`, and checks a table (`--check`) |
 | `scripts/run_original_minutiaenet.py`, `scripts/run_fingerflow_minutiaenet.py`, `scripts/run_minutiae_extractor.py`, `scripts/compare_minutiae_outputs.py`, `scripts/visualize_three_way.py` | comparison of minutiae extractors | Development tools that compare three minutiae extractors. They expect directories that are not part of this repository, are not needed for training and were not run for these documents |
 | `flx/scripts/*.py` | the paper | Training, extraction, benchmarks, tables and plots of the paper's experiments on the paper's datasets ([docs/paper.md](docs/paper.md)). Not run for these documents |
 
@@ -130,8 +135,8 @@ So that you do not search for it:
     ├── docs                 <- The documents listed above
     ├── LICENSE
     ├── pyproject.toml       <- Makes the package installable (`pip install -e .`); lists the dependencies
-    ├── requirements.txt     <- The same dependencies plus the development tools, for `pip install -r`
-    ├── scripts              <- The three scripts of the route, and five tools that compare minutiae extractors
+    ├── requirements.txt     <- The same dependencies plus the development tools and pyarrow, for `pip install -r`
+    ├── scripts              <- The scripts of the route (three, and the builder of a sample table), and five tools that compare minutiae extractors
     ├── notebooks            <- Tutorials, and `example-dataset` (100 synthetic SFinGe images with minutiae)
     ├── figures              <- Figures used by the documents
     ├── tests                <- Tests of the package and the scripts, with their data
@@ -152,7 +157,7 @@ So that you do not search for it:
         ├── extractor        <- Embedding extraction with the DeepPrint model
         ├── models           <- DeepPrint architectures, loss functions, training loop, learning rate
         ├── image_processing <- Data augmentation, contrast enhancement, binarisation, slap segmentation
-        ├── preparation      <- Images from different sensors (500 ppi, dark ridges) and the minutiae extraction
+        ├── preparation      <- Images from different sensors (500 ppi, dark ridges), the minutiae extraction, the sample table
         ├── reweighting      <- Reweighting of embedding dimensions after extraction (paper)
         ├── scripts          <- Scripts of the paper's experiments
         ├── setup            <- Settings (`config.py`), predefined models and datasets of the paper
@@ -167,8 +172,9 @@ extractor comparison tools; no document, test or module uses them.
 python -m pytest -q
 ```
 
-358 tests, CPU only. One of them is skipped if the package `scikit-image` is not installed. `pytest` is one
-of the optional tools ([docs/installation.md](docs/installation.md)).
+952 tests, CPU only. Without the package pyarrow (`pip install -e ".[table]"`) the tests of the sample table
+skip themselves, and one test is skipped if the package `scikit-image` is not installed. `pytest` is one of the
+optional tools ([docs/installation.md](docs/installation.md)).
 
 ## Credit to other authors
 

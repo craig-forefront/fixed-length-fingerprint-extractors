@@ -117,8 +117,11 @@ Failures and warnings:
                                 that is missing or was refused
         build_warnings.txt      images that look different from the ridge
                                 polarity they were taken to have, .mnt files
-                                without a header, and .mnt files that hold
+                                without a header, and .mnt files without the
+                                comment line of the extraction that hold
                                 fewer minutiae than their first line says
+                                (one that ends with that line is refused:
+                                the line is read where a minutia belongs)
 
     A log without lines is not kept. The exit status is 0, or 1 if any file
     has a line in the failures log (the table is written all the same), or 2
@@ -130,8 +133,11 @@ Failures and warnings:
     written, for example) is printed with its traceback and ends the script
     with the status 2 as well. So a build that ends with 0 or 1 has written
     its table, and one that ends with 2 has not. A build that is interrupted
-    ends with neither 0 nor 1, and so does a build that fails because its
-    output cannot be written any more (the reader of a pipe went away).
+    ends with neither 0 nor 1 and writes no table. A build whose output goes
+    into a pipe that is closed before its end (| head) ends with 2 and no
+    table where a line of the build could not be written, and with 120 where
+    only Python's last output could not be: then the table is written, and
+    --check says what it holds.
     These are the statuses of a script that started: where a package that it
     imports is missing (PyTorch in the environment of the minutiae
     extractor, for example), Python ends with a traceback and its own status

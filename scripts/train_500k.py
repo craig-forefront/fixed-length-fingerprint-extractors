@@ -16,7 +16,8 @@ One GPU (or the CPU):
 Several GPUs: the same options after
     torchrun --nproc_per_node=NUM_GPUS scripts/train_500k.py ...
 
-Without --minutiae_dir the texture-only variant is trained.
+Without --minutiae_dir the texture-only variant is trained; with --samples the
+table decides (see below).
 
 Layout of the files:
     --dataset_dir holds the images as <subject>_<impression>.png, directly
@@ -113,7 +114,8 @@ Continuing and starting again:
     again from nothing, use a new --output_dir (or delete the old one).
 
     A continued training must be the same training. The script stops if the
-    model variant (--localization, --minutiae_dir), --embedding_dim, the
+    model variant (--localization, --minutiae_dir, or with --samples the table
+    and --ignore_minutiae), --embedding_dim, the
     subjects and the validation split, --batch_size or the image preparation
     differ from training_settings.json. Learning rate options, loss weights,
     --num_epochs and --patience may change; the script lists the changes and
@@ -177,7 +179,9 @@ Learned alignment (see "Learned alignment" in docs/tuning.md):
 
     --localization on               train with the localization network
                                     (DeepPrint_LocTexMinu with --minutiae_dir,
-                                    DeepPrint_LocTex without); the default
+                                    or with minutiae in the table of --samples
+                                    and no --ignore_minutiae; DeepPrint_LocTex
+                                    without); the default
     --localization off              train without it (DeepPrint_TexMinu or
                                     DeepPrint_Tex); everything else is the same
     --localization_lr_factor 0.035  the localization network uses the learning
@@ -1794,7 +1798,8 @@ def load_trained_model(
     Args:
         output_dir: The --output_dir of the training
         dataset_dir: Directory with the images to embed, in the layout that
-            this script reads (<subject>_<impression>.png)
+            this script reads (<subject>_<impression>.png), or with any
+            names that the sample table of samples gives
         ppi_manifest: Manifest for the images in dataset_dir, if the training
             used one. None uses the path that the training was given, which
             only fits if dataset_dir is the directory of the training.
@@ -2385,7 +2390,8 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=NUM_EPOCHS,
                         help=f"Number of training epochs (default: {NUM_EPOCHS})")
     parser.add_argument("--embedding_dim", type=int, default=EMBEDDING_DIM,
-                        help="Embedding dimensions PER BRANCH. With --minutiae_dir the model "
+                        help="Embedding dimensions PER BRANCH. With --minutiae_dir (or minutiae "
+                             "in the table of --samples, without --ignore_minutiae) the model "
                              "has a texture and a minutia branch, so the embedding of a print "
                              f"has twice this many values (default: {EMBEDDING_DIM}, that is "
                              f"{2 * EMBEDDING_DIM} in total with minutiae)")
@@ -2444,7 +2450,8 @@ def main():
                              "loss (default: LOSS_WEIGHT_CENTER in flx/setup/config.py)")
     parser.add_argument("--loss_weight_minutia_map", type=float, default=None,
                         help="Factor of the minutia map loss in the training loss, used with "
-                             "--minutiae_dir (default: LOSS_WEIGHT_MINUTIA_MAP in "
+                             "--minutiae_dir, or with minutiae in the table of --samples and "
+                             "without --ignore_minutiae (default: LOSS_WEIGHT_MINUTIA_MAP in "
                              "flx/setup/config.py)")
     sensor_normalization.add_arguments(parser)
     parser.add_argument("--canvas_size", type=int, default=0,

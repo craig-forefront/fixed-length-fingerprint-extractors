@@ -19,8 +19,10 @@ and what was not measured. The how-to documents quote only the conclusions and l
   nothing.
 - **Anything on a GPU**: speed, memory, mixed precision, a batch of 64 images, several GPUs (`torchrun`).
 - **A long training.** The longest run was 300 steps of 8 images.
-- **A large dataset.** Figures for more than 440 training images are calculations or timings of file lists,
-  and are marked as such in [large-datasets.md](large-datasets.md).
+- **A large dataset.** Figures for more than 440 training images are calculations, timings of file lists, or
+  timings of the start of a training on one million synthetic rows with a model that does nothing (the sample
+  table), and are marked as such in [large-datasets.md](large-datasets.md) and
+  [sample-table.md](sample-table.md#size-time-and-memory).
 - **Latent prints, and tenprint decisions.**
 
 ## Contents
@@ -499,8 +501,28 @@ runs the loss fell while every image was empty.
 ## Large datasets
 
 What was measured, calculated and only read from the code about memory, start-up time, image preparation
-speed and storage is in the tables of [large-datasets.md](large-datasets.md), with each figure marked. Nothing
-was run with more than 440 training images.
+speed and storage is in the tables of [large-datasets.md](large-datasets.md), with each figure marked. No
+training was run on more than 440 images.
+
+**The sample table at one million rows.** Measured for the sample table on the machine of these documents,
+while it was otherwise idle: 100,000 synthetic subjects with 10 rows each and 46 minutiae per row, empty image files but for
+600 hard links to one example image, the files in the page cache, a model that does nothing in the place of the
+real one; the builder ran on 8,000 PNG files, copies of the example images. Each figure is the range over all
+runs of its kind; the reading, the starts and the builder were taken by two harnesses that were written
+independently of each other (the speed of the CPU varied between series of runs by up to a third). MB = 10^6
+bytes. The conditions of each figure are in [Size, time and memory](sample-table.md#size-time-and-memory) of
+sample-table.md.
+
+| What | Without a sample table | With a sample table |
+|------|------------------------|---------------------|
+| The minutiae on the disk | 1,000,000 `.mnt` files, 1,763.8 bytes each on average, 4,096 bytes of the disk each | 4 files, 565.5 bytes per row |
+| Reading and checking the table | | 1.4 to 2.2 s, peak of the process 1,022 to 1,031 MB (a process without PyTorch) |
+| Start of `scripts/train_500k.py` to the call of `fit`, the variant with minutiae (without a table with `--ppi 500`) | 21.1 to 30.4 s, peak 1,198 to 1,205 MB | 7.7 to 10.5 s, peak 1,330 to 1,339 MB |
+| What one forked worker process adds, batches of 16, 384 items | 82 to 88 MB | about 51 MB |
+| `scripts/build_sample_table.py`, 292x392 PNG files, files per second | | 536 to 656 with one process, 1,742 to 2,117 with four workers (8,000 files) |
+
+Not measured: a GPU, real prints, the model built, a whole epoch, several worker processes at once, a start from
+a cold disk (beyond a few runs right after the machine dropped its page cache).
 
 ---
 
@@ -546,9 +568,32 @@ PyTorch 2.15.0, CPU build).
 | `notebooks/dataset_tutorial.ipynb`, executed with `jupyter nbconvert --execute` | as stored | all cells ran |
 | `notebooks/model_training_tutorial.ipynb`, executed the same way | `num_epochs=2` in place of 20 in both training cells | first attempt: the first training cell was stopped by the operating system for lack of memory (more than 12 GB; the 50 images form one batch). Second attempt with the two commented lines of that cell active (batch of 16): both trainings ran (`TexMinu`, `LocTexMinu`) |
 | `notebooks/embedding_generation_tutorial.ipynb`, executed the same way | the `TexMinu` model of the run before | all cells but the last ran ("Loaded best model", an equal error rate of 0.48 that means nothing); the last cell (DET curve) failed with `ImportError: cannot import name 'common_texification'` from `tikzplotlib` 0.10.1 with matplotlib 3.11.2 |
-| `python -m pytest -q` | | 358 passed in an environment that has `scikit-image`; 357 passed and 1 skipped in the environment of Part A1, which does not |
+| `python -m pytest -q` | | 358 passed in an environment that has `scikit-image`; 357 passed and 1 skipped in the environment of Part A1, which does not (the tests as they were before the sample table) |
 
 What was run of the installation is listed at the end of [installation.md](installation.md).
+
+### Runs for the sample table
+
+Made for [sample-table.md](sample-table.md) on the same machine (Python 3.11.18, PyTorch 2.15.0, CPU build,
+pyarrow 26.0.1, OpenCV 5.1.0), the scripts started with `PYTHONPATH` set to the repository in the
+place of the installed package, except where a row says otherwise. The images are the synthetic SFinGe example
+images of this repository, copies of them and the two prints in its root directory; the trainings were a few
+steps long. These runs show what the commands do, and nothing about accuracy. The last section of
+sample-table.md lists every run and what was not run.
+
+| Command or snippet | Run on | Result |
+|--------------------|--------|--------|
+| `scripts/build_sample_table.py`, `--check`, the range test and the training from the table | 12 files of 6 fingers in three directories (as they are, taken as 500 ppi; enlarged to 584x784, declared as 1000 ppi; negatives with light ridges), a manifest of three rows, `--ridges auto`, no `.mnt` files | exit status 0 for all; the builder wrote the same part byte for byte with 1, 2 and 4 workers |
+| The same training without a table and from the table, `random`, numpy and torch seeded with 0 from outside, 2 epochs | the same 12 files | the same `model.pyt`, `best_model.pyt` and `log.json`, byte for byte (without a table twice); the range test, started without the seeding, wrote the same `lr_range_test.csv` in both modes |
+| Continuing from a table: the same command again, one more epoch, after Ctrl-C, with another table, with a copy of the table, with and without a table | the same | nothing trained; one more epoch; continued with the next epoch; refused (exit status 2); accepted as the same training; refused both ways (exit status 2) |
+| A set that only a table describes: a sample list, other names, PNG, BMP and TIFF files, subject numbers with gaps, fingers with 3, 3, 2, 2, 1, 1, 1 and 1 images; build, `--check`, range test, training | 14 files (12 made from the example images, the 2 prints of the root directory) | exit status 0; no finger with one image was held out with any of 1,000 validation seeds; the training without a table refused the directory |
+| Refusals and failures: builds that fail or are refused, image files missing or changed after the build, damaged tables | the sets above | the messages of the troubleshooting of sample-table.md. Every byte of a part changed once on its own: 8,697 of 9,458 refused, 761 read unchanged, none read as other values |
+| pyarrow without network access, and the scripts with the package installed instead of `PYTHONPATH` | a copy of the repository | see [installation.md](installation.md); the files of the runs above, byte for byte |
+| A `TMPDIR` with a path of 139, 76 and 75 bytes, worker processes | the 12 files | 139 bytes: the range test and the training from the table, and the range test without a table, stood still with `OSError: AF_UNIX path too long`; the range test from the table at 76 bytes stood still, at 75 bytes it ended |
+| A table, and images, at a path with letters outside ASCII in processes whose file names are ASCII or ISO-8859-1 | the 12 and the 14 files | the table: exit status 0; the images: a segmentation fault of OpenCV (ASCII) or refusals with causes that are not the cause (ISO-8859-1); with `PYTHONUTF8=1`: exit status 0 |
+| A table with `.mnt` files (46 minutiae per image drawn at random, written as the extraction writes them): build, the variant with minutiae (training and range test), rows without minutiae with and without `--tolerate_missing_minutiae`, `--ignore_minutiae`, `load_trained_model(..., samples=...)` | 40 files of 20 fingers made from the example images | all as sample-table.md describes; with the default batch size of 64, the range test and the training were ended by the memory limit of the runs (14.3 GB) after their first step and their first epoch |
+| The start of the training at one million rows, reading the table, a forked worker, the builder on 800 and 8,000 files, `--check` | synthetic rows, see [Large datasets](#large-datasets) | the figures there |
+| `python -m pytest -q` | | 952 passed in the environment of these runs; 951 passed and 1 skipped (scikit-image) in a new environment of Part A1 with the extra `table`, 396 passed and 170 skipped without it |
 
 ### Earlier runs, on real prints
 
